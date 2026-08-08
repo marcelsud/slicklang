@@ -30,7 +30,7 @@ func (p *program) resolveThrows(namespace string, aliases map[string]aliasDecl, 
 	for _, ref := range refs {
 		name, ok := p.resolveErrorIn(namespace, aliases, ref.name)
 		if !ok {
-			p.add(ref.pos, "SLK200", "%s does not name an Error type", ref.name)
+			p.add(ref.pos, diagnosticCodeErrorValue, "%s does not name an Error type", ref.name)
 			continue
 		}
 		if name != "Error" {
@@ -47,7 +47,7 @@ func (p *program) linkMethods() {
 		receiver := implementation.receiverCanonical
 		if receiver == "" {
 			if _, alias := implementation.aliases[implementation.receiver.name]; alias {
-				p.add(implementation.receiver.pos, "SLK315", "method receivers must use a local or absolute class name, not alias %s", implementation.receiver.name)
+				p.add(implementation.receiver.pos, diagnosticCodeAliasedMethodReceiver, "method receivers must use a local or absolute class name, not alias %s", implementation.receiver.name)
 				continue
 			}
 			receiver = implementation.receiver.name
@@ -57,7 +57,7 @@ func (p *program) linkMethods() {
 		}
 		class := p.classes[receiver]
 		if class == nil {
-			p.add(implementation.receiver.pos, "SLK314", "method receiver %s is not a class", implementation.receiver.name)
+			p.add(implementation.receiver.pos, diagnosticCodeMethodReceiver, "method receiver %s is not a class", implementation.receiver.name)
 			continue
 		}
 		if !p.requireAccess(implementation.receiver.pos, implementation.namespace, class.namespace, class.name, "class") {
@@ -67,17 +67,17 @@ func (p *program) linkMethods() {
 		implementation.qualified = receiver + "." + implementation.name
 
 		if !isPublic(implementation.name) && implementation.namespace != class.namespace {
-			p.add(implementation.pos, "SLK330", "method %s is private to %s; capitalize it to implement it from %s", implementation.name, class.namespace, implementation.namespace)
+			p.add(implementation.pos, diagnosticCodePrivateAccess, "method %s is private to %s; capitalize it to implement it from %s", implementation.name, class.namespace, implementation.namespace)
 			continue
 		}
 		if !implementation.inline {
 			switch class.extension {
 			case extensionNone:
-				p.add(implementation.pos, "SLK313", "%s does not allow detached method implementations", class.qualified)
+				p.add(implementation.pos, diagnosticCodeDetachedMethod, "%s does not allow detached method implementations", class.qualified)
 				continue
 			case extensionNamespace:
 				if implementation.namespace != class.namespace {
-					p.add(implementation.pos, "SLK313", "%s allows method implementations only from %s, not %s", class.qualified, class.namespace, implementation.namespace)
+					p.add(implementation.pos, diagnosticCodeDetachedMethod, "%s allows method implementations only from %s, not %s", class.qualified, class.namespace, implementation.namespace)
 					continue
 				}
 			}
@@ -85,22 +85,22 @@ func (p *program) linkMethods() {
 
 		contract := class.methods[implementation.name]
 		if contract == nil {
-			p.add(implementation.pos, "SLK314", "%s.%s is not declared by %s", class.qualified, implementation.name, class.qualified)
+			p.add(implementation.pos, diagnosticCodeMethodReceiver, "%s.%s is not declared by %s", class.qualified, implementation.name, class.qualified)
 			continue
 		}
 
 		if previous := class.implementations[implementation.name]; previous != nil {
 			if previous.documentation != nil && implementation.documentation != nil {
-				p.add(implementation.pos, "SLK392", "competing documentation for %s.%s", class.qualified, implementation.name)
+				p.add(implementation.pos, diagnosticCodeConflictingDocumentation, "competing documentation for %s.%s", class.qualified, implementation.name)
 			}
-			p.add(implementation.pos, "SLK311", "duplicate implementation of %s.%s; first implemented at %s:%d:%d", class.qualified, implementation.name, previous.pos.file, previous.pos.line, previous.pos.column)
+			p.add(implementation.pos, diagnosticCodeDuplicateMethod, "duplicate implementation of %s.%s; first implemented at %s:%d:%d", class.qualified, implementation.name, previous.pos.file, previous.pos.line, previous.pos.column)
 			continue
 		}
 		class.implementations[implementation.name] = implementation
 
 		class.effective[implementation.name] = contract
 		if mismatch := p.signatureMismatch(contract, implementation); mismatch != "" {
-			p.add(implementation.pos, "SLK312", "implementation of %s.%s does not match its declaration: %s", class.qualified, implementation.name, mismatch)
+			p.add(implementation.pos, diagnosticCodeMethodSignature, "implementation of %s.%s does not match its declaration: %s", class.qualified, implementation.name, mismatch)
 		}
 	}
 
@@ -108,7 +108,7 @@ func (p *program) linkMethods() {
 		for name, contract := range class.methods {
 			class.effective[name] = contract
 			if class.implementations[name] == nil {
-				p.add(contract.pos, "SLK310", "%s.%s has no implementation; implement it or remove its declaration", class.qualified, name)
+				p.add(contract.pos, diagnosticCodeMissingMethod, "%s.%s has no implementation; implement it or remove its declaration", class.qualified, name)
 			}
 		}
 	}

@@ -19,7 +19,7 @@ func (p *program) requireAccess(pos position, fromNamespace, ownerNamespace, nam
 	if canAccess(name, ownerNamespace, fromNamespace) {
 		return true
 	}
-	p.add(pos, "SLK330", "%s %s is private to %s; capitalize it to make it public", kind, name, ownerNamespace)
+	p.add(pos, diagnosticCodePrivateAccess, "%s %s is private to %s; capitalize it to make it public", kind, name, ownerNamespace)
 	return false
 }
 
@@ -76,11 +76,11 @@ func (p *program) checkTypeName(pos position, namespace, name string) {
 	case typeKindGeneric:
 		declaration, known := coreGenericType(parsed.base)
 		if !known {
-			p.add(pos, "SLK361", "unknown generic type %s", parsed.base)
+			p.add(pos, diagnosticCodeGenericType, "unknown generic type %s", parsed.base)
 		} else if len(parsed.args) != len(declaration.typeParams) {
 			p.addTypeArityDiagnostic(pos, parsed.base, len(declaration.typeParams), len(parsed.args))
 		} else if parsed.base == mapTypeName && !isMapKeyType(parsed.args[0]) {
-			p.add(pos, "SLK361", "Map key type must be string, int, or bool; found %s", displayName(parsed.args[0]))
+			p.add(pos, diagnosticCodeGenericType, "Map key type must be string, int, or bool; found %s", displayName(parsed.args[0]))
 		}
 		for _, arg := range parsed.args {
 			p.checkTypeName(pos, namespace, arg)
@@ -92,7 +92,7 @@ func (p *program) checkTypeName(pos position, namespace, name string) {
 		return
 	}
 	if strings.ContainsRune(name, '<') {
-		p.add(pos, "SLK361", "malformed generic type %s", name)
+		p.add(pos, diagnosticCodeGenericType, "malformed generic type %s", name)
 		return
 	}
 	if class := p.classes[name]; class != nil {
@@ -109,5 +109,5 @@ func (p *program) addTypeArityDiagnostic(pos position, name string, expected, ac
 	if expected == 1 {
 		argument = "argument"
 	}
-	p.add(pos, "SLK361", "%s takes %d type %s, found %d", name, expected, argument, actual)
+	p.add(pos, diagnosticCodeGenericType, "%s takes %d type %s, found %d", name, expected, argument, actual)
 }

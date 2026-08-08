@@ -38,7 +38,7 @@ func TestDescribeJSONOutputContract(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q", status, stderr.String())
 	}
 	want := `{
-  "schema_version": 3,
+  "schema_version": 4,
   "symbol": {
     "canonical_name": "std.env.Get",
     "kind": "function",
@@ -79,7 +79,7 @@ func TestDescribeUnknownJSONErrorContract(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q", status, stderr.String())
 	}
 	want := `{
-  "schema_version": 3,
+  "schema_version": 4,
   "error": {
     "code": "unknown_symbol",
     "message": "unknown symbol \"std.env.Missing\"",
@@ -98,10 +98,10 @@ func TestDescribeUsageErrorsStayOnStderr(t *testing.T) {
 	if status != 2 || stdout.Len() != 0 {
 		t.Fatalf("status=%d stdout=%q", status, stdout.String())
 	}
-	want := "describe requires a symbol\n" +
+	want := "describe requires a symbol or diagnostic code\n" +
 		"usage: slick <check|run> [path]\n" +
 		"       slick build [path] -o <output>\n" +
-		"       slick describe [--json] [--budget <lines>] <symbol> [path]\n" +
+		"       slick describe [--json] [--budget <lines>] <symbol|diagnostic-code> [path]\n" +
 		"       slick fmt [--check] [path]\n"
 	if stderr.String() != want {
 		t.Fatalf("usage stderr=%q, want %q", stderr.String(), want)
@@ -168,7 +168,7 @@ func TestDescribeJSONBudgetContract(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q", status, stderr.String())
 	}
 	want := `{
-  "schema_version": 3,
+  "schema_version": 4,
   "budget": {
     "unit": "lines",
     "limit": 39,

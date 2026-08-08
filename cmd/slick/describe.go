@@ -16,10 +16,17 @@ type describeErrorDocument struct {
 	Error         describeError `json:"error"`
 }
 
+type diagnosticDescriptionDocument struct {
+	SchemaVersion int    `json:"schema_version"`
+	Kind          string `json:"kind"`
+	compiler.DiagnosticDescription
+}
+
 type describeError struct {
 	Code        string               `json:"code"`
 	Message     string               `json:"message"`
 	Symbol      string               `json:"symbol,omitempty"`
+	Diagnostic  string               `json:"diagnostic,omitempty"`
 	Diagnostics []describeDiagnostic `json:"diagnostics,omitempty"`
 }
 
@@ -36,6 +43,14 @@ func runDescribe(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return reportUsageTo(stderr)
+	}
+
+	if compiler.IsDiagnosticCode(symbol) {
+		if path != "" {
+			fmt.Fprintf(stderr, "diagnostic code %s does not accept a project path\n", symbol)
+			return reportUsageTo(stderr)
+		}
+		return runDescribeDiagnostic(symbol, jsonOutput, stdout, stderr)
 	}
 
 	description, diagnostics, err := compiler.DescribePath(symbol, path)
@@ -103,6 +118,35 @@ func runDescribe(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func runDescribeDiagnostic(code string, jsonOutput bool, stdout, stderr io.Writer) int {
+	description, err := compiler.DescribeDiagnostic(code)
+	if err != nil {
+		if jsonOutput {
+			writeJSON(stdout, describeErrorDocument{
+				SchemaVersion: compiler.DescriptionSchemaVersion,
+				Error: describeError{
+					Code:       "unknown_diagnostic",
+					Message:    err.Error(),
+					Diagnostic: code,
+				},
+			})
+		} else {
+			fmt.Fprintln(stderr, err)
+		}
+		return 1
+	}
+	if jsonOutput {
+		writeJSON(stdout, diagnosticDescriptionDocument{
+			SchemaVersion:         compiler.DescriptionSchemaVersion,
+			Kind:                  "diagnostic",
+			DiagnosticDescription: description,
+		})
+	} else {
+		writeHumanDiagnosticDescription(stdout, description)
+	}
+	return 0
+}
+
 func parseDescribeArgs(args []string) (symbol, path string, jsonOutput bool, budget int, err error) {
 	positionals := make([]string, 0, 2)
 	budget = defaultDescribeBudget
@@ -136,7 +180,7 @@ func parseDescribeArgs(args []string) (symbol, path string, jsonOutput bool, bud
 		}
 	}
 	if len(positionals) == 0 {
-		return "", "", false, 0, errors.New("describe requires a symbol")
+		return "", "", false, 0, errors.New("describe requires a symbol or diagnostic code")
 	}
 	if len(positionals) > 2 {
 		return "", "", false, 0, fmt.Errorf("unexpected describe argument %q", positionals[2])
@@ -151,7 +195,7 @@ func parseDescribeArgs(args []string) (symbol, path string, jsonOutput bool, bud
 func reportUsageTo(stderr io.Writer) int {
 	fmt.Fprintln(stderr, "usage: slick <check|run> [path]")
 	fmt.Fprintln(stderr, "       slick build [path] -o <output>")
-	fmt.Fprintln(stderr, "       slick describe [--json] [--budget <lines>] <symbol> [path]")
+	fmt.Fprintln(stderr, "       slick describe [--json] [--budget <lines>] <symbol|diagnostic-code> [path]")
 	fmt.Fprintln(stderr, "       slick fmt [--check] [path]")
 	return 2
 }
@@ -161,6 +205,36 @@ func writeJSON(output io.Writer, document any) {
 	encoder.SetEscapeHTML(false)
 	encoder.SetIndent("", "  ")
 	_ = encoder.Encode(document)
+}
+
+func writeHumanDiagnosticDescription(output io.Writer, description compiler.DiagnosticDescription) {
+	fmt.Fprintf(output, "Code: %s\n", description.Code)
+	fmt.Fprintln(output, "Kind: diagnostic")
+	fmt.Fprintf(output, "Severity: %s\n", description.Severity)
+	fmt.Fprintf(output, "Title: %s\n\n", description.Title)
+	fmt.Fprintf(output, "%s\n\n", description.Explanation)
+	fmt.Fprintf(output, "Phase:\n  %s\n\n", description.Phase)
+	fmt.Fprintf(output, "Triggered when:\n  %s\n\n", description.Trigger)
+	fmt.Fprintln(output, "Fixes:")
+	for _, fix := range description.Fixes {
+		fmt.Fprintf(output, "  - %s\n", fix)
+	}
+	if description.InvalidExample != nil {
+		fmt.Fprintf(output, "\nInvalid:\n%s\n", indentDescriptionExample(*description.InvalidExample))
+	}
+	if description.ValidExample != nil {
+		fmt.Fprintf(output, "\nValid:\n%s\n", indentDescriptionExample(*description.ValidExample))
+	}
+	if len(description.Related) > 0 {
+		fmt.Fprintf(output, "\nRelated:\n")
+		for _, related := range description.Related {
+			fmt.Fprintf(output, "  - %s\n", related)
+		}
+	}
+}
+
+func indentDescriptionExample(example string) string {
+	return "  " + strings.ReplaceAll(example, "\n", "\n  ")
 }
 
 func writeHumanDescription(output io.Writer, description compiler.SymbolDescription, budget *describeBudget) {

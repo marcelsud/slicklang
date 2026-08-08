@@ -922,7 +922,7 @@ func (p *bodyParser) parseResultConstructor(ref qualifiedRef) expressionNode {
 	args := p.parseArguments()
 	node := &resultExpression{ok: ref.name == "Ok", pos: ref.pos}
 	if len(args) != 1 {
-		p.program.add(ref.pos, "SLK359", "%s expects exactly 1 argument, found %d", ref.name, len(args))
+		p.program.add(ref.pos, diagnosticCodeResultConstructorArity, "%s expects exactly 1 argument, found %d", ref.name, len(args))
 	}
 	if len(args) > 0 {
 		node.value = args[0]
@@ -991,7 +991,7 @@ func (p *bodyParser) parseMatchArm() (matchArm, bool) {
 			return matchArm{}, false
 		}
 	default:
-		p.program.add(name.pos, "SLK360", "match supports only Ok(...), Err(...), and _ patterns, found %s", name.text)
+		p.program.add(name.pos, diagnosticCodeMatchPattern, "match supports only Ok(...), Err(...), and _ patterns, found %s", name.text)
 		return matchArm{}, false
 	}
 	if !p.matchPair("=", ">") {
@@ -1052,5 +1052,5 @@ func (p *bodyParser) atEnd() bool {
 }
 
 func (p *bodyParser) error(pos position, format string, args ...any) {
-	p.program.add(pos, "SLK001", format, args...)
+	p.program.add(pos, diagnosticCodeSyntax, format, args...)
 }
