@@ -1,0 +1,4 @@
+class Dog {
+    Name: string
+    function Bark() -> string
+}

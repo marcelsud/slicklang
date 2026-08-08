@@ -1,0 +1,3 @@
+function Dog.Bark() -> string {
+    `${self.Name}: woof`
+}

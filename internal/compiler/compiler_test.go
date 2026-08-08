@@ -52,17 +52,17 @@ function main() -> null {
 func TestConcreteAndBaseErrorCatchesAreExhaustive(t *testing.T) {
 	tests := map[string]string{
 		"concrete arms": `
-function main() -> null {
+function main() -> string {
     load() catch (error) {
-        IoError => null
-        ParseError => null
+        IoError => ""
+        ParseError => ""
     }
 }
 `,
 		"base Error": `
-function main() -> null {
+function main() -> string {
     load() catch (error) {
-        Error => null
+        Error => ""
     }
 }
 `,
@@ -165,6 +165,33 @@ func TestProjectDiscoveryUsesSlkFilesOnly(t *testing.T) {
 		t.Fatalf("check Slick project: %v", err)
 	}
 	assertNoDiagnostics(t, diagnostics)
+}
+
+func TestBranchResultsMustShareOneType(t *testing.T) {
+	t.Run("if", func(t *testing.T) {
+		diagnostics := compiler.Check([]compiler.Source{{
+			Name:      "main.slk",
+			Namespace: "root",
+			Text:      `function main() -> string { if (true) { "yes" } else { 0 } }`,
+		}})
+		assertDiagnostic(t, diagnostics, "SLK342", "if branches must produce one type")
+	})
+	t.Run("catch", func(t *testing.T) {
+		diagnostics := compiler.Check([]compiler.Source{{
+			Name:      "main.slk",
+			Namespace: "root",
+			Text: `
+class Failure implements Error {}
+function load() -> string throws Failure { throw Failure {} }
+function main() -> string {
+    load() catch (error) {
+        Failure => null
+    }
+}
+`,
+		}})
+		assertDiagnostic(t, diagnostics, "SLK342", "catch success and error paths must produce one type")
+	})
 }
 
 func assertNoDiagnostics(t *testing.T, diagnostics []compiler.Diagnostic) {

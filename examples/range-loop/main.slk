@@ -1,0 +1,14 @@
+function main() -> string {
+    let Names = ["Ada", "skip", "Grace", "Linus"]
+    let Output = ""
+    for Index, Name in enumerate(Names) {
+        if (Name == "skip") {
+            continue
+        }
+        Output = Output + `${Index}:${Name};`
+        if (Name == "Grace") {
+            break
+        }
+    }
+    Output
+}

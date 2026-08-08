@@ -115,6 +115,7 @@ type functionDecl struct {
 	throws            []typeRef
 	throwSet          map[string]struct{}
 	body              []token
+	ast               *blockNode
 	receiver          typeRef
 	receiverCanonical string
 	inline            bool
@@ -131,6 +132,14 @@ type program struct {
 }
 
 func CheckPath(path string) ([]Diagnostic, error) {
+	sources, err := loadSources(path)
+	if err != nil {
+		return nil, err
+	}
+	return Check(sources), nil
+}
+
+func loadSources(path string) ([]Source, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, err
@@ -144,7 +153,7 @@ func CheckPath(path string) ([]Diagnostic, error) {
 		if err != nil {
 			return nil, err
 		}
-		return Check([]Source{{Name: filepath.Base(path), Namespace: "root", Text: string(data)}}), nil
+		return []Source{{Name: filepath.Base(path), Namespace: "root", Text: string(data)}}, nil
 	}
 
 	var sources []Source
@@ -178,10 +187,15 @@ func CheckPath(path string) ([]Diagnostic, error) {
 		return nil, ErrNoSources
 	}
 	sort.Slice(sources, func(i, j int) bool { return sources[i].Name < sources[j].Name })
-	return Check(sources), nil
+	return sources, nil
 }
 
 func Check(sources []Source) []Diagnostic {
+	_, diagnostics := compile(sources)
+	return diagnostics
+}
+
+func compile(sources []Source) (*program, []Diagnostic) {
 	prog := &program{
 		classes:    make(map[string]*classDecl),
 		interfaces: make(map[string]*interfaceDecl),
@@ -205,7 +219,7 @@ func Check(sources []Source) []Diagnostic {
 		}
 		return a.Column < b.Column
 	})
-	return prog.diags
+	return prog, prog.diags
 }
 
 func parseSource(prog *program, source Source) {
@@ -241,12 +255,27 @@ func lex(source Source) []token {
 
 	var tokens []token
 	for kind := s.Scan(); kind != scanner.EOF; kind = s.Scan() {
-		pos := s.Position
-		tokens = append(tokens, token{
+		scanned := token{
 			kind: kind,
 			text: s.TokenText(),
-			pos:  position{file: source.Name, line: pos.Line, column: pos.Column},
-		})
+			pos:  position{file: source.Name, line: s.Position.Line, column: s.Position.Column},
+		}
+		if len(tokens) > 0 && kind == scanner.Float && strings.HasPrefix(scanned.text, ".") {
+			previous := &tokens[len(tokens)-1]
+			if previous.kind == scanner.Float && strings.HasSuffix(previous.text, ".") &&
+				previous.pos.line == scanned.pos.line &&
+				previous.pos.column+len(previous.text) == scanned.pos.column {
+				previous.text = strings.TrimSuffix(previous.text, ".")
+				previous.kind = scanner.Int
+				tokens = append(tokens,
+					token{kind: '.', text: ".", pos: position{file: source.Name, line: previous.pos.line, column: previous.pos.column + len(previous.text)}},
+					token{kind: '.', text: ".", pos: scanned.pos},
+					token{kind: scanner.Int, text: strings.TrimPrefix(scanned.text, "."), pos: position{file: source.Name, line: scanned.pos.line, column: scanned.pos.column + 1}},
+				)
+				continue
+			}
+		}
+		tokens = append(tokens, scanned)
 	}
 	line := 1
 	if len(tokens) > 0 {
@@ -512,6 +541,10 @@ func (p *parser) parseFunction() {
 		return
 	}
 	parts := strings.Split(ref.name, ".")
+	if len(parts) == 1 && isIterableBuiltin(ref.name) {
+		p.error(ref.pos, "function name %s is reserved by the iterable standard library", ref.name)
+		return
+	}
 	if len(parts) == 1 {
 		qualified := qualify(p.source.Namespace, ref.name)
 		if previous, exists := p.prog.functions[qualified]; exists {
@@ -744,6 +777,7 @@ func readQualified(tokens []token, start int) (qualifiedRef, int, bool) {
 }
 
 func (p *program) check() {
+	p.parseBodies()
 	p.checkAliases()
 	p.checkVisibility()
 	p.resolveThrowSets()
@@ -781,117 +815,7 @@ func (p *program) checkAliases() {
 }
 
 func (p *program) checkFunction(function *functionDecl) {
-	body := function.body
-	locals := p.initialLocals(function)
-	for i := 0; i < len(body); i++ {
-		p.recordLocal(function, body, i, locals)
-		if body[i].text == "throw" {
-			ref, next, ok := readQualified(body, i+1)
-			if !ok {
-				p.add(body[i].pos, "SLK001", "expected Error type after 'throw'")
-				continue
-			}
-			i = next - 1
-			resolved, isError := p.resolveError(function, ref.name)
-			if !isError {
-				p.add(ref.pos, "SLK200", "%s does not name an Error type", ref.name)
-				continue
-			}
-			if errorClass := p.classes[resolved]; errorClass != nil {
-				p.requireAccess(ref.pos, function.namespace, errorClass.namespace, errorClass.name, "error class")
-			}
-			if !containsError(function.throwSet, resolved) {
-				p.add(ref.pos, "SLK201", "%s throws %s, but its signature does not declare it", function.qualified, ref.name)
-			}
-			continue
-		}
-
-		if body[i].kind != scanner.Ident || isCallKeyword(body[i].text) || (i > 0 && body[i-1].text == ".") {
-			continue
-		}
-		ref, next, ok := readQualified(body, i)
-		if !ok {
-			continue
-		}
-		if next >= len(body) {
-			p.checkFieldReference(function, ref, locals)
-			continue
-		}
-		if body[next].text == "{" {
-			class, exists := p.resolveClass(function, ref.name)
-			if !exists {
-				p.add(ref.pos, "SLK205", "unknown class %s", ref.name)
-				continue
-			}
-			p.requireAccess(ref.pos, function.namespace, class.namespace, class.name, "class")
-			p.checkConstructorFields(function, class, body, next)
-			continue
-		}
-		if body[next].text != "(" {
-			p.checkFieldReference(function, ref, locals)
-			continue
-		}
-		close := matching(body, next, "(", ")")
-		if close < 0 {
-			continue
-		}
-		target, resolved := p.resolveCall(function, ref, locals)
-		if target == nil {
-			if !resolved && !isBuiltin(ref.name) {
-				p.add(ref.pos, "SLK203", "unknown function %s", ref.name)
-			}
-			continue
-		}
-		p.checkCallArguments(function, target, body[next+1:close], locals, ref.pos)
-		p.checkCallErrors(function, target, body, close, ref.pos)
-	}
-}
-
-type catchInfo struct {
-	pos  position
-	arms []typeRef
-}
-
-func parseCatch(tokens []token, start int) (catchInfo, bool) {
-	if start >= len(tokens) || tokens[start].text != "catch" {
-		return catchInfo{}, false
-	}
-	info := catchInfo{pos: tokens[start].pos}
-	i := start + 1
-	if i < len(tokens) && tokens[i].text == "(" {
-		close := matching(tokens, i, "(", ")")
-		if close < 0 {
-			return info, true
-		}
-		i = close + 1
-	}
-	if i >= len(tokens) || tokens[i].text != "{" {
-		return info, true
-	}
-	end := matching(tokens, i, "{", "}")
-	if end < 0 {
-		return info, true
-	}
-	depth := 1
-	for j := i + 1; j < end; j++ {
-		switch tokens[j].text {
-		case "{":
-			depth++
-			continue
-		case "}":
-			depth--
-			continue
-		}
-		if depth != 1 || tokens[j].kind != scanner.Ident || (j > i+1 && tokens[j-1].text == ".") {
-			continue
-		}
-		ref, next, ok := readQualified(tokens, j)
-		if ok && next+1 < end && tokens[next].text == "=" && tokens[next+1].text == ">" {
-			info.arms = append(info.arms, typeRef{name: ref.name, pos: ref.pos})
-			j = next + 1
-		}
-	}
-	return info, true
+	p.checkASTFunction(function)
 }
 
 func matching(tokens []token, start int, open, close string) int {
@@ -913,17 +837,8 @@ func matching(tokens []token, start int, open, close string) int {
 	return -1
 }
 
-func (p *program) resolveError(function *functionDecl, name string) (string, bool) {
-	return p.resolveErrorIn(function.namespace, function.aliases, name)
-}
-
 func (p *program) resolveFunction(function *functionDecl, name string) *functionDecl {
 	return p.functions[p.resolveName(function, name)]
-}
-
-func (p *program) resolveClass(function *functionDecl, name string) (*classDecl, bool) {
-	class, ok := p.classes[p.resolveName(function, name)]
-	return class, ok
 }
 
 func (p *program) resolveName(function *functionDecl, name string) string {
@@ -958,38 +873,11 @@ func containsError(set map[string]struct{}, name string) bool {
 	return ok
 }
 
-func sortedSet(set map[string]struct{}) []string {
-	items := make([]string, 0, len(set))
-	for item := range set {
-		items = append(items, item)
-	}
-	sort.Strings(items)
-	return items
-}
-
 func displayName(name string) string {
 	if index := strings.LastIndexByte(name, '.'); index >= 0 {
 		return name[index+1:]
 	}
 	return name
-}
-
-func isBuiltin(name string) bool {
-	switch name {
-	case "print", "println", "assert":
-		return true
-	default:
-		return false
-	}
-}
-
-func isCallKeyword(name string) bool {
-	switch name {
-	case "catch", "class", "function", "if", "for", "match", "return", "throw", "while":
-		return true
-	default:
-		return false
-	}
 }
 
 func validNamespace(namespace string) bool {

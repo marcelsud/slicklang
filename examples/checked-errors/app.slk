@@ -6,10 +6,10 @@ function speak(animal: Barker) -> string throws root.models.SomethingError {
     animal.Bark()
 }
 
-function main() -> null {
+function main() -> string {
     let dog = root.models.Dog { Name: "Ada" }
 
     speak(dog) catch (error) {
-        root.models.SomethingError => null
+        root.models.SomethingError => ""
     }
 }
