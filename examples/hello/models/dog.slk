@@ -1,4 +1,13 @@
-class Dog {
+/// Represents a named user discoverable through slick describe.
+class User {
+    /// The user's display name.
     Name: string
+}
+
+/// Represents a dog that can produce a greeting.
+class Dog {
+    /// The dog's display name.
+    Name: string
+    /// Declares the dog's greeting behavior.
     function Bark() -> string
 }

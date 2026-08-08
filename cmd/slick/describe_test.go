@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -15,6 +17,9 @@ func TestDescribeHumanOutputContract(t *testing.T) {
 	want := `Name: std.env.Get
 Kind: function
 Visibility: public
+Documentation:
+Returns the environment value for Name, or null when Name is unset.
+
 Parameters:
   Name: string
 Returns: string?
@@ -33,11 +38,13 @@ func TestDescribeJSONOutputContract(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q", status, stderr.String())
 	}
 	want := `{
-  "schema_version": 2,
+  "schema_version": 3,
   "symbol": {
     "canonical_name": "std.env.Get",
     "kind": "function",
     "visibility": "public",
+    "documentation": "Returns the environment value for Name, or null when Name is unset.",
+    "type": "",
     "type_parameters": [],
     "parameters": [
       {
@@ -72,7 +79,7 @@ func TestDescribeUnknownJSONErrorContract(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q", status, stderr.String())
 	}
 	want := `{
-  "schema_version": 2,
+  "schema_version": 3,
   "error": {
     "code": "unknown_symbol",
     "message": "unknown symbol \"std.env.Missing\"",
@@ -122,9 +129,11 @@ func TestDescribeHumanBudgetContract(t *testing.T) {
 	want := `Name: std
 Kind: namespace
 Visibility: public
+Documentation:
+Provides compiler-owned portable standard-library components.
+
 Children:
-  namespace std.bytes (public)
-  … 6 more entries (re-run with a higher ` + "`--budget`" + `; use ` + "`--budget 11`" + ` for full output)
+  … 7 more entries (re-run with a higher ` + "`--budget`" + `; use ` + "`--budget 14`" + ` for full output)
 `
 	if stdout.String() != want {
 		t.Fatalf("budgeted human output:\n%s\nwant:\n%s", stdout.String(), want)
@@ -138,16 +147,16 @@ func TestDescribeJSONBudgetContract(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q", status, stderr.String())
 	}
 	want := `{
-  "schema_version": 2,
+  "schema_version": 3,
   "budget": {
     "unit": "lines",
     "limit": 39,
-    "required": 55,
+    "required": 64,
     "truncated": true,
     "omitted": [
       {
         "section": "children",
-        "count": 6
+        "count": 7
       }
     ]
   },
@@ -155,6 +164,8 @@ func TestDescribeJSONBudgetContract(t *testing.T) {
     "canonical_name": "std",
     "kind": "namespace",
     "visibility": "public",
+    "documentation": "Provides compiler-owned portable standard-library components.",
+    "type": "",
     "type_parameters": [],
     "parameters": [],
     "return_type": "",
@@ -164,13 +175,7 @@ func TestDescribeJSONBudgetContract(t *testing.T) {
     "declared_methods": [],
     "implemented_methods": [],
     "interfaces": [],
-    "children": [
-      {
-        "canonical_name": "std.bytes",
-        "kind": "namespace",
-        "visibility": "public"
-      }
-    ],
+    "children": [],
     "source": null
   }
 }
@@ -186,9 +191,58 @@ func TestDescribeRejectsInvalidBudgets(t *testing.T) {
 		{"--budget", "-1", "std.env.Get"},
 		{"--budget", "1", "--budget", "2", "std.env.Get"},
 	} {
+
 		var stdout, stderr bytes.Buffer
 		if status := runDescribe(args, &stdout, &stderr); status != 2 || stdout.Len() != 0 || stderr.Len() == 0 {
 			t.Fatalf("args=%q status=%d stdout=%q stderr=%q", args, status, stdout.String(), stderr.String())
 		}
+	}
+}
+func TestDescribeUserDocumentationAndExplicitNull(t *testing.T) {
+	root := t.TempDir()
+	source := `/// Complete user documentation.
+class Documented {
+    /// Public value summary.
+    Value: string
+    /// Reads the stored value.
+    function Read() -> string { self.Value }
+}
+function Undocumented() -> null { null }
+`
+	if err := os.WriteFile(filepath.Join(root, "main.slk"), []byte(source), 0o644); err != nil {
+		t.Fatalf("write documented project: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	status := runDescribe([]string{"root.Documented", root}, &stdout, &stderr)
+	if status != 0 || stderr.Len() != 0 {
+		t.Fatalf("status=%d stderr=%q", status, stderr.String())
+	}
+	want := `Name: root.Documented
+Kind: class
+Visibility: public
+Documentation:
+Complete user documentation.
+
+Fields:
+  public Value: string @ main.slk:4:5 — Public value summary.
+Declared methods:
+  public root.Documented.Read() -> string @ main.slk:6:14 — Reads the stored value.
+Implemented methods:
+  public root.Documented.Read() -> string @ main.slk:6:14 — Reads the stored value.
+Interfaces: none
+Source: main.slk:2:7
+`
+	if stdout.String() != want {
+		t.Fatalf("documented human output:\n%s\nwant:\n%s", stdout.String(), want)
+	}
+
+	stdout.Reset()
+	status = runDescribe([]string{"--json", "root.Undocumented", root}, &stdout, &stderr)
+	if status != 0 || stderr.Len() != 0 {
+		t.Fatalf("status=%d stderr=%q", status, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"documentation": null`) {
+		t.Fatalf("undocumented JSON has no explicit null:\n%s", stdout.String())
 	}
 }

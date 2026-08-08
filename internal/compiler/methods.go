@@ -90,6 +90,9 @@ func (p *program) linkMethods() {
 		}
 
 		if previous := class.implementations[implementation.name]; previous != nil {
+			if previous.documentation != nil && implementation.documentation != nil {
+				p.add(implementation.pos, "SLK392", "competing documentation for %s.%s", class.qualified, implementation.name)
+			}
 			p.add(implementation.pos, "SLK311", "duplicate implementation of %s.%s; first implemented at %s:%d:%d", class.qualified, implementation.name, previous.pos.file, previous.pos.line, previous.pos.column)
 			continue
 		}

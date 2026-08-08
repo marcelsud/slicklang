@@ -54,60 +54,88 @@ const (
 	stdJsonFailureName      = "std.json.Failure"
 )
 
+type standardNamespaceDecl struct {
+	canonical     string
+	documentation string
+}
+
 type standardFunctionDecl struct {
-	canonical  string
-	namespace  string
-	name       string
-	typeParams []string
-	params     []paramDecl
-	result     typeRef
-	native     nativeFunction
+	canonical     string
+	namespace     string
+	name          string
+	documentation string
+	typeParams    []string
+	params        []paramDecl
+	result        typeRef
+	native        nativeFunction
+}
+
+type standardFieldDecl struct {
+	name          string
+	typ           typeRef
+	documentation string
 }
 
 type standardClassDecl struct {
-	canonical string
-	namespace string
-	name      string
-	isError   bool
-	fields    []fieldDecl
+	canonical     string
+	namespace     string
+	name          string
+	documentation string
+	isError       bool
+	fields        []standardFieldDecl
 }
 
 // standardLibraryRegistry is the authoritative public Slick surface backed by
 // the Go standard library. The compiler, interpreter, and Go backend all use
 // the synthetic declarations registered from this table.
 var standardLibraryRegistry = struct {
-	functions []standardFunctionDecl
-	classes   []standardClassDecl
+	namespaces []standardNamespaceDecl
+	functions  []standardFunctionDecl
+	classes    []standardClassDecl
 }{
+	namespaces: []standardNamespaceDecl{
+		{canonical: "std", documentation: "Provides compiler-owned portable standard-library components."},
+		{canonical: "std.bytes", documentation: "Converts and inspects immutable binary byte values."},
+		{canonical: "std.convert", documentation: "Converts primitive values with explicit parse failures."},
+		{canonical: "std.env", documentation: "Reads and updates the process environment without exposing values in failures."},
+		{canonical: "std.fs", documentation: "Performs bounded whole-file and directory operations on platform paths."},
+		{canonical: "std.json", documentation: "Encodes and decodes supported Slick values as JSON."},
+		{canonical: "std.path", documentation: "Manipulates platform-dependent filesystem path strings without accessing the filesystem."},
+		{canonical: "std.text", documentation: "Provides deterministic Unicode-aware and substring text operations."},
+	},
 	functions: []standardFunctionDecl{
 		{
-			canonical: string(nativeStdBytesFromUtf8),
-			namespace: "std.bytes",
-			name:      "FromUtf8",
-			params:    []paramDecl{{name: "Text", typ: typeRef{name: "string"}}},
-			result:    typeRef{name: "bytes"},
-			native:    nativeStdBytesFromUtf8,
+			canonical:     string(nativeStdBytesFromUtf8),
+			namespace:     "std.bytes",
+			name:          "FromUtf8",
+			documentation: "Encodes Text as immutable UTF-8 bytes.",
+			params:        []paramDecl{{name: "Text", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "bytes"},
+			native:        nativeStdBytesFromUtf8,
 		},
 		{
-			canonical: string(nativeStdBytesToUtf8),
-			namespace: "std.bytes",
-			name:      "ToUtf8",
-			params:    []paramDecl{{name: "Value", typ: typeRef{name: "bytes"}}},
-			result:    typeRef{name: "Result<string,std.bytes.Utf8Failure>"},
-			native:    nativeStdBytesToUtf8,
+			canonical:     string(nativeStdBytesToUtf8),
+			namespace:     "std.bytes",
+			name:          "ToUtf8",
+			documentation: "Decodes Value as UTF-8 or returns Utf8Failure for invalid data.",
+			params:        []paramDecl{{name: "Value", typ: typeRef{name: "bytes"}}},
+			result:        typeRef{name: "Result<string,std.bytes.Utf8Failure>"},
+			native:        nativeStdBytesToUtf8,
 		},
 		{
-			canonical: string(nativeStdBytesLength),
-			namespace: "std.bytes",
-			name:      "Length",
-			params:    []paramDecl{{name: "Value", typ: typeRef{name: "bytes"}}},
-			result:    typeRef{name: "int"},
-			native:    nativeStdBytesLength,
+			canonical:     string(nativeStdBytesLength),
+			namespace:     "std.bytes",
+			name:          "Length",
+			documentation: "Returns the number of bytes in Value.",
+			params:        []paramDecl{{name: "Value", typ: typeRef{name: "bytes"}}},
+			result:        typeRef{name: "int"},
+			native:        nativeStdBytesLength,
 		},
 		{
-			canonical: string(nativeStdBytesAt),
-			namespace: "std.bytes",
-			name:      "At",
+			canonical:     string(nativeStdBytesAt),
+			namespace:     "std.bytes",
+			name:          "At",
+			documentation: "Returns the byte at Index, or null when Index is outside Value.",
 			params: []paramDecl{
 				{name: "Value", typ: typeRef{name: "bytes"}},
 				{name: "Index", typ: typeRef{name: "int"}},
@@ -116,57 +144,64 @@ var standardLibraryRegistry = struct {
 			native: nativeStdBytesAt,
 		},
 		{
-			canonical: string(nativeStdBytesConcat),
-			namespace: "std.bytes",
-			name:      "Concat",
-			params:    []paramDecl{{name: "Values", typ: typeRef{name: "bytes[]"}}},
-			result:    typeRef{name: "bytes"},
-			native:    nativeStdBytesConcat,
+			canonical:     string(nativeStdBytesConcat),
+			namespace:     "std.bytes",
+			name:          "Concat",
+			documentation: "Concatenates Values in order into a new immutable byte value.",
+			params:        []paramDecl{{name: "Values", typ: typeRef{name: "bytes[]"}}},
+			result:        typeRef{name: "bytes"},
+			native:        nativeStdBytesConcat,
 		},
 		{
-			canonical: string(nativeStdConvertParseInt),
-			namespace: "std.convert",
-			name:      "ParseInt",
-			params:    []paramDecl{{name: "Text", typ: typeRef{name: "string"}}},
-			result:    typeRef{name: "Result<int,std.convert.Failure>"},
-			native:    nativeStdConvertParseInt,
+			canonical:     string(nativeStdConvertParseInt),
+			namespace:     "std.convert",
+			name:          "ParseInt",
+			documentation: "Parses a base-10 integer or returns Failure when Text is invalid or out of range.",
+			params:        []paramDecl{{name: "Text", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "Result<int,std.convert.Failure>"},
+			native:        nativeStdConvertParseInt,
 		},
 		{
-			canonical: string(nativeStdConvertParseFloat),
-			namespace: "std.convert",
-			name:      "ParseFloat",
-			params:    []paramDecl{{name: "Text", typ: typeRef{name: "string"}}},
-			result:    typeRef{name: "Result<float,std.convert.Failure>"},
-			native:    nativeStdConvertParseFloat,
+			canonical:     string(nativeStdConvertParseFloat),
+			namespace:     "std.convert",
+			name:          "ParseFloat",
+			documentation: "Parses a finite floating-point value or returns Failure when Text is invalid or out of range.",
+			params:        []paramDecl{{name: "Text", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "Result<float,std.convert.Failure>"},
+			native:        nativeStdConvertParseFloat,
 		},
 		{
-			canonical: string(nativeStdConvertIntToString),
-			namespace: "std.convert",
-			name:      "IntToString",
-			params:    []paramDecl{{name: "Value", typ: typeRef{name: "int"}}},
-			result:    typeRef{name: "string"},
-			native:    nativeStdConvertIntToString,
+			canonical:     string(nativeStdConvertIntToString),
+			namespace:     "std.convert",
+			name:          "IntToString",
+			documentation: "Formats Value as a base-10 integer string.",
+			params:        []paramDecl{{name: "Value", typ: typeRef{name: "int"}}},
+			result:        typeRef{name: "string"},
+			native:        nativeStdConvertIntToString,
 		},
 		{
-			canonical: string(nativeStdConvertFloatToString),
-			namespace: "std.convert",
-			name:      "FloatToString",
-			params:    []paramDecl{{name: "Value", typ: typeRef{name: "float"}}},
-			result:    typeRef{name: "string"},
-			native:    nativeStdConvertFloatToString,
+			canonical:     string(nativeStdConvertFloatToString),
+			namespace:     "std.convert",
+			name:          "FloatToString",
+			documentation: "Formats Value as a deterministic floating-point string.",
+			params:        []paramDecl{{name: "Value", typ: typeRef{name: "float"}}},
+			result:        typeRef{name: "string"},
+			native:        nativeStdConvertFloatToString,
 		},
 		{
-			canonical: string(nativeStdEnvGet),
-			namespace: "std.env",
-			name:      "Get",
-			params:    []paramDecl{{name: "Name", typ: typeRef{name: "string"}}},
-			result:    typeRef{name: "string?"},
-			native:    nativeStdEnvGet,
+			canonical:     string(nativeStdEnvGet),
+			namespace:     "std.env",
+			name:          "Get",
+			documentation: "Returns the environment value for Name, or null when Name is unset.",
+			params:        []paramDecl{{name: "Name", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "string?"},
+			native:        nativeStdEnvGet,
 		},
 		{
-			canonical: string(nativeStdEnvSet),
-			namespace: "std.env",
-			name:      "Set",
+			canonical:     string(nativeStdEnvSet),
+			namespace:     "std.env",
+			name:          "Set",
+			documentation: "Sets Name to Value or returns Failure without including Value in the error.",
 			params: []paramDecl{
 				{name: "Name", typ: typeRef{name: "string"}},
 				{name: "Value", typ: typeRef{name: "string"}},
@@ -175,25 +210,28 @@ var standardLibraryRegistry = struct {
 			native: nativeStdEnvSet,
 		},
 		{
-			canonical: string(nativeStdEnvUnset),
-			namespace: "std.env",
-			name:      "Unset",
-			params:    []paramDecl{{name: "Name", typ: typeRef{name: "string"}}},
-			result:    typeRef{name: "Result<null,std.env.Failure>"},
-			native:    nativeStdEnvUnset,
+			canonical:     string(nativeStdEnvUnset),
+			namespace:     "std.env",
+			name:          "Unset",
+			documentation: "Removes Name from the environment or returns Failure.",
+			params:        []paramDecl{{name: "Name", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "Result<null,std.env.Failure>"},
+			native:        nativeStdEnvUnset,
 		},
 		{
-			canonical: string(nativeStdFSReadText),
-			namespace: "std.fs",
-			name:      "ReadText",
-			params:    []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
-			result:    typeRef{name: "Result<string,std.fs.Failure>"},
-			native:    nativeStdFSReadText,
+			canonical:     string(nativeStdFSReadText),
+			namespace:     "std.fs",
+			name:          "ReadText",
+			documentation: "Reads Path completely as UTF-8 text or returns Failure for I/O or invalid UTF-8.",
+			params:        []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "Result<string,std.fs.Failure>"},
+			native:        nativeStdFSReadText,
 		},
 		{
-			canonical: string(nativeStdFSWriteText),
-			namespace: "std.fs",
-			name:      "WriteText",
+			canonical:     string(nativeStdFSWriteText),
+			namespace:     "std.fs",
+			name:          "WriteText",
+			documentation: "Writes Contents to Path, replacing the file, or returns Failure.",
 			params: []paramDecl{
 				{name: "Path", typ: typeRef{name: "string"}},
 				{name: "Contents", typ: typeRef{name: "string"}},
@@ -202,107 +240,120 @@ var standardLibraryRegistry = struct {
 			native: nativeStdFSWriteText,
 		},
 		{
-			canonical: string(nativeStdFSExists),
-			namespace: "std.fs",
-			name:      "Exists",
-			params:    []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
-			result:    typeRef{name: "Result<bool,std.fs.Failure>"},
-			native:    nativeStdFSExists,
+			canonical:     string(nativeStdFSExists),
+			namespace:     "std.fs",
+			name:          "Exists",
+			documentation: "Reports whether Path exists or returns Failure when its status cannot be read.",
+			params:        []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "Result<bool,std.fs.Failure>"},
+			native:        nativeStdFSExists,
 		},
 		{
-			canonical: string(nativeStdFSCreateDirectoryAll),
-			namespace: "std.fs",
-			name:      "CreateDirectoryAll",
-			params:    []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
-			result:    typeRef{name: "Result<null,std.fs.Failure>"},
-			native:    nativeStdFSCreateDirectoryAll,
+			canonical:     string(nativeStdFSCreateDirectoryAll),
+			namespace:     "std.fs",
+			name:          "CreateDirectoryAll",
+			documentation: "Creates Path and every missing parent directory or returns Failure.",
+			params:        []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "Result<null,std.fs.Failure>"},
+			native:        nativeStdFSCreateDirectoryAll,
 		},
 		{
-			canonical: string(nativeStdFSRemove),
-			namespace: "std.fs",
-			name:      "Remove",
-			params:    []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
-			result:    typeRef{name: "Result<null,std.fs.Failure>"},
-			native:    nativeStdFSRemove,
+			canonical:     string(nativeStdFSRemove),
+			namespace:     "std.fs",
+			name:          "Remove",
+			documentation: "Removes the file or empty directory at Path or returns Failure.",
+			params:        []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "Result<null,std.fs.Failure>"},
+			native:        nativeStdFSRemove,
 		},
 		{
-			canonical:  string(nativeStdJsonDecode),
-			namespace:  "std.json",
-			name:       "Decode",
-			typeParams: []string{"T"},
-			params:     []paramDecl{{name: "Text", typ: typeRef{name: "string"}}},
-			result:     typeRef{name: "Result<T,std.json.Failure>"},
-			native:     nativeStdJsonDecode,
+			canonical:     string(nativeStdJsonDecode),
+			namespace:     "std.json",
+			name:          "Decode",
+			documentation: "Decodes JSON Text into T or returns Failure with a structural path.",
+			typeParams:    []string{"T"},
+			params:        []paramDecl{{name: "Text", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "Result<T,std.json.Failure>"},
+			native:        nativeStdJsonDecode,
 		},
 		{
-			canonical:  string(nativeStdJsonEncode),
-			namespace:  "std.json",
-			name:       "Encode",
-			typeParams: []string{"T"},
-			params:     []paramDecl{{name: "Value", typ: typeRef{name: "T"}}},
-			result:     typeRef{name: "Result<string,std.json.Failure>"},
-			native:     nativeStdJsonEncode,
+			canonical:     string(nativeStdJsonEncode),
+			namespace:     "std.json",
+			name:          "Encode",
+			documentation: "Encodes Value as JSON or returns Failure for unsupported data.",
+			typeParams:    []string{"T"},
+			params:        []paramDecl{{name: "Value", typ: typeRef{name: "T"}}},
+			result:        typeRef{name: "Result<string,std.json.Failure>"},
+			native:        nativeStdJsonEncode,
 		},
 		{
-			canonical: string(nativeStdPathJoin),
-			namespace: "std.path",
-			name:      "Join",
-			params:    []paramDecl{{name: "Parts", typ: typeRef{name: "string[]"}}},
-			result:    typeRef{name: "string"},
-			native:    nativeStdPathJoin,
+			canonical:     string(nativeStdPathJoin),
+			namespace:     "std.path",
+			name:          "Join",
+			documentation: "Joins Parts using platform path rules and cleans the result.",
+			params:        []paramDecl{{name: "Parts", typ: typeRef{name: "string[]"}}},
+			result:        typeRef{name: "string"},
+			native:        nativeStdPathJoin,
 		},
 		{
-			canonical: string(nativeStdPathClean),
-			namespace: "std.path",
-			name:      "Clean",
-			params:    []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
-			result:    typeRef{name: "string"},
-			native:    nativeStdPathClean,
+			canonical:     string(nativeStdPathClean),
+			namespace:     "std.path",
+			name:          "Clean",
+			documentation: "Returns the shortest platform-equivalent spelling of Path.",
+			params:        []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "string"},
+			native:        nativeStdPathClean,
 		},
 		{
-			canonical: string(nativeStdPathBase),
-			namespace: "std.path",
-			name:      "Base",
-			params:    []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
-			result:    typeRef{name: "string"},
-			native:    nativeStdPathBase,
+			canonical:     string(nativeStdPathBase),
+			namespace:     "std.path",
+			name:          "Base",
+			documentation: "Returns the final element of Path after platform cleaning.",
+			params:        []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "string"},
+			native:        nativeStdPathBase,
 		},
 		{
-			canonical: string(nativeStdPathDirectory),
-			namespace: "std.path",
-			name:      "Directory",
-			params:    []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
-			result:    typeRef{name: "string"},
-			native:    nativeStdPathDirectory,
+			canonical:     string(nativeStdPathDirectory),
+			namespace:     "std.path",
+			name:          "Directory",
+			documentation: "Returns every element of Path except the final one.",
+			params:        []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "string"},
+			native:        nativeStdPathDirectory,
 		},
 		{
-			canonical: string(nativeStdPathExtension),
-			namespace: "std.path",
-			name:      "Extension",
-			params:    []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
-			result:    typeRef{name: "string?"},
-			native:    nativeStdPathExtension,
+			canonical:     string(nativeStdPathExtension),
+			namespace:     "std.path",
+			name:          "Extension",
+			documentation: "Returns Path's final extension without the dot, or null when absent.",
+			params:        []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "string?"},
+			native:        nativeStdPathExtension,
 		},
 		{
-			canonical: string(nativeStdPathIsAbsolute),
-			namespace: "std.path",
-			name:      "IsAbsolute",
-			params:    []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
-			result:    typeRef{name: "bool"},
-			native:    nativeStdPathIsAbsolute,
+			canonical:     string(nativeStdPathIsAbsolute),
+			namespace:     "std.path",
+			name:          "IsAbsolute",
+			documentation: "Reports whether Path is absolute under the current platform rules.",
+			params:        []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "bool"},
+			native:        nativeStdPathIsAbsolute,
 		},
 		{
-			canonical: string(nativeStdTextTrim),
-			namespace: "std.text",
-			name:      "Trim",
-			params:    []paramDecl{{name: "Text", typ: typeRef{name: "string"}}},
-			result:    typeRef{name: "string"},
-			native:    nativeStdTextTrim,
+			canonical:     string(nativeStdTextTrim),
+			namespace:     "std.text",
+			name:          "Trim",
+			documentation: "Removes leading and trailing Unicode whitespace from Text.",
+			params:        []paramDecl{{name: "Text", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "string"},
+			native:        nativeStdTextTrim,
 		},
 		{
-			canonical: string(nativeStdTextContains),
-			namespace: "std.text",
-			name:      "Contains",
+			canonical:     string(nativeStdTextContains),
+			namespace:     "std.text",
+			name:          "Contains",
+			documentation: "Reports whether Text contains Search as an exact substring.",
 			params: []paramDecl{
 				{name: "Text", typ: typeRef{name: "string"}},
 				{name: "Search", typ: typeRef{name: "string"}},
@@ -311,9 +362,10 @@ var standardLibraryRegistry = struct {
 			native: nativeStdTextContains,
 		},
 		{
-			canonical: string(nativeStdTextStartsWith),
-			namespace: "std.text",
-			name:      "StartsWith",
+			canonical:     string(nativeStdTextStartsWith),
+			namespace:     "std.text",
+			name:          "StartsWith",
+			documentation: "Reports whether Text begins with Prefix.",
 			params: []paramDecl{
 				{name: "Text", typ: typeRef{name: "string"}},
 				{name: "Prefix", typ: typeRef{name: "string"}},
@@ -322,9 +374,10 @@ var standardLibraryRegistry = struct {
 			native: nativeStdTextStartsWith,
 		},
 		{
-			canonical: string(nativeStdTextEndsWith),
-			namespace: "std.text",
-			name:      "EndsWith",
+			canonical:     string(nativeStdTextEndsWith),
+			namespace:     "std.text",
+			name:          "EndsWith",
+			documentation: "Reports whether Text ends with Suffix.",
 			params: []paramDecl{
 				{name: "Text", typ: typeRef{name: "string"}},
 				{name: "Suffix", typ: typeRef{name: "string"}},
@@ -333,9 +386,10 @@ var standardLibraryRegistry = struct {
 			native: nativeStdTextEndsWith,
 		},
 		{
-			canonical: string(nativeStdTextSplit),
-			namespace: "std.text",
-			name:      "Split",
+			canonical:     string(nativeStdTextSplit),
+			namespace:     "std.text",
+			name:          "Split",
+			documentation: "Splits Text at every Separator occurrence while preserving order.",
 			params: []paramDecl{
 				{name: "Text", typ: typeRef{name: "string"}},
 				{name: "Separator", typ: typeRef{name: "string"}},
@@ -344,9 +398,10 @@ var standardLibraryRegistry = struct {
 			native: nativeStdTextSplit,
 		},
 		{
-			canonical: string(nativeStdTextJoin),
-			namespace: "std.text",
-			name:      "Join",
+			canonical:     string(nativeStdTextJoin),
+			namespace:     "std.text",
+			name:          "Join",
+			documentation: "Joins Parts in order with Separator between adjacent values.",
 			params: []paramDecl{
 				{name: "Parts", typ: typeRef{name: "string[]"}},
 				{name: "Separator", typ: typeRef{name: "string"}},
@@ -355,9 +410,10 @@ var standardLibraryRegistry = struct {
 			native: nativeStdTextJoin,
 		},
 		{
-			canonical: string(nativeStdTextReplaceAll),
-			namespace: "std.text",
-			name:      "ReplaceAll",
+			canonical:     string(nativeStdTextReplaceAll),
+			namespace:     "std.text",
+			name:          "ReplaceAll",
+			documentation: "Returns Text with every non-overlapping Old substring replaced by New.",
 			params: []paramDecl{
 				{name: "Text", typ: typeRef{name: "string"}},
 				{name: "Old", typ: typeRef{name: "string"}},
@@ -367,9 +423,10 @@ var standardLibraryRegistry = struct {
 			native: nativeStdTextReplaceAll,
 		},
 		{
-			canonical: string(nativeStdTextCut),
-			namespace: "std.text",
-			name:      "Cut",
+			canonical:     string(nativeStdTextCut),
+			namespace:     "std.text",
+			name:          "Cut",
+			documentation: "Splits Text at the first Separator, or returns null when Separator is absent.",
 			params: []paramDecl{
 				{name: "Text", typ: typeRef{name: "string"}},
 				{name: "Separator", typ: typeRef{name: "string"}},
@@ -380,78 +437,95 @@ var standardLibraryRegistry = struct {
 	},
 	classes: []standardClassDecl{
 		{
-			canonical: stdBytesUtf8FailureName,
-			namespace: "std.bytes",
-			name:      "Utf8Failure",
-			isError:   true,
-			fields: []fieldDecl{
-				{name: "Message", typ: typeRef{name: "string"}},
+			canonical:     stdBytesUtf8FailureName,
+			namespace:     "std.bytes",
+			name:          "Utf8Failure",
+			documentation: "Describes a failure to decode immutable bytes as UTF-8 text.",
+			isError:       true,
+			fields: []standardFieldDecl{
+				{name: "Message", typ: typeRef{name: "string"}, documentation: "Explains why the byte value is not valid UTF-8."},
 			},
 		},
 		{
-			canonical: stdConvertFailureName,
-			namespace: "std.convert",
-			name:      "Failure",
-			isError:   true,
-			fields: []fieldDecl{
-				{name: "Target", typ: typeRef{name: "string"}},
-				{name: "Message", typ: typeRef{name: "string"}},
+			canonical:     stdConvertFailureName,
+			namespace:     "std.convert",
+			name:          "Failure",
+			documentation: "Describes a failed primitive conversion.",
+			isError:       true,
+			fields: []standardFieldDecl{
+				{name: "Target", typ: typeRef{name: "string"}, documentation: "Names the requested destination type."},
+				{name: "Message", typ: typeRef{name: "string"}, documentation: "Explains why conversion failed without exposing unrelated data."},
 			},
 		},
 		{
-			canonical: stdEnvFailureName,
-			namespace: "std.env",
-			name:      "Failure",
-			isError:   true,
-			fields: []fieldDecl{
-				{name: "Operation", typ: typeRef{name: "string"}},
-				{name: "Name", typ: typeRef{name: "string"}},
-				{name: "Message", typ: typeRef{name: "string"}},
+			canonical:     stdEnvFailureName,
+			namespace:     "std.env",
+			name:          "Failure",
+			documentation: "Describes a failed process-environment operation.",
+			isError:       true,
+			fields: []standardFieldDecl{
+				{name: "Operation", typ: typeRef{name: "string"}, documentation: "Names the environment operation that failed."},
+				{name: "Name", typ: typeRef{name: "string"}, documentation: "Names the environment entry involved in the failure."},
+				{name: "Message", typ: typeRef{name: "string"}, documentation: "Explains the failure without including the environment value."},
 			},
 		},
 		{
-			canonical: stdFSFailureName,
-			namespace: "std.fs",
-			name:      "Failure",
-			isError:   true,
-			fields: []fieldDecl{
-				{name: "Operation", typ: typeRef{name: "string"}},
-				{name: "Path", typ: typeRef{name: "string"}},
-				{name: "Message", typ: typeRef{name: "string"}},
+			canonical:     stdFSFailureName,
+			namespace:     "std.fs",
+			name:          "Failure",
+			documentation: "Describes a failed filesystem operation.",
+			isError:       true,
+			fields: []standardFieldDecl{
+				{name: "Operation", typ: typeRef{name: "string"}, documentation: "Names the filesystem operation that failed."},
+				{name: "Path", typ: typeRef{name: "string"}, documentation: "Identifies the path involved in the failure."},
+				{name: "Message", typ: typeRef{name: "string"}, documentation: "Explains the platform filesystem failure."},
 			},
 		},
 		{
-			canonical: stdJsonFailureName,
-			namespace: "std.json",
-			name:      "Failure",
-			isError:   true,
-			fields: []fieldDecl{
-				{name: "Operation", typ: typeRef{name: "string"}},
-				{name: "Path", typ: typeRef{name: "string"}},
-				{name: "Message", typ: typeRef{name: "string"}},
+			canonical:     stdJsonFailureName,
+			namespace:     "std.json",
+			name:          "Failure",
+			documentation: "Describes a failed JSON encoding or decoding operation.",
+			isError:       true,
+			fields: []standardFieldDecl{
+				{name: "Operation", typ: typeRef{name: "string"}, documentation: "Names the JSON operation that failed."},
+				{name: "Path", typ: typeRef{name: "string"}, documentation: "Identifies the structural location of the failure."},
+				{name: "Message", typ: typeRef{name: "string"}, documentation: "Explains the JSON failure without including complete source data."},
 			},
 		},
 	},
 }
 
 func registerStandardLibrary(p *program) {
+	for _, declaration := range standardLibraryRegistry.namespaces {
+		documentation := declaration.documentation
+		p.namespaceDocumentation[declaration.canonical] = &documentation
+	}
 	for _, declaration := range standardLibraryRegistry.functions {
+		documentation := declaration.documentation
 		p.functions[declaration.canonical] = &functionDecl{
-			name:       declaration.name,
-			qualified:  declaration.canonical,
-			namespace:  declaration.namespace,
-			aliases:    make(map[string]aliasDecl),
-			typeParams: append([]string(nil), declaration.typeParams...),
-			params:     declaration.params,
-			result:     declaration.result,
-			native:     declaration.native,
+			name:          declaration.name,
+			qualified:     declaration.canonical,
+			namespace:     declaration.namespace,
+			aliases:       make(map[string]aliasDecl),
+			typeParams:    append([]string(nil), declaration.typeParams...),
+			params:        declaration.params,
+			result:        declaration.result,
+			native:        declaration.native,
+			documentation: &documentation,
 		}
 	}
 	for _, declaration := range standardLibraryRegistry.classes {
 		fields := make(map[string]fieldDecl, len(declaration.fields))
 		for _, field := range declaration.fields {
-			fields[field.name] = field
+			documentation := field.documentation
+			fields[field.name] = fieldDecl{
+				name:          field.name,
+				typ:           field.typ,
+				documentation: &documentation,
+			}
 		}
+		documentation := declaration.documentation
 		p.classes[declaration.canonical] = &classDecl{
 			name:            declaration.name,
 			qualified:       declaration.canonical,
@@ -463,8 +537,63 @@ func registerStandardLibrary(p *program) {
 			methods:         make(map[string]*methodSignature),
 			effective:       make(map[string]*methodSignature),
 			implementations: make(map[string]*functionDecl),
+			documentation:   &documentation,
 		}
 	}
+}
+func (p *program) undocumentedStandardLibrarySymbols() []string {
+	undocumented := make(map[string]struct{})
+	require := func(name string, documentation *string) {
+		if documentation == nil || strings.TrimSpace(*documentation) == "" {
+			undocumented[name] = struct{}{}
+		}
+	}
+	requireNamespaces := func(name string) {
+		parts := strings.Split(name, ".")
+		for length := 1; length < len(parts); length++ {
+			namespace := strings.Join(parts[:length], ".")
+			if strings.HasPrefix(namespace, "std") {
+				require(namespace, p.namespaceDocumentation[namespace])
+			}
+		}
+	}
+	for name, function := range p.functions {
+		if !strings.HasPrefix(name, "std.") || !isPublic(function.name) {
+			continue
+		}
+		requireNamespaces(name)
+		require(name, function.documentation)
+	}
+	for name, class := range p.classes {
+		if !strings.HasPrefix(name, "std.") || !isPublic(class.name) {
+			continue
+		}
+		requireNamespaces(name)
+		require(name, class.documentation)
+		for fieldName, field := range class.fields {
+			if isPublic(fieldName) {
+				require(name+"."+fieldName, field.documentation)
+			}
+		}
+		for methodName, method := range class.methods {
+			if isPublic(methodName) {
+				require(name+"."+methodName, method.documentation)
+			}
+		}
+	}
+	for name, iface := range p.interfaces {
+		if !strings.HasPrefix(name, "std.") || !isPublic(iface.name) {
+			continue
+		}
+		requireNamespaces(name)
+		require(name, iface.documentation)
+		for methodName, method := range iface.methods {
+			if isPublic(methodName) {
+				require(name+"."+methodName, method.documentation)
+			}
+		}
+	}
+	return sortedKeys(undocumented)
 }
 
 // isAbsoluteCanonicalName is the single namespace boundary shared by user

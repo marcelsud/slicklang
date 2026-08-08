@@ -32,6 +32,7 @@ func TestHighlightReproducesSource(t *testing.T) {
 
 func TestHighlightClassifiesSlickTokens(t *testing.T) {
 	source := "// note\n" +
+		"/// load docs\n" +
 		"function load(Count: int, Data: Map<string, bytes>) -> Result<string, Failure> throws Failure {\n" +
 		"    using Handle = self.read() { map {} match Handle? { Ok(Text) => `${Text}` Err(_) => \"x\" } }\n" +
 		"}\n"
@@ -44,25 +45,26 @@ func TestHighlightClassifiesSlickTokens(t *testing.T) {
 	}
 
 	expected := map[string]compiler.TokenClass{
-		"// note":   compiler.ClassComment,
-		"function":  compiler.ClassKeyword,
-		"match":     compiler.ClassKeyword,
-		"throws":    compiler.ClassKeyword,
-		"using":     compiler.ClassKeyword,
-		"self":      compiler.ClassKeyword,
-		"int":       compiler.ClassType,
-		"string":    compiler.ClassType,
-		"Result":    compiler.ClassType,
-		"Map":       compiler.ClassType,
-		"bytes":     compiler.ClassType,
-		"map":       compiler.ClassKeyword,
-		"Ok":        compiler.ClassConstructor,
-		"Err":       compiler.ClassConstructor,
-		"Failure":   compiler.ClassIdent,
-		"Count":     compiler.ClassIdent,
-		"`${Text}`": compiler.ClassTemplate,
-		`"x"`:       compiler.ClassString,
-		"?":         compiler.ClassPunct,
+		"// note":       compiler.ClassComment,
+		"function":      compiler.ClassKeyword,
+		"/// load docs": compiler.ClassDocumentation,
+		"match":         compiler.ClassKeyword,
+		"throws":        compiler.ClassKeyword,
+		"using":         compiler.ClassKeyword,
+		"self":          compiler.ClassKeyword,
+		"int":           compiler.ClassType,
+		"string":        compiler.ClassType,
+		"Result":        compiler.ClassType,
+		"Map":           compiler.ClassType,
+		"bytes":         compiler.ClassType,
+		"map":           compiler.ClassKeyword,
+		"Ok":            compiler.ClassConstructor,
+		"Err":           compiler.ClassConstructor,
+		"Failure":       compiler.ClassIdent,
+		"Count":         compiler.ClassIdent,
+		"`${Text}`":     compiler.ClassTemplate,
+		`"x"`:           compiler.ClassString,
+		"?":             compiler.ClassPunct,
 	}
 	for text, want := range expected {
 		if got := classes[text]; got != want {

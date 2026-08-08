@@ -1,3 +1,4 @@
+/// Implements the dog's greeting behavior.
 function Dog.Bark() -> string {
     `${self.Name}: woof`
 }

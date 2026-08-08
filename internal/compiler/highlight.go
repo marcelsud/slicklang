@@ -10,17 +10,18 @@ type TokenClass string
 
 const (
 	// ClassPlain is whitespace and anything the scanner does not classify.
-	ClassPlain       TokenClass = "plain"
-	ClassComment     TokenClass = "comment"
-	ClassKeyword     TokenClass = "keyword"
-	ClassType        TokenClass = "type"
-	ClassConstructor TokenClass = "constructor"
-	ClassConstant    TokenClass = "constant"
-	ClassNumber      TokenClass = "number"
-	ClassString      TokenClass = "string"
-	ClassTemplate    TokenClass = "template"
-	ClassIdent       TokenClass = "ident"
-	ClassPunct       TokenClass = "punct"
+	ClassPlain         TokenClass = "plain"
+	ClassComment       TokenClass = "comment"
+	ClassDocumentation TokenClass = "documentation"
+	ClassKeyword       TokenClass = "keyword"
+	ClassType          TokenClass = "type"
+	ClassConstructor   TokenClass = "constructor"
+	ClassConstant      TokenClass = "constant"
+	ClassNumber        TokenClass = "number"
+	ClassString        TokenClass = "string"
+	ClassTemplate      TokenClass = "template"
+	ClassIdent         TokenClass = "ident"
+	ClassPunct         TokenClass = "punct"
 )
 
 // HighlightToken is one classified span of the original source.
@@ -71,6 +72,9 @@ func Highlight(source string) []HighlightToken {
 func classifyToken(kind rune, text string) TokenClass {
 	switch kind {
 	case scanner.Comment:
+		if strings.HasPrefix(text, "///") {
+			return ClassDocumentation
+		}
 		return ClassComment
 	case scanner.Int, scanner.Float:
 		return ClassNumber
