@@ -1,0 +1,6 @@
+function Dog.Bark() -> string throws SomethingError {
+    if (self.Name == "") {
+        throw SomethingError("dog has no name")
+    }
+    `${self.Name}: woof`
+}

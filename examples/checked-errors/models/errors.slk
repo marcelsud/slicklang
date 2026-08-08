@@ -1,0 +1,3 @@
+class SomethingError implements Error {
+    message: string
+}

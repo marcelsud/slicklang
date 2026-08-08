@@ -1,0 +1,15 @@
+interface Barker {
+    function Bark() -> string throws root.models.SomethingError
+}
+
+function speak(animal: Barker) -> string throws root.models.SomethingError {
+    animal.Bark()
+}
+
+function main() -> null {
+    let dog = root.models.Dog { Name: "Ada" }
+
+    speak(dog) catch (error) {
+        root.models.SomethingError => null
+    }
+}
