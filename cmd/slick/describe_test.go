@@ -120,6 +120,27 @@ func TestDescribeFlagFollowsBuildPositionConvention(t *testing.T) {
 	}
 }
 
+func TestDescribeStdIOReaderContract(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	status := runDescribe([]string{"std.io.Reader"}, &stdout, &stderr)
+	if status != 0 || stderr.Len() != 0 {
+		t.Fatalf("status=%d stderr=%q", status, stderr.String())
+	}
+	want := `Name: std.io.Reader
+Kind: interface
+Visibility: public
+Documentation:
+Reads bounded immutable byte chunks and supports deterministic cleanup.
+
+Declared methods:
+  public std.io.Reader.Close() -> null throws std.io.Failure — Closes the reader or throws Failure when cleanup fails.
+  public std.io.Reader.Read(MaxBytes: int) -> Result<bytes?,std.io.Failure> — Reads at most MaxBytes and returns null only at end-of-stream.
+`
+	if stdout.String() != want {
+		t.Fatalf("std.io.Reader output:\n%s\nwant:\n%s", stdout.String(), want)
+	}
+}
+
 func TestDescribeHumanBudgetContract(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	status := runDescribe([]string{"--budget", "6", "std"}, &stdout, &stderr)
@@ -133,7 +154,7 @@ Documentation:
 Provides compiler-owned portable standard-library components.
 
 Children:
-  … 7 more entries (re-run with a higher ` + "`--budget`" + `; use ` + "`--budget 14`" + ` for full output)
+  … 8 more entries (re-run with a higher ` + "`--budget`" + `; use ` + "`--budget 15`" + ` for full output)
 `
 	if stdout.String() != want {
 		t.Fatalf("budgeted human output:\n%s\nwant:\n%s", stdout.String(), want)
@@ -151,12 +172,12 @@ func TestDescribeJSONBudgetContract(t *testing.T) {
   "budget": {
     "unit": "lines",
     "limit": 39,
-    "required": 64,
+    "required": 70,
     "truncated": true,
     "omitted": [
       {
         "section": "children",
-        "count": 7
+        "count": 8
       }
     ]
   },

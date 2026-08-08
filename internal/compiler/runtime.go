@@ -17,6 +17,7 @@ type runtimeValue struct {
 	mapping  *runtimeMap
 	result   *runtimeResult
 	optional *runtimeOptional
+	native   *nativeIOResource
 }
 
 // runtimeOptional is the tagged representation of a T? value. The complete
@@ -201,6 +202,7 @@ type runtimeFrame struct {
 type slickThrow struct {
 	typ     string
 	message string
+	value   runtimeValue
 }
 
 func (e *slickThrow) Error() string {
@@ -398,7 +400,7 @@ func (p *program) evalStatement(statement statementNode, frame *runtimeFrame) (r
 		} else if field, ok := value.fields["message"]; ok {
 			message = formatRuntimeValue(field)
 		}
-		return runtimeValue{}, &slickThrow{typ: value.typ, message: message}
+		return runtimeValue{}, &slickThrow{typ: value.typ, message: message, value: value}
 	case *returnStatement:
 		value, err := p.evalExpression(node.value, frame)
 		if err != nil {
@@ -925,7 +927,11 @@ func (p *program) evalCatch(node *catchExpression, frame *runtimeFrame) (runtime
 		}
 		armFrame := frame.clone()
 		if node.binding != "" {
-			armFrame.locals[node.binding] = runtimeValue{typ: thrown.typ, scalar: thrown.message, fields: make(map[string]runtimeValue)}
+			caught := thrown.value
+			if caught.typ == "" {
+				caught = runtimeValue{typ: thrown.typ, scalar: thrown.message, fields: make(map[string]runtimeValue)}
+			}
+			armFrame.locals[node.binding] = caught
 		}
 		return p.evalExpression(arm.value, armFrame)
 	}

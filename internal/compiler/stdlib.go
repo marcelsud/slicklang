@@ -46,12 +46,26 @@ const (
 	nativeStdTextJoin             nativeFunction = "std.text.Join"
 	nativeStdTextReplaceAll       nativeFunction = "std.text.ReplaceAll"
 	nativeStdTextCut              nativeFunction = "std.text.Cut"
+	nativeStdIOReaderFromBytes    nativeFunction = "std.io.ReaderFromBytes"
+	nativeStdIOWriterToBytes      nativeFunction = "std.io.WriterToBytes"
+	nativeStdIOReadAll            nativeFunction = "std.io.ReadAll"
+	nativeStdIOCopy               nativeFunction = "std.io.Copy"
+	nativeStdIOReaderRead         nativeFunction = "std.io.bytesReader.Read"
+	nativeStdIOReaderClose        nativeFunction = "std.io.bytesReader.Close"
+	nativeStdIOWriterWrite        nativeFunction = "std.io.BytesWriter.Write"
+	nativeStdIOWriterBytes        nativeFunction = "std.io.BytesWriter.Bytes"
+	nativeStdIOWriterClose        nativeFunction = "std.io.BytesWriter.Close"
 
 	stdBytesUtf8FailureName = "std.bytes.Utf8Failure"
 	stdConvertFailureName   = "std.convert.Failure"
 	stdEnvFailureName       = "std.env.Failure"
 	stdFSFailureName        = "std.fs.Failure"
 	stdJsonFailureName      = "std.json.Failure"
+	stdIOFailureName        = "std.io.Failure"
+	stdIOReaderName         = "std.io.Reader"
+	stdIOWriterName         = "std.io.Writer"
+	stdIOBytesReaderName    = "std.io.bytesReader"
+	stdIOBytesWriterName    = "std.io.BytesWriter"
 )
 
 type standardNamespaceDecl struct {
@@ -70,6 +84,15 @@ type standardFunctionDecl struct {
 	native        nativeFunction
 }
 
+type standardMethodDecl struct {
+	name          string
+	documentation string
+	params        []paramDecl
+	result        typeRef
+	throws        []typeRef
+	native        nativeFunction
+}
+
 type standardFieldDecl struct {
 	name          string
 	typ           typeRef
@@ -77,12 +100,22 @@ type standardFieldDecl struct {
 }
 
 type standardClassDecl struct {
+	canonical      string
+	namespace      string
+	name           string
+	documentation  string
+	isError        bool
+	nativeResource bool
+	fields         []standardFieldDecl
+	methods        []standardMethodDecl
+}
+
+type standardInterfaceDecl struct {
 	canonical     string
 	namespace     string
 	name          string
 	documentation string
-	isError       bool
-	fields        []standardFieldDecl
+	methods       []standardMethodDecl
 }
 
 // standardLibraryRegistry is the authoritative public Slick surface backed by
@@ -92,6 +125,7 @@ var standardLibraryRegistry = struct {
 	namespaces []standardNamespaceDecl
 	functions  []standardFunctionDecl
 	classes    []standardClassDecl
+	interfaces []standardInterfaceDecl
 }{
 	namespaces: []standardNamespaceDecl{
 		{canonical: "std", documentation: "Provides compiler-owned portable standard-library components."},
@@ -102,6 +136,7 @@ var standardLibraryRegistry = struct {
 		{canonical: "std.json", documentation: "Encodes and decodes supported Slick values as JSON."},
 		{canonical: "std.path", documentation: "Manipulates platform-dependent filesystem path strings without accessing the filesystem."},
 		{canonical: "std.text", documentation: "Provides deterministic Unicode-aware and substring text operations."},
+		{canonical: "std.io", documentation: "Provides bounded resource-safe byte readers, writers, and transfer helpers."},
 	},
 	functions: []standardFunctionDecl{
 		{
@@ -434,6 +469,48 @@ var standardLibraryRegistry = struct {
 			result: typeRef{name: "(string,string)?"},
 			native: nativeStdTextCut,
 		},
+		{
+			canonical:     string(nativeStdIOReaderFromBytes),
+			namespace:     "std.io",
+			name:          "ReaderFromBytes",
+			documentation: "Creates a closeable Reader over an immutable snapshot of Value.",
+			params:        []paramDecl{{name: "Value", typ: typeRef{name: "bytes"}}},
+			result:        typeRef{name: stdIOReaderName},
+			native:        nativeStdIOReaderFromBytes,
+		},
+		{
+			canonical:     string(nativeStdIOWriterToBytes),
+			namespace:     "std.io",
+			name:          "WriterToBytes",
+			documentation: "Creates a closeable in-memory BytesWriter.",
+			result:        typeRef{name: stdIOBytesWriterName},
+			native:        nativeStdIOWriterToBytes,
+		},
+		{
+			canonical:     string(nativeStdIOReadAll),
+			namespace:     "std.io",
+			name:          "ReadAll",
+			documentation: "Reads through Reader until end-of-stream without accepting more than MaxBytes.",
+			params: []paramDecl{
+				{name: "Reader", typ: typeRef{name: stdIOReaderName}},
+				{name: "MaxBytes", typ: typeRef{name: "int"}},
+			},
+			result: typeRef{name: "Result<bytes," + stdIOFailureName + ">"},
+			native: nativeStdIOReadAll,
+		},
+		{
+			canonical:     string(nativeStdIOCopy),
+			namespace:     "std.io",
+			name:          "Copy",
+			documentation: "Copies bytes from Reader to Writer without writing beyond MaxBytes.",
+			params: []paramDecl{
+				{name: "Reader", typ: typeRef{name: stdIOReaderName}},
+				{name: "Writer", typ: typeRef{name: stdIOWriterName}},
+				{name: "MaxBytes", typ: typeRef{name: "int"}},
+			},
+			result: typeRef{name: "Result<int," + stdIOFailureName + ">"},
+			native: nativeStdIOCopy,
+		},
 	},
 	classes: []standardClassDecl{
 		{
@@ -493,6 +570,111 @@ var standardLibraryRegistry = struct {
 				{name: "Message", typ: typeRef{name: "string"}, documentation: "Explains the JSON failure without including complete source data."},
 			},
 		},
+		{
+			canonical:     stdIOFailureName,
+			namespace:     "std.io",
+			name:          "Failure",
+			documentation: "Describes a failed byte-stream operation.",
+			isError:       true,
+			fields: []standardFieldDecl{
+				{name: "Operation", typ: typeRef{name: "string"}, documentation: "Names the byte-stream operation that failed."},
+				{name: "Message", typ: typeRef{name: "string"}, documentation: "Explains the failure without including transferred byte contents."},
+			},
+		},
+		{
+			canonical:      stdIOBytesReaderName,
+			namespace:      "std.io",
+			name:           "bytesReader",
+			documentation:  "Implements Reader over an immutable byte snapshot.",
+			nativeResource: true,
+			methods: []standardMethodDecl{
+				{
+					name:          "Read",
+					documentation: "Reads at most MaxBytes and returns null only at end-of-stream.",
+					params:        []paramDecl{{name: "MaxBytes", typ: typeRef{name: "int"}}},
+					result:        typeRef{name: "Result<bytes?," + stdIOFailureName + ">"},
+					native:        nativeStdIOReaderRead,
+				},
+				{
+					name:          "Close",
+					documentation: "Closes the reader or throws Failure when cleanup fails.",
+					result:        typeRef{name: "null"},
+					throws:        []typeRef{{name: stdIOFailureName}},
+					native:        nativeStdIOReaderClose,
+				},
+			},
+		},
+		{
+			canonical:      stdIOBytesWriterName,
+			namespace:      "std.io",
+			name:           "BytesWriter",
+			documentation:  "Collects written bytes in memory and exposes immutable snapshots.",
+			nativeResource: true,
+			methods: []standardMethodDecl{
+				{
+					name:          "Write",
+					documentation: "Writes the complete immutable Data chunk or returns Failure.",
+					params:        []paramDecl{{name: "Data", typ: typeRef{name: "bytes"}}},
+					result:        typeRef{name: "Result<null," + stdIOFailureName + ">"},
+					native:        nativeStdIOWriterWrite,
+				},
+				{
+					name:          "Bytes",
+					documentation: "Returns an immutable snapshot of all bytes written so far.",
+					result:        typeRef{name: "bytes"},
+					native:        nativeStdIOWriterBytes,
+				},
+				{
+					name:          "Close",
+					documentation: "Closes the writer or throws Failure when cleanup fails.",
+					result:        typeRef{name: "null"},
+					throws:        []typeRef{{name: stdIOFailureName}},
+					native:        nativeStdIOWriterClose,
+				},
+			},
+		},
+	},
+	interfaces: []standardInterfaceDecl{
+		{
+			canonical:     stdIOReaderName,
+			namespace:     "std.io",
+			name:          "Reader",
+			documentation: "Reads bounded immutable byte chunks and supports deterministic cleanup.",
+			methods: []standardMethodDecl{
+				{
+					name:          "Read",
+					documentation: "Reads at most MaxBytes and returns null only at end-of-stream.",
+					params:        []paramDecl{{name: "MaxBytes", typ: typeRef{name: "int"}}},
+					result:        typeRef{name: "Result<bytes?," + stdIOFailureName + ">"},
+				},
+				{
+					name:          "Close",
+					documentation: "Closes the reader or throws Failure when cleanup fails.",
+					result:        typeRef{name: "null"},
+					throws:        []typeRef{{name: stdIOFailureName}},
+				},
+			},
+		},
+		{
+			canonical:     stdIOWriterName,
+			namespace:     "std.io",
+			name:          "Writer",
+			documentation: "Writes complete immutable byte chunks and supports deterministic cleanup.",
+			methods: []standardMethodDecl{
+				{
+					name:          "Write",
+					documentation: "Writes the complete immutable Data chunk or returns Failure.",
+					params:        []paramDecl{{name: "Data", typ: typeRef{name: "bytes"}}},
+					result:        typeRef{name: "Result<null," + stdIOFailureName + ">"},
+				},
+				{
+					name:          "Close",
+					documentation: "Closes the writer or throws Failure when cleanup fails.",
+					result:        typeRef{name: "null"},
+					throws:        []typeRef{{name: stdIOFailureName}},
+				},
+			},
+		},
 	},
 }
 
@@ -525,6 +707,22 @@ func registerStandardLibrary(p *program) {
 				documentation: &documentation,
 			}
 		}
+		methods := make(map[string]*methodSignature, len(declaration.methods))
+		for _, method := range declaration.methods {
+			methods[method.name] = standardMethodSignature(declaration.namespace, method)
+			p.methodImpls = append(p.methodImpls, &functionDecl{
+				name:              method.name,
+				namespace:         declaration.namespace,
+				aliases:           make(map[string]aliasDecl),
+				params:            method.params,
+				result:            method.result,
+				throws:            method.throws,
+				receiver:          typeRef{name: declaration.canonical},
+				receiverCanonical: declaration.canonical,
+				inline:            true,
+				native:            method.native,
+			})
+		}
 		documentation := declaration.documentation
 		p.classes[declaration.canonical] = &classDecl{
 			name:            declaration.name,
@@ -532,13 +730,41 @@ func registerStandardLibrary(p *program) {
 			namespace:       declaration.namespace,
 			aliases:         make(map[string]aliasDecl),
 			isError:         declaration.isError,
+			nativeResource:  declaration.nativeResource,
 			extension:       extensionNone,
 			fields:          fields,
-			methods:         make(map[string]*methodSignature),
+			methods:         methods,
 			effective:       make(map[string]*methodSignature),
 			implementations: make(map[string]*functionDecl),
 			documentation:   &documentation,
 		}
+	}
+	for _, declaration := range standardLibraryRegistry.interfaces {
+		methods := make(map[string]*methodSignature, len(declaration.methods))
+		for _, method := range declaration.methods {
+			methods[method.name] = standardMethodSignature(declaration.namespace, method)
+		}
+		documentation := declaration.documentation
+		p.interfaces[declaration.canonical] = &interfaceDecl{
+			name:          declaration.name,
+			qualified:     declaration.canonical,
+			namespace:     declaration.namespace,
+			methods:       methods,
+			documentation: &documentation,
+		}
+	}
+}
+
+func standardMethodSignature(namespace string, declaration standardMethodDecl) *methodSignature {
+	documentation := declaration.documentation
+	return &methodSignature{
+		name:          declaration.name,
+		namespace:     namespace,
+		aliases:       make(map[string]aliasDecl),
+		params:        declaration.params,
+		result:        declaration.result,
+		throws:        declaration.throws,
+		documentation: &documentation,
 	}
 }
 func (p *program) undocumentedStandardLibrarySymbols() []string {
@@ -603,6 +829,9 @@ func isAbsoluteCanonicalName(name string) bool {
 }
 
 func (p *program) callNativeFunction(function *functionDecl, frame *runtimeFrame, typeArgs []string) (runtimeValue, error) {
+	if value, err, ok := p.callNativeStdIO(function, frame); ok {
+		return value, err
+	}
 	resultType := p.resolveType(function.namespace, function.aliases, function.result)
 	switch function.native {
 	case nativeStdBytesFromUtf8:
@@ -1003,6 +1232,14 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 		g.line("before, after, found := strings.Cut(%s, %s)", arguments[0], arguments[1])
 		g.line("if !found { return slickNone[[]any](), nil }")
 		g.line("return slickSome([]any{before, after}), nil")
+	case nativeStdIOReaderFromBytes:
+		g.line("return %s{slickResource: slickIONewReader(%s)}, nil", goClassName(stdIOBytesReaderName), arguments[0])
+	case nativeStdIOWriterToBytes:
+		g.line("return %s{slickResource: slickIONewWriter()}, nil", goClassName(stdIOBytesWriterName))
+	case nativeStdIOReadAll:
+		g.line("return slickIOReadAll(%s, %s)", arguments[0], arguments[1])
+	case nativeStdIOCopy:
+		g.line("return slickIOCopy(%s, %s, %s)", arguments[0], arguments[1], arguments[2])
 	default:
 		return fmt.Errorf("unknown native Slick function %s", function.native)
 	}

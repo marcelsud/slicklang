@@ -99,6 +99,7 @@ type classDecl struct {
 	namespace       string
 	aliases         map[string]aliasDecl
 	isError         bool
+	nativeResource  bool
 	extension       extensionPolicy
 	fields          map[string]fieldDecl
 	methods         map[string]*methodSignature
@@ -145,6 +146,7 @@ type program struct {
 	namespaceDocumentation map[string]*string
 	methodImpls            []*functionDecl
 	diags                  []Diagnostic
+	usesStdIO              bool
 	usesUsing              bool
 }
 

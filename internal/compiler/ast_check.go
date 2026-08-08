@@ -84,11 +84,17 @@ func (p *program) checkASTFunction(function *functionDecl) {
 	scope := newASTScope(function, len(function.params)+1)
 	for _, param := range function.params {
 		scope.locals[param.name] = p.resolveType(function.namespace, function.aliases, param.typ)
+		if strings.Contains(scope.locals[param.name], "std.io.") {
+			p.usesStdIO = true
+		}
 	}
 	if function.receiverCanonical != "" {
 		scope.locals["self"] = function.receiverCanonical
 	}
 	expected := p.resolveType(function.namespace, function.aliases, function.result)
+	if strings.Contains(expected, "std.io.") {
+		p.usesStdIO = true
+	}
 	info := p.checkASTBlock(function.ast, scope, expected)
 	if !p.assignable(info.typ, expected) {
 		p.reportUnassignable(function.pos, info.typ, expected, "SLK340",
@@ -412,6 +418,9 @@ func (p *program) checkRangeExpression(node *rangeExpression, scope *astScope) e
 
 func (p *program) checkObjectExpression(node *objectExpression, scope *astScope) expressionInfo {
 	canonical := p.resolveNameIn(scope.function.namespace, scope.function.aliases, node.typeName)
+	if strings.HasPrefix(canonical, "std.io.") {
+		p.usesStdIO = true
+	}
 	class := p.classes[canonical]
 	info := expressionInfo{typ: canonical, effects: make(effectSet)}
 	if class == nil {
@@ -534,6 +543,9 @@ func (p *program) checkCallExpression(node *callExpression, scope *astScope) exp
 	if len(parts) == 2 && parts[1] == "Close" {
 		if _, active := scope.usingBindings[parts[0]]; active {
 			p.add(node.pos, "SLK388", "cannot call Close directly on active using binding %s", parts[0])
+		} else if receiverType, exists := scope.lookup(parts[0]); exists &&
+			(p.assignable(receiverType, stdIOReaderName) || p.assignable(receiverType, stdIOWriterName)) {
+			p.add(node.pos, "SLK393", "std.io resources must be closed by a using scope")
 		}
 	}
 	if info, builtin := p.checkIterableCall(node, scope, name); builtin {
@@ -565,6 +577,9 @@ func (p *program) checkCallExpression(node *callExpression, scope *astScope) exp
 			mergeEffects(make(effectSet), p.checkASTExpression(argument, scope).effects)
 		}
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
+	}
+	if target.namespace == "std.io" {
+		p.usesStdIO = true
 	}
 
 	info := expressionInfo{

@@ -1,0 +1,22 @@
+// Resource-safe bounded byte transfer.
+// ====================================
+//
+// Both native resources are closed deterministically after the copied value is
+// produced. Copy never writes beyond its explicit byte limit.
+function Transfer() -> string throws std.io.Failure {
+ using Reader = std.io.ReaderFromBytes(std.bytes.FromUtf8("hello")) {
+  using Writer = std.io.WriterToBytes() {
+   match std.io.Copy(Reader, Writer, 64) {
+    Ok(Count) => match std.bytes.ToUtf8(Writer.Bytes()) {
+     Ok(Text) => Text + ":" + std.convert.IntToString(Count)
+     Err(Failure) => Failure.Message
+    }
+    Err(Failure) => Failure.Message
+   }
+  }
+ }
+}
+function main() -> string throws std.io.Failure {
+ let Summary = Transfer()
+ Summary + ";closed"
+}

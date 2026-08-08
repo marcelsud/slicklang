@@ -286,6 +286,9 @@ func (p *program) parseBodies() {
 		function.ast = p.parseBody(function.body, function.pos)
 	}
 	for _, implementation := range p.methodImpls {
+		if implementation.native != "" {
+			continue
+		}
 		implementation.ast = p.parseBody(implementation.body, implementation.pos)
 	}
 }
