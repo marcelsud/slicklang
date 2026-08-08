@@ -230,7 +230,7 @@ func compile(sources []Source) (*program, []Diagnostic) {
 	registerStandardLibrary(prog)
 	for _, source := range sources {
 		if !validNamespace(source.Namespace) {
-			prog.add(position{file: source.Name, line: 1, column: 1}, "SLK100", "invalid namespace %q", source.Namespace)
+			prog.add(position{file: source.Name, line: 1, column: 1}, diagnosticCodeNamespace, "invalid namespace %q", source.Namespace)
 			continue
 		}
 		parseSource(prog, source)
@@ -288,7 +288,7 @@ func parseSourceTokens(prog *program, source Source, tokens []token) {
 	}
 	for _, block := range blocks {
 		if !block.claimed {
-			prog.add(block.pos, "SLK391", "documentation comment is not attached to a describable declaration")
+			prog.add(block.pos, diagnosticCodeOrphanDocumentation, "documentation comment is not attached to a describable declaration")
 		}
 	}
 }
@@ -338,13 +338,11 @@ func scanTokens(source Source, comments bool) ([]token, []Diagnostic) {
 	}
 	var diagnostics []Diagnostic
 	s.Error = func(scanner *scanner.Scanner, message string) {
-		diagnostics = append(diagnostics, Diagnostic{
-			File:    source.Name,
-			Line:    scanner.Position.Line,
-			Column:  scanner.Position.Column,
-			Code:    "SLK001",
-			Message: message,
-		})
+		diagnostics = append(diagnostics, newDiagnostic(
+			position{file: source.Name, line: scanner.Position.Line, column: scanner.Position.Column},
+			diagnosticCodeSyntax,
+			"%s", message,
+		))
 	}
 
 	var tokens []token
@@ -903,12 +901,12 @@ func (p *parser) atEnd() bool {
 
 func (p *parser) reportDocumentationConflict(pos position, name string, first, second *string) {
 	if first != nil && second != nil {
-		p.prog.add(pos, "SLK392", "competing documentation for %s", name)
+		p.prog.add(pos, diagnosticCodeConflictingDocumentation, "competing documentation for %s", name)
 	}
 }
 
 func (p *parser) error(pos position, format string, args ...any) {
-	p.prog.add(pos, "SLK001", format, args...)
+	p.prog.add(pos, diagnosticCodeSyntax, format, args...)
 }
 
 type qualifiedRef struct {
@@ -950,7 +948,7 @@ func (p *program) checkAliases() {
 		iface := p.interfaces[alias.target]
 		function := p.functions[alias.target]
 		if class == nil && iface == nil && function == nil {
-			p.add(alias.pos, "SLK204", "alias target %s does not exist", alias.target)
+			p.add(alias.pos, diagnosticCodeAlias, "alias target %s does not exist", alias.target)
 		} else if class != nil {
 			p.requireAccess(alias.pos, alias.namespace, class.namespace, class.name, "class")
 		} else if iface != nil {
@@ -963,7 +961,7 @@ func (p *program) checkAliases() {
 		_, localInterfaceExists := p.interfaces[local]
 		_, localFunctionExists := p.functions[local]
 		if alias.target != local && (localClassExists || localInterfaceExists || localFunctionExists) {
-			p.add(alias.pos, "SLK204", "alias %s conflicts with a declaration in %s", alias.name, alias.namespace)
+			p.add(alias.pos, diagnosticCodeAlias, "alias %s conflicts with a declaration in %s", alias.name, alias.namespace)
 		}
 	}
 }
@@ -1011,7 +1009,7 @@ func (p *program) checkCallableTypes(params []paramDecl, result typeRef) {
 
 func (p *program) checkTypeRef(ref typeRef) {
 	if redundantOptional(ref.name) {
-		p.add(ref.pos, "SLK373", "%s is redundant; a type is optional at most once", ref.name)
+		p.add(ref.pos, diagnosticCodeRedundantOptional, "%s is redundant; a type is optional at most once", ref.name)
 	}
 }
 
@@ -1052,14 +1050,8 @@ func (p *program) resolveName(function *functionDecl, name string) string {
 	return qualify(function.namespace, name)
 }
 
-func (p *program) add(pos position, code, format string, args ...any) {
-	p.diags = append(p.diags, Diagnostic{
-		File:    pos.file,
-		Line:    pos.line,
-		Column:  pos.column,
-		Code:    code,
-		Message: fmt.Sprintf(format, args...),
-	})
+func (p *program) add(pos position, code diagnosticCode, format string, args ...any) {
+	p.diags = append(p.diags, newDiagnostic(pos, code, format, args...))
 }
 
 func qualify(namespace, name string) string {

@@ -97,15 +97,15 @@ func (p *program) checkASTFunction(function *functionDecl) {
 	}
 	info := p.checkASTBlock(function.ast, scope, expected)
 	if !p.assignable(info.typ, expected) {
-		p.reportUnassignable(function.pos, info.typ, expected, "SLK340",
+		p.reportUnassignable(function.pos, info.typ, expected, diagnosticCodeReturnType,
 			"%s returns %s, but its body produces %s", function.qualified, displayName(expected), displayName(info.typ))
 	}
 	for thrown, origin := range info.effects {
 		if !containsError(function.throwSet, thrown) {
 			if origin.origin != "" {
-				p.add(origin.pos, "SLK201", "unhandled %s from %s; catch it or declare it in %s", displayName(thrown), origin.origin, function.qualified)
+				p.add(origin.pos, diagnosticCodeUnhandledError, "unhandled %s from %s; catch it or declare it in %s", displayName(thrown), origin.origin, function.qualified)
 			} else {
-				p.add(origin.pos, "SLK201", "%s throws %s, but its signature does not declare it", function.qualified, displayName(thrown))
+				p.add(origin.pos, diagnosticCodeUnhandledError, "%s throws %s, but its signature does not declare it", function.qualified, displayName(thrown))
 			}
 		}
 	}
@@ -136,24 +136,24 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		return expressionInfo{typ: "null", effects: info.effects}
 	case *assignmentStatement:
 		if _, active := scope.usingBindings[node.name]; active {
-			p.add(node.pos, "SLK390", "using binding %s is immutable", node.name)
+			p.add(node.pos, diagnosticCodeUsingAssignment, "using binding %s is immutable", node.name)
 		}
 		declared, exists := scope.locals[node.name]
 		if !exists {
-			p.add(node.pos, "SLK341", "cannot assign unknown value %s", node.name)
+			p.add(node.pos, diagnosticCodeUnknownValue, "cannot assign unknown value %s", node.name)
 			return expressionInfo{typ: "null", effects: make(effectSet)}
 		}
 		node.resolved = declared
 		info := p.checkASTExpressionExpecting(node.value, scope, declared)
 		if !p.assignable(info.typ, declared) {
-			p.reportUnassignable(node.pos, info.typ, declared, "SLK342",
+			p.reportUnassignable(node.pos, info.typ, declared, diagnosticCodeTypeMismatch,
 				"cannot assign %s to %s of type %s", displayName(info.typ), node.name, displayName(declared))
 		}
 		// The stored value is no longer the one a branch proved non-null.
 		delete(scope.narrowed, node.name)
 		if resource, binding, ok := directUsingBinding(node.value, scope); ok {
 			if _, escapes := binding.outerLocals[node.name]; escapes && node.name != resource {
-				p.add(node.pos, "SLK389", "using binding %s cannot be assigned outside its scope", resource)
+				p.add(node.pos, diagnosticCodeUsingEscape, "using binding %s cannot be assigned outside its scope", resource)
 			}
 		}
 		return expressionInfo{typ: "null", effects: info.effects}
@@ -163,7 +163,7 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		if !ok {
 			elementType = typeUnknown
 			if iterable.typ != typeUnknown {
-				p.add(node.pos, "SLK344", "for requires an iterable, found %s", displayName(iterable.typ))
+				p.add(node.pos, diagnosticCodeNotIterable, "for requires an iterable, found %s", displayName(iterable.typ))
 			}
 		}
 		bindingTypes := make([]string, len(node.bindings))
@@ -175,7 +175,7 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		} else if elementType != typeUnknown {
 			tupleTypes, tuple := tupleElementTypes(elementType)
 			if !tuple || len(tupleTypes) != len(node.bindings) {
-				p.add(node.pos, "SLK346", "loop has %d bindings, but the iterable produces %s", len(node.bindings), displayName(elementType))
+				p.add(node.pos, diagnosticCodeLoopBindings, "loop has %d bindings, but the iterable produces %s", len(node.bindings), displayName(elementType))
 			} else {
 				bindingTypes = tupleTypes
 			}
@@ -193,18 +193,18 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		return expressionInfo{typ: "null", effects: iterable.effects}
 	case *breakStatement:
 		if scope.loopDepth == 0 {
-			p.add(node.pos, "SLK345", "break is only valid inside a loop")
+			p.add(node.pos, diagnosticCodeLoopControl, "break is only valid inside a loop")
 		}
 		return expressionInfo{typ: typeNever, effects: make(effectSet)}
 	case *continueStatement:
 		if scope.loopDepth == 0 {
-			p.add(node.pos, "SLK345", "continue is only valid inside a loop")
+			p.add(node.pos, diagnosticCodeLoopControl, "continue is only valid inside a loop")
 		}
 		return expressionInfo{typ: typeNever, effects: make(effectSet)}
 	case *throwStatement:
 		info := p.checkASTExpression(node.value, scope)
 		if class := p.classes[info.typ]; class == nil || !class.isError {
-			p.add(node.pos, "SLK200", "%s does not produce an Error value", expressionLabel(node.value))
+			p.add(node.pos, diagnosticCodeErrorValue, "%s does not produce an Error value", expressionLabel(node.value))
 			return expressionInfo{typ: typeNever, effects: info.effects}
 		}
 		if info.effects == nil {
@@ -215,12 +215,12 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		return info
 	case *returnStatement:
 		if resource, _, ok := directUsingBinding(node.value, scope); ok {
-			p.add(node.pos, "SLK389", "using binding %s cannot be returned outside its scope", resource)
+			p.add(node.pos, diagnosticCodeUsingEscape, "using binding %s cannot be returned outside its scope", resource)
 		}
 		declared := p.resolveType(scope.function.namespace, scope.function.aliases, scope.function.result)
 		info := p.checkASTExpressionExpecting(node.value, scope, declared)
 		if !p.assignable(info.typ, declared) {
-			p.reportUnassignable(node.pos, info.typ, declared, "SLK340",
+			p.reportUnassignable(node.pos, info.typ, declared, diagnosticCodeReturnType,
 				"%s returns %s, expected %s", scope.function.qualified, displayName(info.typ), displayName(declared))
 		}
 		info.typ = typeNever
@@ -285,13 +285,13 @@ func (p *program) checkNameExpression(node *nameExpression, scope *astScope) exp
 		if typ, exists := scope.lookup(node.name); exists {
 			return expressionInfo{typ: typ, effects: make(effectSet)}
 		}
-		p.add(node.pos, "SLK341", "unknown value %s", node.name)
+		p.add(node.pos, diagnosticCodeUnknownValue, "unknown value %s", node.name)
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	}
 	if len(parts) == 2 {
 		receiver, exists := scope.lookup(parts[0])
 		if exists && isOptionalType(receiver) {
-			p.add(node.pos, "SLK370", "%s is %s and may be null; compare it with null and read %s inside the branch that proved it is not",
+			p.add(node.pos, diagnosticCodeOptionalReceiver, "%s is %s and may be null; compare it with null and read %s inside the branch that proved it is not",
 				parts[0], displayName(receiver), parts[1])
 			return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 		}
@@ -299,14 +299,14 @@ func (p *program) checkNameExpression(node *nameExpression, scope *astScope) exp
 		if class != nil {
 			field, ok := class.fields[parts[1]]
 			if !ok {
-				p.add(node.pos, "SLK322", "%s has no field %s", class.name, parts[1])
+				p.add(node.pos, diagnosticCodeUnknownField, "%s has no field %s", class.name, parts[1])
 				return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 			}
 			p.requireAccess(node.pos, scope.function.namespace, class.namespace, field.name, "field")
 			return expressionInfo{typ: p.resolveType(class.namespace, class.aliases, field.typ), effects: make(effectSet)}
 		}
 	}
-	p.add(node.pos, "SLK341", "unknown value %s", node.name)
+	p.add(node.pos, diagnosticCodeUnknownValue, "unknown value %s", node.name)
 	return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 }
 
@@ -329,7 +329,7 @@ func (p *program) checkArrayExpression(node *arrayExpression, scope *astScope, e
 		}
 		joined, ok := joinTypes(elementType, elementInfo.typ)
 		if !ok {
-			p.add(element.expressionPos(), "SLK342", "array elements must share one type; found %s and %s", displayName(elementType), displayName(elementInfo.typ))
+			p.add(element.expressionPos(), diagnosticCodeTypeMismatch, "array elements must share one type; found %s and %s", displayName(elementType), displayName(elementInfo.typ))
 			joined = typeUnknown
 		}
 		elementType = joined
@@ -348,7 +348,7 @@ func (p *program) checkMapExpression(node *mapExpression, scope *astScope, expec
 			return info
 		}
 		if !hasExpectedMap {
-			p.add(node.pos, "SLK382", "empty map literal needs a known Map<K, V> type here")
+			p.add(node.pos, diagnosticCodeMapTypeUnknown, "empty map literal needs a known Map<K, V> type here")
 			return info
 		}
 		node.resolved = expected
@@ -369,14 +369,14 @@ func (p *program) checkMapExpression(node *mapExpression, scope *astScope, expec
 		mergeEffects(info.effects, valueInfo.effects)
 
 		if keyInfo.typ != typeUnknown && !isMapKeyType(keyInfo.typ) {
-			p.add(entry.key.expressionPos(), "SLK383", "Map key type must be string, int, or bool; found %s", displayName(keyInfo.typ))
+			p.add(entry.key.expressionPos(), diagnosticCodeMapKeyType, "Map key type must be string, int, or bool; found %s", displayName(keyInfo.typ))
 		}
 		if keyType == "" {
 			keyType = keyInfo.typ
 		} else if joined, ok := joinTypes(keyType, keyInfo.typ); ok {
 			keyType = joined
 		} else {
-			p.add(entry.key.expressionPos(), "SLK342", "map keys must share one type; found %s and %s", displayName(keyType), displayName(keyInfo.typ))
+			p.add(entry.key.expressionPos(), diagnosticCodeTypeMismatch, "map keys must share one type; found %s and %s", displayName(keyType), displayName(keyInfo.typ))
 			keyType = typeUnknown
 		}
 		if valueType == "" {
@@ -384,7 +384,7 @@ func (p *program) checkMapExpression(node *mapExpression, scope *astScope, expec
 		} else if joined, ok := joinTypes(valueType, valueInfo.typ); ok {
 			valueType = joined
 		} else {
-			p.add(entry.value.expressionPos(), "SLK342", "map values must share one type; found %s and %s", displayName(valueType), displayName(valueInfo.typ))
+			p.add(entry.value.expressionPos(), diagnosticCodeTypeMismatch, "map values must share one type; found %s and %s", displayName(valueType), displayName(valueInfo.typ))
 			valueType = typeUnknown
 		}
 
@@ -392,7 +392,7 @@ func (p *program) checkMapExpression(node *mapExpression, scope *astScope, expec
 			switch literal.value.(type) {
 			case string, int64, bool:
 				if _, duplicate := staticKeys[literal.value]; duplicate {
-					p.add(entry.pos, "SLK384", "duplicate static map key %v", literal.value)
+					p.add(entry.pos, diagnosticCodeDuplicateMapKey, "duplicate static map key %v", literal.value)
 				}
 				staticKeys[literal.value] = struct{}{}
 			}
@@ -408,10 +408,10 @@ func (p *program) checkRangeExpression(node *rangeExpression, scope *astScope) e
 	end := p.checkASTExpression(node.end, scope)
 	mergeEffects(start.effects, end.effects)
 	if start.typ != "int" && start.typ != typeUnknown {
-		p.add(node.start.expressionPos(), "SLK342", "range start must be int, found %s", displayName(start.typ))
+		p.add(node.start.expressionPos(), diagnosticCodeTypeMismatch, "range start must be int, found %s", displayName(start.typ))
 	}
 	if end.typ != "int" && end.typ != typeUnknown {
-		p.add(node.end.expressionPos(), "SLK342", "range end must be int, found %s", displayName(end.typ))
+		p.add(node.end.expressionPos(), diagnosticCodeTypeMismatch, "range end must be int, found %s", displayName(end.typ))
 	}
 	return expressionInfo{typ: "Iterable<int>", effects: start.effects}
 }
@@ -424,7 +424,7 @@ func (p *program) checkObjectExpression(node *objectExpression, scope *astScope)
 	class := p.classes[canonical]
 	info := expressionInfo{typ: canonical, effects: make(effectSet)}
 	if class == nil {
-		p.add(node.pos, "SLK205", "unknown class %s", node.typeName)
+		p.add(node.pos, diagnosticCodeUnknownClass, "unknown class %s", node.typeName)
 		info.typ = typeUnknown
 		return info
 	}
@@ -432,13 +432,13 @@ func (p *program) checkObjectExpression(node *objectExpression, scope *astScope)
 	seen := make(map[string]struct{}, len(node.fields))
 	for _, fieldValue := range node.fields {
 		if _, duplicate := seen[fieldValue.name]; duplicate {
-			p.add(fieldValue.pos, "SLK342", "duplicate field %s.%s", class.name, fieldValue.name)
+			p.add(fieldValue.pos, diagnosticCodeTypeMismatch, "duplicate field %s.%s", class.name, fieldValue.name)
 			continue
 		}
 		seen[fieldValue.name] = struct{}{}
 		field, ok := class.fields[fieldValue.name]
 		if !ok {
-			p.add(fieldValue.pos, "SLK322", "%s has no field %s", class.name, fieldValue.name)
+			p.add(fieldValue.pos, diagnosticCodeUnknownField, "%s has no field %s", class.name, fieldValue.name)
 			continue
 		}
 		p.requireAccess(fieldValue.pos, scope.function.namespace, class.namespace, field.name, "field")
@@ -446,7 +446,7 @@ func (p *program) checkObjectExpression(node *objectExpression, scope *astScope)
 		valueInfo := p.checkASTExpressionExpecting(fieldValue.value, scope, expected)
 		mergeEffects(info.effects, valueInfo.effects)
 		if !p.assignable(valueInfo.typ, expected) {
-			p.reportUnassignable(fieldValue.pos, valueInfo.typ, expected, "SLK342",
+			p.reportUnassignable(fieldValue.pos, valueInfo.typ, expected, diagnosticCodeTypeMismatch,
 				"field %s.%s must be %s, found %s", class.name, field.name, displayName(expected), displayName(valueInfo.typ))
 		}
 	}
@@ -460,7 +460,7 @@ func (p *program) checkObjectExpression(node *objectExpression, scope *astScope)
 		if isOptionalType(expected) {
 			continue
 		}
-		p.add(node.pos, "SLK376", "%s requires field %s of type %s; only optional fields may be omitted", class.name, fieldName, displayName(expected))
+		p.add(node.pos, diagnosticCodeRequiredField, "%s requires field %s of type %s; only optional fields may be omitted", class.name, fieldName, displayName(expected))
 	}
 	return info
 }
@@ -481,7 +481,7 @@ func (p *program) checkUsingExpression(node *usingExpression, scope *astScope, e
 	info.typ = body.typ
 
 	if resource, _, ok := directUsingBlockValue(node.body, bodyScope); ok {
-		p.add(node.pos, "SLK389", "using binding %s cannot escape its scope", resource)
+		p.add(node.pos, diagnosticCodeUsingEscape, "using binding %s cannot escape its scope", resource)
 	}
 	node.result = body.typ
 	if node.resolved == typeUnknown {
@@ -489,7 +489,7 @@ func (p *program) checkUsingExpression(node *usingExpression, scope *astScope, e
 	}
 	closeMethod, ok := p.methodForType(node.resolved, "Close")
 	if !ok {
-		p.add(node.pos, "SLK385", "%s has no accessible Close method", displayName(node.resolved))
+		p.add(node.pos, diagnosticCodeCloseMethod, "%s has no accessible Close method", displayName(node.resolved))
 		return info
 	}
 	if !p.requireAccess(node.pos, scope.function.namespace, closeMethod.ownerNamespace, closeMethod.name, "method") {
@@ -497,12 +497,12 @@ func (p *program) checkUsingExpression(node *usingExpression, scope *astScope, e
 	}
 	valid := true
 	if len(closeMethod.params) != 0 {
-		p.add(node.pos, "SLK386", "%s.Close must take no arguments", displayName(node.resolved))
+		p.add(node.pos, diagnosticCodeCloseParameters, "%s.Close must take no arguments", displayName(node.resolved))
 		valid = false
 	}
 	closeResult := p.resolveType(closeMethod.namespace, closeMethod.aliases, closeMethod.result)
 	if closeResult != "null" {
-		p.add(node.pos, "SLK387", "%s.Close must return null, found %s", displayName(node.resolved), displayName(closeResult))
+		p.add(node.pos, diagnosticCodeCloseResult, "%s.Close must return null, found %s", displayName(node.resolved), displayName(closeResult))
 		valid = false
 	}
 	if valid {
@@ -536,21 +536,21 @@ func directUsingBlockValue(block *blockNode, scope *astScope) (string, usingBind
 func (p *program) checkCallExpression(node *callExpression, scope *astScope) expressionInfo {
 	name, ok := node.callee.(*nameExpression)
 	if !ok {
-		p.add(node.pos, "SLK341", "call target is not a function or method")
+		p.add(node.pos, diagnosticCodeUnknownValue, "call target is not a function or method")
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	}
 	parts := strings.Split(name.name, ".")
 	if len(parts) == 2 && parts[1] == "Close" {
 		if _, active := scope.usingBindings[parts[0]]; active {
-			p.add(node.pos, "SLK388", "cannot call Close directly on active using binding %s", parts[0])
+			p.add(node.pos, diagnosticCodeManualClose, "cannot call Close directly on active using binding %s", parts[0])
 		} else if receiverType, exists := scope.lookup(parts[0]); exists &&
 			(p.assignable(receiverType, stdIOReaderName) || p.assignable(receiverType, stdIOWriterName)) {
-			p.add(node.pos, "SLK393", "std.io resources must be closed by a using scope")
+			p.add(node.pos, diagnosticCodeResourceRequiresUsing, "std.io resources must be closed by a using scope")
 		}
 	}
 	if info, builtin := p.checkIterableCall(node, scope, name); builtin {
 		if len(node.typeArgs) > 0 {
-			p.add(node.pos, "SLK380", "%s does not take type arguments", name.name)
+			p.add(node.pos, diagnosticCodeTypeArguments, "%s does not take type arguments", name.name)
 		}
 		return info
 	}
@@ -559,7 +559,7 @@ func (p *program) checkCallExpression(node *callExpression, scope *astScope) exp
 		p.requireAccess(node.pos, scope.function.namespace, class.namespace, class.name, "error class")
 		info := expressionInfo{typ: className, effects: make(effectSet)}
 		if len(node.typeArgs) > 0 {
-			p.add(node.pos, "SLK380", "%s does not take type arguments", name.name)
+			p.add(node.pos, diagnosticCodeTypeArguments, "%s does not take type arguments", name.name)
 		}
 		for _, argument := range node.args {
 			mergeEffects(info.effects, p.checkASTExpression(argument, scope).effects)
@@ -570,7 +570,7 @@ func (p *program) checkCallExpression(node *callExpression, scope *astScope) exp
 	target, reported := p.resolveASTCall(scope.function, name, scope)
 	if target == nil {
 		if !reported {
-			p.add(node.pos, "SLK203", "unknown function or method %s", name.name)
+			p.add(node.pos, diagnosticCodeUnknownCallable, "unknown function or method %s", name.name)
 		}
 		// Avoid cascade diagnostics for type arguments on unknown callables.
 		for _, argument := range node.args {
@@ -592,11 +592,11 @@ func (p *program) checkCallExpression(node *callExpression, scope *astScope) exp
 
 	if len(target.typeParams) == 0 {
 		if len(node.typeArgs) > 0 {
-			p.add(node.pos, "SLK380", "%s does not take type arguments", target.name)
+			p.add(node.pos, diagnosticCodeTypeArguments, "%s does not take type arguments", target.name)
 		}
 	} else {
 		if len(node.typeArgs) != len(target.typeParams) {
-			p.add(node.pos, "SLK380", "%s expects %d type arguments, found %d", target.name, len(target.typeParams), len(node.typeArgs))
+			p.add(node.pos, diagnosticCodeTypeArguments, "%s expects %d type arguments, found %d", target.name, len(target.typeParams), len(node.typeArgs))
 			for _, argument := range node.args {
 				mergeEffects(info.effects, p.checkASTExpression(argument, scope).effects)
 			}
@@ -609,7 +609,7 @@ func (p *program) checkCallExpression(node *callExpression, scope *astScope) exp
 			if reason := p.jsonUnsupportedReason(canonical, map[string]bool{}); reason != "" {
 				// Only Decode/Encode currently own JSON type contracts.
 				if target.native == nativeStdJsonDecode || target.native == nativeStdJsonEncode {
-					p.add(typeArg.pos, "SLK381", "%s", reason)
+					p.add(typeArg.pos, diagnosticCodeJSONType, "%s", reason)
 				}
 			}
 			typeArgs = append(typeArgs, canonical)
@@ -639,7 +639,7 @@ func (p *program) checkCallExpression(node *callExpression, scope *astScope) exp
 	node.resolvedNative = target.native
 
 	if len(node.args) != len(params) {
-		p.add(node.pos, "SLK320", "%s expects %d arguments, found %d", target.name, len(params), len(node.args))
+		p.add(node.pos, diagnosticCodeCallArgument, "%s expects %d arguments, found %d", target.name, len(params), len(node.args))
 	}
 	for index, argument := range node.args {
 		if index >= len(params) {
@@ -670,26 +670,26 @@ func (p *program) checkIterableCall(node *callExpression, scope *astScope, name 
 	}
 	if name.name == "enumerate" {
 		if len(arguments) != 1 {
-			p.add(node.pos, "SLK320", "enumerate expects 1 argument, found %d", len(arguments))
+			p.add(node.pos, diagnosticCodeCallArgument, "enumerate expects 1 argument, found %d", len(arguments))
 			return info, true
 		}
 		elementType, ok := iterableElementType(arguments[0].typ)
 		if !ok {
-			p.add(node.pos, "SLK344", "enumerate requires an iterable, found %s", displayName(arguments[0].typ))
+			p.add(node.pos, diagnosticCodeNotIterable, "enumerate requires an iterable, found %s", displayName(arguments[0].typ))
 			return info, true
 		}
 		info.typ = iterableType("int", elementType)
 		return info, true
 	}
 	if len(arguments) < 2 {
-		p.add(node.pos, "SLK320", "zip expects at least 2 arguments, found %d", len(arguments))
+		p.add(node.pos, diagnosticCodeCallArgument, "zip expects at least 2 arguments, found %d", len(arguments))
 		return info, true
 	}
 	elementTypes := make([]string, 0, len(arguments))
 	for _, argument := range arguments {
 		elementType, ok := iterableElementType(argument.typ)
 		if !ok {
-			p.add(node.pos, "SLK344", "zip requires iterable arguments, found %s", displayName(argument.typ))
+			p.add(node.pos, diagnosticCodeNotIterable, "zip requires iterable arguments, found %s", displayName(argument.typ))
 			elementType = typeUnknown
 		}
 		elementTypes = append(elementTypes, elementType)
@@ -706,13 +706,13 @@ func (p *program) resolveASTCall(function *functionDecl, name *nameExpression, s
 	if len(parts) == 2 {
 		if receiverType, exists := scope.lookup(parts[0]); exists {
 			if isOptionalType(receiverType) {
-				p.add(name.pos, "SLK370", "%s is %s and may be null; compare it with null and call %s inside the branch that proved it is not",
+				p.add(name.pos, diagnosticCodeOptionalReceiver, "%s is %s and may be null; compare it with null and call %s inside the branch that proved it is not",
 					parts[0], displayName(receiverType), parts[1])
 				return nil, true
 			}
 			method, ok := p.methodForType(receiverType, parts[1])
 			if !ok {
-				p.add(name.pos, "SLK321", "%s has no method %s", displayName(receiverType), parts[1])
+				p.add(name.pos, diagnosticCodeUnknownMethod, "%s has no method %s", displayName(receiverType), parts[1])
 				return nil, true
 			}
 			if !p.requireAccess(name.pos, function.namespace, method.ownerNamespace, method.name, "method") {
@@ -771,12 +771,12 @@ func (p *program) assignable(actual, expected string) bool {
 // reportUnassignable emits exactly one diagnostic for a value that cannot be
 // stored where expected is required. An optionality fault gets its own code so
 // the message names the real problem instead of reading as a plain mismatch.
-func (p *program) reportUnassignable(pos position, actual, expected, fallbackCode, fallbackFormat string, args ...any) {
+func (p *program) reportUnassignable(pos position, actual, expected string, fallbackCode diagnosticCode, fallbackFormat string, args ...any) {
 	switch {
 	case actual == "null":
-		p.add(pos, "SLK371", "null needs an optional type here; %s is not optional", displayName(expected))
+		p.add(pos, diagnosticCodeNullTarget, "null needs an optional type here; %s is not optional", displayName(expected))
 	case isOptionalType(actual) && !isOptionalType(expected):
-		p.add(pos, "SLK372", "%s may be null; compare it with null and use the narrowed value where %s is required",
+		p.add(pos, diagnosticCodeOptionalValue, "%s may be null; compare it with null and use the narrowed value where %s is required",
 			displayName(actual), displayName(expected))
 	default:
 		p.add(pos, fallbackCode, fallbackFormat, args...)
@@ -796,15 +796,15 @@ func (p *program) checkAssignable(pos position, actual, expected, target string,
 	if iface := p.interfaces[required]; iface != nil {
 		if class := p.classes[actual]; class != nil {
 			if reasons := p.classSatisfies(class, iface); len(reasons) > 0 {
-				p.add(pos, "SLK320", "%s does not implement %s: %s", class.qualified, iface.qualified, strings.Join(reasons, "; "))
+				p.add(pos, diagnosticCodeCallArgument, "%s does not implement %s: %s", class.qualified, iface.qualified, strings.Join(reasons, "; "))
 				return
 			}
 		}
-		p.reportUnassignable(pos, actual, expected, "SLK320",
+		p.reportUnassignable(pos, actual, expected, diagnosticCodeCallArgument,
 			"argument %d to %s must implement %s, found %s", argument, target, displayName(expected), displayName(actual))
 		return
 	}
-	p.reportUnassignable(pos, actual, expected, "SLK320",
+	p.reportUnassignable(pos, actual, expected, diagnosticCodeCallArgument,
 		"argument %d to %s must be %s, found %s", argument, target, displayName(expected), displayName(actual))
 }
 
@@ -817,16 +817,16 @@ func (p *program) checkBinaryExpression(node *binaryExpression, scope *astScope)
 	switch node.op {
 	case "==", "!=":
 		if left.typ != typeUnknown && right.typ != typeUnknown && !comparableTypes(left.typ, right.typ) {
-			code := "SLK342"
+			code := diagnosticCodeTypeMismatch
 			if isOptionalType(left.typ) || isOptionalType(right.typ) || left.typ == "null" || right.typ == "null" {
-				code = "SLK374"
+				code = diagnosticCodeOptionalComparison
 			}
 			p.add(node.pos, code, "cannot compare %s with %s", displayName(left.typ), displayName(right.typ))
 		}
 		return expressionInfo{typ: "bool", effects: effects}
 	case "+":
 		if left.typ != right.typ || (left.typ != "int" && left.typ != "float" && left.typ != "string") {
-			p.add(node.pos, "SLK342", "operator + does not accept %s and %s", displayName(left.typ), displayName(right.typ))
+			p.add(node.pos, diagnosticCodeTypeMismatch, "operator + does not accept %s and %s", displayName(left.typ), displayName(right.typ))
 			return expressionInfo{typ: typeUnknown, effects: effects}
 		}
 		return expressionInfo{typ: left.typ, effects: effects}
@@ -839,9 +839,9 @@ func (p *program) checkIfExpression(node *ifExpression, scope *astScope, expecte
 	condition := p.checkASTExpression(node.condition, scope)
 	switch {
 	case isOptionalType(condition.typ):
-		p.add(node.condition.expressionPos(), "SLK375", "%s may be null and is not a condition; compare it with null instead", displayName(condition.typ))
+		p.add(node.condition.expressionPos(), diagnosticCodeOptionalCondition, "%s may be null and is not a condition; compare it with null instead", displayName(condition.typ))
 	case condition.typ != "bool" && condition.typ != typeUnknown:
-		p.add(node.condition.expressionPos(), "SLK342", "if condition must be bool, found %s", displayName(condition.typ))
+		p.add(node.condition.expressionPos(), diagnosticCodeTypeMismatch, "if condition must be bool, found %s", displayName(condition.typ))
 	}
 	thenScope, elseScope := scope.clone(), scope.clone()
 	narrowNullTest(node.condition, scope, thenScope, elseScope)
@@ -858,7 +858,7 @@ func (p *program) checkIfExpression(node *ifExpression, scope *astScope, expecte
 	clearAssignedNarrowings(scope, node.thenBlock, node.elseBlock)
 	joined, ok := joinTypes(thenInfo.typ, elseInfo.typ)
 	if !ok {
-		p.add(node.pos, "SLK342", "if branches must produce one type; found %s and %s", displayName(thenInfo.typ), displayName(elseInfo.typ))
+		p.add(node.pos, diagnosticCodeTypeMismatch, "if branches must produce one type; found %s and %s", displayName(thenInfo.typ), displayName(elseInfo.typ))
 		joined = typeUnknown
 	}
 	info.typ = joined
@@ -876,7 +876,7 @@ func (p *program) checkCatchExpression(node *catchExpression, scope *astScope, e
 	for _, arm := range node.arms {
 		resolved, ok := p.resolveErrorIn(scope.function.namespace, scope.function.aliases, arm.errorType.name)
 		if !ok {
-			p.add(arm.errorType.pos, "SLK200", "%s does not name an Error type", arm.errorType.name)
+			p.add(arm.errorType.pos, diagnosticCodeErrorValue, "%s does not name an Error type", arm.errorType.name)
 			continue
 		}
 		if class := p.classes[resolved]; class != nil {
@@ -898,7 +898,7 @@ func (p *program) checkCatchExpression(node *catchExpression, scope *astScope, e
 		mergeEffects(result.effects, armInfo.effects)
 		clearAssignedNarrowings(scope, arm.value)
 		if armInfo.typ != typeNever && result.typ != armInfo.typ {
-			p.add(arm.errorType.pos, "SLK342", "catch success and error paths must produce one type; found %s and %s", displayName(result.typ), displayName(armInfo.typ))
+			p.add(arm.errorType.pos, diagnosticCodeTypeMismatch, "catch success and error paths must produce one type; found %s and %s", displayName(result.typ), displayName(armInfo.typ))
 			result.typ = typeUnknown
 		}
 	}
@@ -908,7 +908,7 @@ func (p *program) checkCatchExpression(node *catchExpression, scope *astScope, e
 			missing = append(missing, displayName(name))
 		}
 		sort.Strings(missing)
-		p.add(node.pos, "SLK202", "non-exhaustive catch for %s; missing %s", expressionLabel(node.value), strings.Join(missing, ", "))
+		p.add(node.pos, diagnosticCodeNonExhaustiveCatch, "non-exhaustive catch for %s; missing %s", expressionLabel(node.value), strings.Join(missing, ", "))
 	}
 	return result
 }
@@ -922,7 +922,7 @@ func (p *program) checkResultExpression(node *resultExpression, scope *astScope,
 	}
 	success, failure, isResult := resultTypeArgs(expected)
 	if !isResult {
-		p.add(node.pos, "SLK351", "%s needs a known Result type here; give the enclosing return type, argument, or field a Result<T, E> type", node.label())
+		p.add(node.pos, diagnosticCodeResultTypeUnknown, "%s needs a known Result type here; give the enclosing return type, argument, or field a Result<T, E> type", node.label())
 		return expressionInfo{typ: typeUnknown, effects: p.checkASTExpression(node.value, scope).effects}
 	}
 	payload := success
@@ -931,7 +931,7 @@ func (p *program) checkResultExpression(node *resultExpression, scope *astScope,
 	}
 	info := p.checkASTExpressionExpecting(node.value, scope, payload)
 	if !p.assignable(info.typ, payload) {
-		p.reportUnassignable(node.pos, info.typ, payload, "SLK350",
+		p.reportUnassignable(node.pos, info.typ, payload, diagnosticCodeResultPayload,
 			"%s payload must be %s, found %s", node.label(), displayName(payload), displayName(info.typ))
 	}
 	node.resolved = expected
@@ -945,18 +945,18 @@ func (p *program) checkPropagateExpression(node *propagateExpression, scope *ast
 	declared := p.resolveType(scope.function.namespace, scope.function.aliases, scope.function.result)
 	_, enclosingFailure, returnsResult := resultTypeArgs(declared)
 	if !returnsResult {
-		p.add(node.pos, "SLK353", "? requires %s to return Result, found %s", scope.function.qualified, displayName(declared))
+		p.add(node.pos, diagnosticCodePropagateReturn, "? requires %s to return Result, found %s", scope.function.qualified, displayName(declared))
 		return expressionInfo{typ: typeUnknown, effects: info.effects}
 	}
 	success, failure, isResult := resultTypeArgs(info.typ)
 	if !isResult {
 		if info.typ != typeUnknown {
-			p.add(node.pos, "SLK352", "? requires a Result value, found %s", displayName(info.typ))
+			p.add(node.pos, diagnosticCodePropagateValue, "? requires a Result value, found %s", displayName(info.typ))
 		}
 		return expressionInfo{typ: typeUnknown, effects: info.effects}
 	}
 	if failure != enclosingFailure {
-		p.add(node.pos, "SLK354", "? cannot propagate %s from %s, which fails with %s", displayName(failure), scope.function.qualified, displayName(enclosingFailure))
+		p.add(node.pos, diagnosticCodePropagateError, "? cannot propagate %s from %s, which fails with %s", displayName(failure), scope.function.qualified, displayName(enclosingFailure))
 		return expressionInfo{typ: typeUnknown, effects: info.effects}
 	}
 	return expressionInfo{typ: success, effects: info.effects}
@@ -971,7 +971,7 @@ func (p *program) checkMatchExpression(node *matchExpression, scope *astScope, e
 	success, failure, isResult := resultTypeArgs(valueInfo.typ)
 	if !isResult {
 		if valueInfo.typ != typeUnknown {
-			p.add(node.pos, "SLK355", "match requires a Result value, found %s", displayName(valueInfo.typ))
+			p.add(node.pos, diagnosticCodeMatchValue, "match requires a Result value, found %s", displayName(valueInfo.typ))
 		}
 		return info
 	}
@@ -979,17 +979,17 @@ func (p *program) checkMatchExpression(node *matchExpression, scope *astScope, e
 	armType := ""
 	for _, arm := range node.arms {
 		if previous, duplicate := handled[arm.pattern]; duplicate {
-			p.add(arm.pos, "SLK357", "duplicate %s arm; already handled at %s:%d:%d", arm.pattern, previous.file, previous.line, previous.column)
+			p.add(arm.pos, diagnosticCodeMatchArm, "duplicate %s arm; already handled at %s:%d:%d", arm.pattern, previous.file, previous.line, previous.column)
 			continue
 		}
 		if catchAll, exists := handled[matchPatternAny]; exists {
-			p.add(arm.pos, "SLK357", "unreachable %s arm; the _ arm at %s:%d:%d already matches", arm.pattern, catchAll.file, catchAll.line, catchAll.column)
+			p.add(arm.pos, diagnosticCodeMatchArm, "unreachable %s arm; the _ arm at %s:%d:%d already matches", arm.pattern, catchAll.file, catchAll.line, catchAll.column)
 			continue
 		}
 		_, hasOk := handled[matchPatternOk]
 		_, hasErr := handled[matchPatternErr]
 		if arm.pattern == matchPatternAny && hasOk && hasErr {
-			p.add(arm.pos, "SLK357", "unreachable _ arm; Ok and Err are already handled")
+			p.add(arm.pos, diagnosticCodeMatchArm, "unreachable _ arm; Ok and Err are already handled")
 			continue
 		}
 		handled[arm.pattern] = arm.pos
@@ -1012,16 +1012,16 @@ func (p *program) checkMatchExpression(node *matchExpression, scope *astScope, e
 			continue
 		}
 		if armInfo.typ != armType {
-			p.add(arm.pos, "SLK358", "match arms must produce one type; found %s and %s", displayName(armType), displayName(armInfo.typ))
+			p.add(arm.pos, diagnosticCodeMatchArmType, "match arms must produce one type; found %s and %s", displayName(armType), displayName(armInfo.typ))
 			armType = typeUnknown
 		}
 	}
 	if _, catchAll := handled[matchPatternAny]; !catchAll {
 		if _, ok := handled[matchPatternOk]; !ok {
-			p.add(node.pos, "SLK356", "match does not handle Ok; add an Ok(...) or _ arm")
+			p.add(node.pos, diagnosticCodeMatchExhaustiveness, "match does not handle Ok; add an Ok(...) or _ arm")
 		}
 		if _, ok := handled[matchPatternErr]; !ok {
-			p.add(node.pos, "SLK356", "match does not handle Err; add an Err(...) or _ arm")
+			p.add(node.pos, diagnosticCodeMatchExhaustiveness, "match does not handle Err; add an Err(...) or _ arm")
 		}
 	}
 	if armType != "" {

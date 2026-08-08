@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const DescriptionSchemaVersion = 3
+const DescriptionSchemaVersion = 4
 
 var ErrUnknownSymbol = errors.New("unknown symbol")
 
