@@ -85,6 +85,7 @@ type goGenerator struct {
 	program *program
 	output  strings.Builder
 	nextID  int
+	imports map[string]bool
 }
 
 func (p *program) generateGo() (string, error) {
@@ -95,19 +96,43 @@ func (p *program) generateGo() (string, error) {
 	if len(main.params) != 0 {
 		return "", fmt.Errorf("root.main must not accept parameters")
 	}
-	generator := &goGenerator{program: p}
+	generator := &goGenerator{program: p, imports: map[string]bool{
+		"errors":  true,
+		"fmt":     true,
+		"os":      true,
+		"reflect": true,
+		"strings": true,
+	}}
+	// Collect JSON codecs first so import decisions are stable before emission.
+	jsonNeeds := generator.collectJSONCodecs()
+	if len(jsonNeeds) > 0 {
+		generator.imports["bytes"] = true
+		generator.imports["encoding/json"] = true
+		generator.imports["io"] = true
+		generator.imports["math"] = true
+		generator.imports["strconv"] = true
+		for _, need := range jsonNeeds {
+			if need.operation == string(nativeStdJsonDecode) {
+				generator.imports["unicode/utf8"] = true
+				break
+			}
+		}
+	}
+	// Programs that use std.env need os; it is already imported unconditionally
+	// because the shared runtime prints through os.Stdout/Stderr.
 	generator.line("package main")
 	generator.line("")
 	generator.line("import (")
-	generator.line("\"errors\"")
-	generator.line("\"fmt\"")
-	generator.line("\"os\"")
-	generator.line("\"reflect\"")
-	generator.line("\"strings\"")
+	for _, name := range sortedKeys(generator.imports) {
+		generator.line("%q", name)
+	}
 	generator.line(")")
 	generator.line("")
 	generator.emitRuntime()
 	if err := generator.emitDeclarations(); err != nil {
+		return "", err
+	}
+	if err := generator.emitJSONSupport(); err != nil {
 		return "", err
 	}
 	if err := generator.emitFunctions(); err != nil {
@@ -797,6 +822,24 @@ func (g *goGenerator) emitCallExpression(body *strings.Builder, node *callExpres
 			message = "slickFormat(" + arguments[0] + ")"
 		}
 		fmt.Fprintf(body, "return &%s{slickMessage: %s}, nil\n", goClassName(errorType), message)
+		return nil
+	}
+	if node.resolvedNative == nativeStdJsonDecode || node.resolvedNative == nativeStdJsonEncode {
+		if len(node.resolvedTypeArgs) != 1 {
+			return fmt.Errorf("generated JSON call is missing its type argument")
+		}
+		operation := "Decode"
+		if node.resolvedNative == nativeStdJsonEncode {
+			operation = "Encode"
+		}
+		// Arguments already match the substituted parameter types from checking.
+		for index := range arguments {
+			if index >= len(node.resolvedParams) {
+				break
+			}
+			arguments[index] = g.convert(arguments[index], argumentTypes[index], node.resolvedParams[index])
+		}
+		fmt.Fprintf(body, "return %s(%s)\n", goJSONHelperName(operation, node.resolvedTypeArgs[0]), strings.Join(arguments, ", "))
 		return nil
 	}
 	call := ""
