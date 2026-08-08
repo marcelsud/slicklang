@@ -123,7 +123,7 @@ Kind: namespace
 Visibility: public
 Children:
   namespace std.bytes (public)
-  … 3 more entries (re-run with a higher ` + "`--budget`" + `; use ` + "`--budget 8`" + ` for full output)
+  … 6 more entries (re-run with a higher ` + "`--budget`" + `; use ` + "`--budget 11`" + ` for full output)
 `
 	if stdout.String() != want {
 		t.Fatalf("budgeted human output:\n%s\nwant:\n%s", stdout.String(), want)
@@ -141,12 +141,12 @@ func TestDescribeJSONBudgetContract(t *testing.T) {
   "budget": {
     "unit": "lines",
     "limit": 39,
-    "required": 40,
+    "required": 55,
     "truncated": true,
     "omitted": [
       {
         "section": "children",
-        "count": 3
+        "count": 6
       }
     ]
   },
