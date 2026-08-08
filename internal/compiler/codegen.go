@@ -299,7 +299,14 @@ func (g *goGenerator) emitDeclarations() error {
 func (g *goGenerator) emitFunctions() error {
 	functionNames := sortedKeys(g.program.functions)
 	for _, name := range functionNames {
-		if err := g.emitFunction(g.program.functions[name], ""); err != nil {
+		function := g.program.functions[name]
+		if function.native != "" {
+			if err := g.emitNativeFunction(function); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := g.emitFunction(function, ""); err != nil {
 			return err
 		}
 	}

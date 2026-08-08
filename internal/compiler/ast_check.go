@@ -474,7 +474,7 @@ func (p *program) resolveASTCall(function *functionDecl, name *nameExpression, s
 			return &callableTarget{name: name.name, namespace: method.namespace, aliases: method.aliases, params: method.params, result: method.result, throwSet: method.throwSet}, false
 		}
 	}
-	if strings.Contains(name.name, ".") && !strings.HasPrefix(name.name, "root.") {
+	if strings.Contains(name.name, ".") && !isAbsoluteCanonicalName(name.name) {
 		return nil, false
 	}
 	callee := p.resolveFunction(function, name.name)
@@ -987,7 +987,7 @@ func expressionLabel(expression expressionNode) string {
 }
 
 func (p *program) resolveNameIn(namespace string, aliases map[string]aliasDecl, name string) string {
-	if strings.HasPrefix(name, "root.") {
+	if isAbsoluteCanonicalName(name) {
 		return name
 	}
 	if alias, ok := aliases[name]; ok {

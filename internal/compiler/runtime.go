@@ -169,6 +169,9 @@ func (p *program) callFunction(function *functionDecl, args []runtimeValue, self
 	if self != nil {
 		frame.locals["self"] = *self
 	}
+	if function.native != "" {
+		return p.callNativeFunction(function, frame)
+	}
 	result := p.resolveType(function.namespace, function.aliases, function.result)
 	value, err := p.evalBlock(function.ast, frame)
 	var returned *returnSignal

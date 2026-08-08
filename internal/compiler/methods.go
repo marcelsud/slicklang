@@ -51,7 +51,7 @@ func (p *program) linkMethods() {
 				continue
 			}
 			receiver = implementation.receiver.name
-			if !strings.HasPrefix(receiver, "root.") {
+			if !isAbsoluteCanonicalName(receiver) {
 				receiver = qualify(implementation.namespace, receiver)
 			}
 		}
@@ -205,7 +205,7 @@ func (p *program) canonicalTypeName(namespace string, aliases map[string]aliasDe
 	if isBuiltinType(name) || strings.ContainsAny(name, "<>()[]?|,") {
 		return name
 	}
-	if strings.HasPrefix(name, "root.") {
+	if isAbsoluteCanonicalName(name) {
 		return name
 	}
 	if alias, ok := aliases[name]; ok {
@@ -238,7 +238,7 @@ func (p *program) resolveErrorIn(namespace string, aliases map[string]aliasDecl,
 	if name == "Error" {
 		return "Error", true
 	}
-	if !strings.HasPrefix(name, "root.") {
+	if !isAbsoluteCanonicalName(name) {
 		if alias, ok := aliases[name]; ok {
 			name = alias.target
 		} else {

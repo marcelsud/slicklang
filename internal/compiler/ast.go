@@ -245,6 +245,9 @@ type bodyParser struct {
 
 func (p *program) parseBodies() {
 	for _, function := range p.functions {
+		if function.native != "" {
+			continue
+		}
 		function.ast = p.parseBody(function.body, function.pos)
 	}
 	for _, implementation := range p.methodImpls {

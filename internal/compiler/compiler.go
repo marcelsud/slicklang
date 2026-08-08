@@ -119,6 +119,7 @@ type functionDecl struct {
 	receiver          typeRef
 	receiverCanonical string
 	inline            bool
+	native            nativeFunction
 	pos               position
 }
 
@@ -207,6 +208,7 @@ func compile(sources []Source) (*program, []Diagnostic) {
 		interfaces: make(map[string]*interfaceDecl),
 		functions:  make(map[string]*functionDecl),
 	}
+	registerStandardLibrary(prog)
 	for _, source := range sources {
 		if !validNamespace(source.Namespace) {
 			prog.add(position{file: source.Name, line: 1, column: 1}, "SLK100", "invalid namespace %q", source.Namespace)
@@ -300,8 +302,8 @@ type parser struct {
 
 func (p *parser) parseUse() {
 	target, next, ok := readQualified(p.tokens, p.index)
-	if !ok || !strings.HasPrefix(target.name, "root.") {
-		p.error(p.current().pos, "use target must be an absolute root namespace path")
+	if !ok || !isAbsoluteCanonicalName(target.name) {
+		p.error(p.current().pos, "use target must be an absolute root or std namespace path")
 		return
 	}
 	p.index = next
@@ -906,7 +908,7 @@ func (p *program) resolveFunction(function *functionDecl, name string) *function
 }
 
 func (p *program) resolveName(function *functionDecl, name string) string {
-	if strings.HasPrefix(name, "root.") {
+	if isAbsoluteCanonicalName(name) {
 		return name
 	}
 	if alias, ok := function.aliases[name]; ok {

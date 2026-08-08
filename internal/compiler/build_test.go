@@ -25,6 +25,7 @@ var exampleOutputs = map[string]string{
 	"result-propagation": "localhost:8080; empty host; 6; zero is not scorable",
 	"result-types":       "42; corrupt payload; no such record; [alpha, beta]; cannot divide by zero; 7",
 	"result-vs-throws":   "recovered from a thrown error; disk unavailable; disk unavailable",
+	"std-env":            "missing;Ada;missing",
 }
 
 func examplePath(project string) string {
