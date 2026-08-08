@@ -858,7 +858,7 @@ func TestResultNamesAreReserved(t *testing.T) {
 	}
 	for name, source := range tests {
 		t.Run(name, func(t *testing.T) {
-			assertDiagnostic(t, checkResult(t, source), "SLK001", "is reserved by Result")
+			assertDiagnostic(t, checkResult(t, source), "SLK001", "is reserved by the compiler")
 		})
 	}
 }

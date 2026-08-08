@@ -3,9 +3,52 @@ package compiler
 import "strings"
 
 const (
-	resultTypeName = "Result"
-	mapTypeName    = "Map"
+	resultTypeName   = "Result"
+	mapTypeName      = "Map"
+	iterableTypeName = "Iterable"
+	errorTypeName    = "Error"
 )
+
+const (
+	coreKindPrimitive = "language primitive"
+	coreKindGeneric   = "generic type"
+	coreKindInterface = "interface"
+)
+
+type coreTypeDecl struct {
+	kind       string
+	typeParams []string
+}
+
+// coreTypeRegistry is the authoritative declaration registry for types owned
+// by the language. Type checking, highlighting, and discovery all consume it.
+var coreTypeRegistry = map[string]coreTypeDecl{
+	"bool":           {kind: coreKindPrimitive},
+	"bytes":          {kind: coreKindPrimitive},
+	"float":          {kind: coreKindPrimitive},
+	"int":            {kind: coreKindPrimitive},
+	"null":           {kind: coreKindPrimitive},
+	"string":         {kind: coreKindPrimitive},
+	errorTypeName:    {kind: coreKindInterface},
+	iterableTypeName: {kind: coreKindGeneric, typeParams: []string{"T"}},
+	mapTypeName:      {kind: coreKindGeneric, typeParams: []string{"K", "V"}},
+	resultTypeName:   {kind: coreKindGeneric, typeParams: []string{"T", "E"}},
+}
+
+func coreType(name string) (coreTypeDecl, bool) {
+	declaration, ok := coreTypeRegistry[name]
+	return declaration, ok
+}
+
+func coreGenericType(name string) (coreTypeDecl, bool) {
+	declaration, ok := coreType(name)
+	return declaration, ok && declaration.kind == coreKindGeneric
+}
+
+func isBuiltinType(name string) bool {
+	declaration, ok := coreType(name)
+	return ok && declaration.kind == coreKindPrimitive
+}
 
 // splitTypeList splits a comma-separated type list at bracket depth zero, so
 // nested generic and tuple commas stay inside their own element.
@@ -135,7 +178,8 @@ func isResultConstructor(name string) bool {
 }
 
 func isReservedTypeName(name string) bool {
-	return name == resultTypeName || name == mapTypeName || isResultConstructor(name)
+	_, core := coreType(name)
+	return core || isResultConstructor(name)
 }
 
 // typeKind names the outermost shape of a Slick type.

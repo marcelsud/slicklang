@@ -16,6 +16,9 @@ func run(args []string) int {
 	if len(args) == 0 {
 		return reportUsage()
 	}
+	if args[0] == "describe" {
+		return runDescribe(args[1:], os.Stdout, os.Stderr)
+	}
 	if args[0] == "build" {
 		path, output, err := parseBuildArgs(args[1:])
 		if err != nil {
@@ -92,9 +95,7 @@ func parseBuildArgs(args []string) (string, string, error) {
 }
 
 func reportUsage() int {
-	fmt.Fprintln(os.Stderr, "usage: slick <check|run> [path]")
-	fmt.Fprintln(os.Stderr, "       slick build [path] -o <output>")
-	return 2
+	return reportUsageTo(os.Stderr)
 }
 
 func reportDiagnostics(diagnostics []compiler.Diagnostic) bool {

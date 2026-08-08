@@ -332,7 +332,7 @@ func (p *parser) parseClass() {
 		return
 	}
 	if isReservedTypeName(name.text) {
-		p.error(name.pos, "class name %s is reserved by Result", name.text)
+		p.error(name.pos, "class name %s is reserved by the compiler", name.text)
 	}
 	class := &classDecl{
 		name:            name.text,
@@ -482,7 +482,7 @@ func (p *parser) parseInterface() {
 		return
 	}
 	if isReservedTypeName(name.text) {
-		p.error(name.pos, "interface name %s is reserved by Result", name.text)
+		p.error(name.pos, "interface name %s is reserved by the compiler", name.text)
 	}
 	if !p.accept("{") {
 		p.error(p.current().pos, "expected interface body")
@@ -561,7 +561,7 @@ func (p *parser) parseFunction() {
 		return
 	}
 	if len(parts) == 1 && isResultConstructor(ref.name) {
-		p.error(ref.pos, "function name %s is reserved by Result", ref.name)
+		p.error(ref.pos, "function name %s is reserved by the compiler", ref.name)
 		return
 	}
 	if len(parts) == 1 {

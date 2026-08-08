@@ -71,31 +71,21 @@ func (p *program) checkTypeName(pos position, namespace, name string) {
 		}
 		return
 	case typeKindGeneric:
-		switch parsed.base {
-		case resultTypeName:
-			if len(parsed.args) != 2 {
-				p.add(pos, "SLK361", "Result takes 2 type arguments, found %d", len(parsed.args))
-			}
-		case "Iterable":
-			if len(parsed.args) != 1 {
-				p.add(pos, "SLK361", "Iterable takes 1 type argument, found %d", len(parsed.args))
-			}
-		case mapTypeName:
-			if len(parsed.args) != 2 {
-				p.add(pos, "SLK361", "Map takes 2 type arguments, found %d", len(parsed.args))
-			} else if !isMapKeyType(parsed.args[0]) {
-				p.add(pos, "SLK361", "Map key type must be string, int, or bool; found %s", displayName(parsed.args[0]))
-			}
-		default:
+		declaration, known := coreGenericType(parsed.base)
+		if !known {
 			p.add(pos, "SLK361", "unknown generic type %s", parsed.base)
+		} else if len(parsed.args) != len(declaration.typeParams) {
+			p.addTypeArityDiagnostic(pos, parsed.base, len(declaration.typeParams), len(parsed.args))
+		} else if parsed.base == mapTypeName && !isMapKeyType(parsed.args[0]) {
+			p.add(pos, "SLK361", "Map key type must be string, int, or bool; found %s", displayName(parsed.args[0]))
 		}
 		for _, arg := range parsed.args {
 			p.checkTypeName(pos, namespace, arg)
 		}
 		return
 	}
-	if name == mapTypeName {
-		p.add(pos, "SLK361", "Map takes 2 type arguments, found 0")
+	if declaration, generic := coreGenericType(name); generic {
+		p.addTypeArityDiagnostic(pos, name, len(declaration.typeParams), 0)
 		return
 	}
 	if strings.ContainsRune(name, '<') {
@@ -109,4 +99,12 @@ func (p *program) checkTypeName(pos position, namespace, name string) {
 	if iface := p.interfaces[name]; iface != nil {
 		p.requireAccess(pos, namespace, iface.namespace, iface.name, "interface")
 	}
+}
+
+func (p *program) addTypeArityDiagnostic(pos position, name string, expected, actual int) {
+	argument := "arguments"
+	if expected == 1 {
+		argument = "argument"
+	}
+	p.add(pos, "SLK361", "%s takes %d type %s, found %d", name, expected, argument, actual)
 }

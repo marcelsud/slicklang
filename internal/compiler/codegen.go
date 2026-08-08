@@ -1238,11 +1238,8 @@ func (g *goGenerator) resolveDeclaredType(namespace string, aliases map[string]a
 	// declared Iterable<Dog> or Result<Dog, E> names the same type in the
 	// checker and in generated Go.
 	if base, args, generic := genericType(name); generic {
-		switch {
-		case base == resultTypeName && len(args) == 2:
-		case base == "Iterable" && len(args) == 1:
-		case base == mapTypeName && len(args) == 2:
-		default:
+		declaration, supported := coreGenericType(base)
+		if !supported || len(args) != len(declaration.typeParams) {
 			return "", fmt.Errorf("Go backend does not support type %s", name)
 		}
 		resolved := make([]string, len(args))
@@ -1255,7 +1252,7 @@ func (g *goGenerator) resolveDeclaredType(namespace string, aliases map[string]a
 		}
 		return base + "<" + strings.Join(resolved, ",") + ">", nil
 	}
-	if isBuiltinType(name) || name == "Error" || strings.HasPrefix(name, "Iterable<") || strings.HasPrefix(name, "(") {
+	if declaration, ok := coreType(name); ok && declaration.kind != coreKindGeneric || strings.HasPrefix(name, "(") {
 		return name, nil
 	}
 	if strings.ContainsAny(name, "?|") || strings.Contains(name, "<") {

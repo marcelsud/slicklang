@@ -93,14 +93,12 @@ func classifyIdent(text string) TokenClass {
 	switch text {
 	case "true", "false", "null":
 		return ClassConstant
-	case "Error", resultTypeName, mapTypeName, "Iterable":
+	}
+	if _, ok := coreType(text); ok {
 		return ClassType
 	}
 	if isResultConstructor(text) || isIterableBuiltin(text) {
 		return ClassConstructor
-	}
-	if isBuiltinType(text) {
-		return ClassType
 	}
 	return ClassIdent
 }

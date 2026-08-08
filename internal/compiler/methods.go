@@ -265,8 +265,8 @@ func (p *program) methodForType(typeName, methodName string) (*methodSignature, 
 }
 
 func (p *program) resolveErrorIn(namespace string, aliases map[string]aliasDecl, name string) (string, bool) {
-	if name == "Error" {
-		return "Error", true
+	if name == errorTypeName {
+		return errorTypeName, true
 	}
 	if !isAbsoluteCanonicalName(name) {
 		if alias, ok := aliases[name]; ok {
@@ -277,13 +277,4 @@ func (p *program) resolveErrorIn(namespace string, aliases map[string]aliasDecl,
 	}
 	decl := p.classes[name]
 	return name, decl != nil && decl.isError
-}
-
-func isBuiltinType(name string) bool {
-	switch name {
-	case "bool", "bytes", "float", "int", "null", "string":
-		return true
-	default:
-		return false
-	}
 }
