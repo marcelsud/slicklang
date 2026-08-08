@@ -19,6 +19,9 @@ func run(args []string) int {
 	if args[0] == "describe" {
 		return runDescribe(args[1:], os.Stdout, os.Stderr)
 	}
+	if args[0] == "fmt" {
+		return runFmt(args[1:], os.Stdout, os.Stderr)
+	}
 	if args[0] == "build" {
 		path, output, err := parseBuildArgs(args[1:])
 		if err != nil {

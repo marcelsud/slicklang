@@ -8,15 +8,11 @@ function ValueOr(Value: string?, Fallback: string) -> string {
 
 function Exercise(Name: string) -> Result<string, std.env.Failure> {
     std.env.Unset(Name)?
-
     let Before = ValueOr(std.env.Get(Name), "missing")
-
     std.env.Set(Name, "Ada")?
     let During = ValueOr(std.env.Get(Name), "missing")
-
     std.env.Unset(Name)?
     let After = ValueOr(std.env.Get(Name), "missing")
-
     Ok(`${Before};${During};${After}`)
 }
 

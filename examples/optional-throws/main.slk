@@ -61,7 +61,6 @@ function find_user(Id: int) -> User? {
 // and the failure is checked.
 function require_user(Id: int) -> User throws UserNotFoundError {
     let Found = find_user(Id)
-
     if (Found == null) {
         throw UserNotFoundError {
             Message: "no such user"
@@ -84,7 +83,6 @@ function describe(Id: int) -> string throws UserNotFoundError {
 function nickname_of(Id: int) -> string throws UserNotFoundError {
     let Person = require_user(Id)
     let Nickname = Person.Nickname
-
     if (Nickname == null) {
         Person.Name + " has no nickname"
     } else {
@@ -107,6 +105,5 @@ function main() -> string {
     let Nicknamed = nickname_of(1) catch (error) {
         UserNotFoundError => "missing"
     }
-
     `${Named}; ${Plain}; ${Absent}; ${Nicknamed}`
 }

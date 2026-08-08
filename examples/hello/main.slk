@@ -1,4 +1,6 @@
 function main() -> string {
-    let dog = root.models.Dog { Name: "Ada" }
+    let dog = root.models.Dog {
+        Name: "Ada"
+    }
     dog.Bark()
 }

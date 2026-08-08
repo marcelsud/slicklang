@@ -152,6 +152,7 @@ func reportUsageTo(stderr io.Writer) int {
 	fmt.Fprintln(stderr, "usage: slick <check|run> [path]")
 	fmt.Fprintln(stderr, "       slick build [path] -o <output>")
 	fmt.Fprintln(stderr, "       slick describe [--json] [--budget <lines>] <symbol> [path]")
+	fmt.Fprintln(stderr, "       slick fmt [--check] [path]")
 	return 2
 }
 

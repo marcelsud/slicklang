@@ -35,7 +35,9 @@ function parse_flag(Text: string) -> Result<bool, ParseError> {
         if (Text == "off") {
             Ok(false)
         } else {
-            Err(ParseError { Message: "bad flag " + Text })
+            Err(ParseError {
+                Message: "bad flag " + Text
+            })
         }
     }
 }

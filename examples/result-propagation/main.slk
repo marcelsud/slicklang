@@ -27,11 +27,23 @@ class LoadError implements Error {
 }
 
 function read_host(Raw: string) -> Result<string, LoadError> {
-    if (Raw == "") { Err(LoadError { Message: "empty host" }) } else { Ok(Raw) }
+    if (Raw == "") {
+        Err(LoadError {
+            Message: "empty host"
+        })
+    } else {
+        Ok(Raw)
+    }
 }
 
 function read_port(Raw: int) -> Result<int, LoadError> {
-    if (Raw == 0) { Err(LoadError { Message: "missing port" }) } else { Ok(Raw) }
+    if (Raw == 0) {
+        Err(LoadError {
+            Message: "missing port"
+        })
+    } else {
+        Ok(Raw)
+    }
 }
 
 class Config {
@@ -52,7 +64,13 @@ function Config.Endpoint() -> Result<string, LoadError> {
 }
 
 function score(Value: int) -> Result<int, LoadError> {
-    if (Value == 0) { Err(LoadError { Message: "zero is not scorable" }) } else { Ok(Value) }
+    if (Value == 0) {
+        Err(LoadError {
+            Message: "zero is not scorable"
+        })
+    } else {
+        Ok(Value)
+    }
 }
 
 // `?` short-circuits out of a loop too: the first Err returns from `total`
@@ -67,11 +85,29 @@ function total(Values: int[]) -> Result<int, LoadError> {
 }
 
 function main() -> string {
-    let Good = Config { Host: "localhost", Port: 8080 }
-    let Blank = Config { Host: "", Port: 8080 }
-    let Ready = match Good.Endpoint() { Ok(Text) => Text Err(Problem) => Problem.Message }
-    let Broken = match Blank.Endpoint() { Ok(Text) => Text Err(Problem) => Problem.Message }
-    let Summed = match total([1, 2, 3]) { Ok(Sum) => `${Sum}` Err(Problem) => Problem.Message }
-    let Stopped = match total([1, 0, 3]) { Ok(Sum) => `${Sum}` Err(Problem) => Problem.Message }
+    let Good = Config {
+        Host: "localhost"
+        Port: 8080
+    }
+    let Blank = Config {
+        Host: ""
+        Port: 8080
+    }
+    let Ready = match Good.Endpoint() {
+        Ok(Text) => Text
+        Err(Problem) => Problem.Message
+    }
+    let Broken = match Blank.Endpoint() {
+        Ok(Text) => Text
+        Err(Problem) => Problem.Message
+    }
+    let Summed = match total([1, 2, 3]) {
+        Ok(Sum) => `${Sum}`
+        Err(Problem) => Problem.Message
+    }
+    let Stopped = match total([1, 0, 3]) {
+        Ok(Sum) => `${Sum}`
+        Err(Problem) => Problem.Message
+    }
     `${Ready}; ${Broken}; ${Summed}; ${Stopped}`
 }
