@@ -97,11 +97,12 @@ func (p *program) generateGo() (string, error) {
 		return "", fmt.Errorf("root.main must not accept parameters")
 	}
 	generator := &goGenerator{program: p, imports: map[string]bool{
-		"errors":  true,
-		"fmt":     true,
-		"os":      true,
-		"reflect": true,
-		"strings": true,
+		"errors":        true,
+		"fmt":           true,
+		"os":            true,
+		"reflect":       true,
+		"path/filepath": true,
+		"strings":       true,
 	}}
 	// Collect JSON codecs first so import decisions are stable before emission.
 	jsonNeeds := generator.collectJSONCodecs()
@@ -1073,6 +1074,9 @@ func (g *goGenerator) nameExpression(node *nameExpression, scope *goScope) (stri
 }
 
 func (g *goGenerator) expressionType(expression expressionNode, scope *goScope) (string, error) {
+	if node, ok := expression.(*arrayExpression); ok && node.resolved != "" {
+		return node.resolved, nil
+	}
 	locals := make(map[string]string, len(scope.locals))
 	for name, binding := range scope.locals {
 		locals[name] = binding.typ
