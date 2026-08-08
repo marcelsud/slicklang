@@ -1,0 +1,14 @@
+use root.credentials.Credential as Credential
+use root.models.Dog as Dog
+use root.models.Cat as Cat
+
+function main() -> string {
+    let Credential = Credential { Value: "secret" }
+    let Dog = Dog { Name: "Ada" }
+    let Cat = Cat { Name: "Grace" }
+
+    let Redacted = Credential.Redact()
+    let DogSound = Dog.Speak()
+    let CatSound = Cat.Speak()
+    `${Redacted}; ${DogSound}; ${CatSound}`
+}

@@ -1,0 +1,4 @@
+// This file shares root.models with Dog, so the default policy permits it.
+function Dog.Speak() -> string {
+    `${self.Name}: woof`
+}

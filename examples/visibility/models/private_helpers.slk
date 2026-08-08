@@ -1,0 +1,4 @@
+// Files in root.models share access to lowercase declarations.
+function format_secret(Value: string) -> string {
+    `[${Value}]`
+}

@@ -1,0 +1,4 @@
+// The canonical receiver names Cat across namespaces; Speak was declared by Cat.
+function root.models.Cat.Speak() -> string {
+    `${self.Name}: meow`
+}

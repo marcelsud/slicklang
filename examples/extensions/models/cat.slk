@@ -1,0 +1,5 @@
+// extension(global) permits public declared methods to be completed elsewhere.
+class Cat extension(global) {
+    Name: string
+    function Speak() -> string
+}

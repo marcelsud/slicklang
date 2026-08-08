@@ -83,18 +83,18 @@ func (p *program) linkMethods() {
 			}
 		}
 
+		contract := class.methods[implementation.name]
+		if contract == nil {
+			p.add(implementation.pos, "SLK314", "%s.%s is not declared by %s", class.qualified, implementation.name, class.qualified)
+			continue
+		}
+
 		if previous := class.implementations[implementation.name]; previous != nil {
 			p.add(implementation.pos, "SLK311", "duplicate implementation of %s.%s; first implemented at %s:%d:%d", class.qualified, implementation.name, previous.pos.file, previous.pos.line, previous.pos.column)
 			continue
 		}
 		class.implementations[implementation.name] = implementation
 
-		contract := class.methods[implementation.name]
-		if contract == nil {
-			contract = signatureFromImplementation(implementation, class.namespace)
-			class.effective[implementation.name] = contract
-			continue
-		}
 		class.effective[implementation.name] = contract
 		if mismatch := p.signatureMismatch(contract, implementation); mismatch != "" {
 			p.add(implementation.pos, "SLK312", "implementation of %s.%s does not match its declaration: %s", class.qualified, implementation.name, mismatch)

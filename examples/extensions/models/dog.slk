@@ -1,0 +1,7 @@
+// Omitting extension(...) defaults to extension(namespace).
+class Dog {
+    Name: string
+
+    // Detached implementations complete declared methods; they cannot add new ones.
+    function Speak() -> string
+}

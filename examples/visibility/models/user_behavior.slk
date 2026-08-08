@@ -1,0 +1,8 @@
+function User.secret_label() -> string {
+    format_secret(self.secret)
+}
+
+function User.Describe() -> string {
+    let Label = self.secret_label()
+    `${self.Name}:${Label}`
+}

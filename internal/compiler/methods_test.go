@@ -74,6 +74,16 @@ func TestExtensionPoliciesControlDetachedImplementations(t *testing.T) {
 		}))
 	})
 
+	t.Run("global still rejects private methods from another namespace", func(t *testing.T) {
+		diagnostics := compiler.Check([]compiler.Source{
+			{Name: "dog.slk", Namespace: "root.models", Text: `class Dog extension(global) {
+    function bark() -> string { "woof" }
+}`},
+			{Name: "bark.slk", Namespace: "root.behaviors", Text: `function root.models.Dog.bark() -> string { "again" }`},
+		})
+		assertDiagnostic(t, diagnostics, "SLK330", "method bark is private to root.models")
+	})
+
 	t.Run("none rejects detached implementation", func(t *testing.T) {
 		diagnostics := checkRoot(`
 class Dog extension(none) {
@@ -102,6 +112,31 @@ function Dog.bark(volume: string) -> string { volume }
 `)
 		assertDiagnostic(t, diagnostics, "SLK312", "parameter 1 must be int, found string")
 	})
+
+	t.Run("result", func(t *testing.T) {
+		diagnostics := checkRoot(`
+class Dog { function bark() -> string }
+function Dog.bark() -> int { 1 }
+`)
+		assertDiagnostic(t, diagnostics, "SLK312", "result must be string, found int")
+	})
+
+	t.Run("undeclared method", func(t *testing.T) {
+		diagnostics := checkRoot(`
+class Dog extension(global) {}
+function Dog.bark() -> string { "woof" }
+`)
+		assertDiagnostic(t, diagnostics, "SLK314", "root.Dog.bark is not declared by root.Dog")
+	})
+}
+
+func TestMethodReceiverCannotUseAlias(t *testing.T) {
+	diagnostics := compiler.Check([]compiler.Source{
+		{Name: "dog.slk", Namespace: "root.models", Text: "class Dog extension(global) { function Bark() -> string }"},
+		{Name: "bark.slk", Namespace: "root.behaviors", Text: `use root.models.Dog as Hound
+function Hound.Bark() -> string { "woof" }`},
+	})
+	assertDiagnostic(t, diagnostics, "SLK315", "not alias Hound")
 }
 
 func TestImplicitInterfaceConformanceIsCheckedAtUse(t *testing.T) {

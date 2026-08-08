@@ -1,0 +1,16 @@
+// Uppercase declarations form the namespace's public surface.
+class User {
+    Name: string
+
+    // Lowercase fields and methods stay private to root.models.
+    secret: string
+    function Describe() -> string
+    function secret_label() -> string
+}
+
+function NewUser(Name: string) -> User {
+    User {
+        Name: Name
+        secret: "private"
+    }
+}
