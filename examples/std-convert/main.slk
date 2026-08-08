@@ -1,0 +1,13 @@
+use std.convert.ParseInt as ParseInt
+
+function ParseAndFormat(Text: string) -> Result<string, std.convert.Failure> {
+    let Value = ParseInt(Text)?
+    Ok(std.convert.IntToString(Value))
+}
+
+function main() -> string {
+    match ParseAndFormat("+42") {
+        Ok(Value) => Value
+        Err(Failure) => `${Failure.Target}: ${Failure.Message}`
+    }
+}

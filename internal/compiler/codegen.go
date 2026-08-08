@@ -99,9 +99,11 @@ func (p *program) generateGo() (string, error) {
 	generator := &goGenerator{program: p, imports: map[string]bool{
 		"errors":        true,
 		"fmt":           true,
+		"math":          true,
 		"os":            true,
 		"path/filepath": true,
 		"reflect":       true,
+		"strconv":       true,
 		"strings":       true,
 		"unicode/utf8":  true,
 	}}

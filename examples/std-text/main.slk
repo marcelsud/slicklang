@@ -1,0 +1,9 @@
+use std.text.Join as Join
+
+function main() -> string {
+    let Trimmed = std.text.Trim("  alpha,beta,gamma  ")
+    let Parts = std.text.Split(Trimmed, ",")
+    let Joined = Join(Parts, " | ")
+    let Cut = std.text.Cut(Joined, " | ")
+    `${Joined};${Cut}`
+}
