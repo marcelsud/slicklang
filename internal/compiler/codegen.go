@@ -100,9 +100,10 @@ func (p *program) generateGo() (string, error) {
 		"errors":        true,
 		"fmt":           true,
 		"os":            true,
-		"reflect":       true,
 		"path/filepath": true,
+		"reflect":       true,
 		"strings":       true,
+		"unicode/utf8":  true,
 	}}
 	// Collect JSON codecs first so import decisions are stable before emission.
 	jsonNeeds := generator.collectJSONCodecs()
@@ -187,6 +188,49 @@ func (g *goGenerator) emitRuntime() {
 	g.line(`return slickFormat(optional.value)`)
 	g.line(`}`)
 	g.line("")
+	g.line(`type slickBytes []byte`)
+	g.line(`type slickMapEntry[K comparable, V any] struct { key K; value V }`)
+	g.line(`type slickMap[K comparable, V any] struct { entries []slickMapEntry[K, V]; index map[K]int }`)
+	g.line(`func slickMapOf[K comparable, V any](entries ...slickMapEntry[K, V]) slickMap[K, V] {`)
+	g.line(`index := make(map[K]int, len(entries))`)
+	g.line(`ordered := entries[:0]`)
+	g.line(`for _, entry := range entries {`)
+	g.line(`if existing, ok := index[entry.key]; ok { ordered[existing].value = entry.value; continue }`)
+	g.line(`index[entry.key] = len(ordered)`)
+	g.line(`ordered = append(ordered, entry)`)
+	g.line(`}`)
+	g.line(`return slickMap[K, V]{entries: ordered, index: index}`)
+	g.line(`}`)
+	g.line(`func (m slickMap[K, V]) get(key K) (V, bool) {`)
+	g.line(`index, ok := m.index[key]`)
+	g.line(`if !ok { var zero V; return zero, false }`)
+	g.line(`return m.entries[index].value, true`)
+	g.line(`}`)
+	g.line(`func slickMapWith[K comparable, V any](source slickMap[K, V], key K, value V) slickMap[K, V] {`)
+	g.line(`if index, ok := source.index[key]; ok && reflect.DeepEqual(source.entries[index].value, value) { return source }`)
+	g.line(`entries := append([]slickMapEntry[K, V](nil), source.entries...)`)
+	g.line(`index := make(map[K]int, len(source.index)+1)`)
+	g.line(`for stored, position := range source.index { index[stored] = position }`)
+	g.line(`if position, ok := index[key]; ok { entries[position].value = value } else { index[key] = len(entries); entries = append(entries, slickMapEntry[K, V]{key: key, value: value}) }`)
+	g.line(`return slickMap[K, V]{entries: entries, index: index}`)
+	g.line(`}`)
+	g.line(`func slickMapWithout[K comparable, V any](source slickMap[K, V], key K) slickMap[K, V] {`)
+	g.line(`removed, ok := source.index[key]`)
+	g.line(`if !ok { return source }`)
+	g.line(`entries := make([]slickMapEntry[K, V], 0, len(source.entries)-1)`)
+	g.line(`index := make(map[K]int, len(source.index)-1)`)
+	g.line(`for position, entry := range source.entries { if position != removed { index[entry.key] = len(entries); entries = append(entries, entry) } }`)
+	g.line(`return slickMap[K, V]{entries: entries, index: index}`)
+	g.line(`}`)
+	g.line(`func (m slickMap[K, V]) Len() int { return len(m.entries) }`)
+	g.line(`func (slickMap[K, V]) Width() int { return 2 }`)
+	g.line(`func (m slickMap[K, V]) At(index, slot int) any { if slot == 0 { return m.entries[index].key }; return m.entries[index].value }`)
+	g.line(`func (m slickMap[K, V]) slickFormatMap() string {`)
+	g.line(`items := make([]string, len(m.entries))`)
+	g.line(`for index, entry := range m.entries { items[index] = slickFormat(entry.key) + ": " + slickFormat(entry.value) }`)
+	g.line(`return "map {" + strings.Join(items, ", ") + "}"`)
+	g.line(`}`)
+	g.line("")
 	g.line(`type slickSeq interface { Len() int; Width() int; At(int, int) any }`)
 	g.line(`type slickSliceSeq[T any] struct { values []T }`)
 	g.line(`func (s slickSliceSeq[T]) Len() int { return len(s.values) }`)
@@ -233,6 +277,8 @@ func (g *goGenerator) emitRuntime() {
 	g.line(`func slickFormat(value any) string {`)
 	g.line(`if value == nil { return "" }`)
 	g.line(`if _, ok := value.(struct{}); ok { return "" }`)
+	g.line(`if bytes, ok := value.(slickBytes); ok { return fmt.Sprintf("bytes[%%d]", len(bytes)) }`)
+	g.line(`if mapping, ok := value.(interface{ slickFormatMap() string }); ok { return mapping.slickFormatMap() }`)
 	g.line(`if named, ok := value.(slickNamed); ok { return named.slickTypeName() }`)
 	g.line(`reflection := reflect.ValueOf(value)`)
 	g.line(`if reflection.Kind() == reflect.Slice || reflection.Kind() == reflect.Array {`)
@@ -602,6 +648,35 @@ func (g *goGenerator) expression(expression expressionNode, scope *goScope) (str
 			values = append(values, g.convert(value, valueType, elementType))
 		}
 		fmt.Fprintf(&body, "return []%s{%s}, nil\n", g.goType(elementType), strings.Join(values, ", "))
+	case *mapExpression:
+		keyType, valueType, _ := mapTypeArgs(typ)
+		entryType := fmt.Sprintf("slickMapEntry[%s, %s]", g.goType(keyType), g.goType(valueType))
+		entries := make([]string, 0, len(node.entries))
+		for _, entry := range node.entries {
+			key, err := g.evalExpression(&body, entry.key, scope, "mapKey", typ)
+			if err != nil {
+				return "", err
+			}
+			keyActual, err := g.expressionType(entry.key, scope)
+			if err != nil {
+				return "", err
+			}
+			value, err := g.evalExpression(&body, entry.value, scope, "mapValue", typ)
+			if err != nil {
+				return "", err
+			}
+			valueActual, err := g.expressionType(entry.value, scope)
+			if err != nil {
+				return "", err
+			}
+			entries = append(entries, fmt.Sprintf("%s{key: %s, value: %s}",
+				entryType,
+				g.convert(key, keyActual, keyType),
+				g.convert(value, valueActual, valueType),
+			))
+		}
+		fmt.Fprintf(&body, "return slickMapOf[%s, %s](%s), nil\n",
+			g.goType(keyType), g.goType(valueType), strings.Join(entries, ", "))
 	case *rangeExpression:
 		start, err := g.evalExpression(&body, node.start, scope, "rangeStart", typ)
 		if err != nil {
@@ -804,6 +879,9 @@ func (g *goGenerator) emitCallExpression(body *strings.Builder, node *callExpres
 		}
 		argumentTypes = append(argumentTypes, typ)
 	}
+	if emitted, err := g.emitMapCallExpression(body, name, scope, arguments, argumentTypes); emitted || err != nil {
+		return err
+	}
 	if name.name == "enumerate" {
 		sequence := g.sequenceExpression(arguments[0], argumentTypes[0])
 		fmt.Fprintf(body, "return slickEnumerateSeq{source: %s}, nil\n", sequence)
@@ -883,6 +961,55 @@ func (g *goGenerator) emitCallExpression(body *strings.Builder, node *callExpres
 	}
 	fmt.Fprintf(body, "return %s(%s)\n", call, strings.Join(arguments, ", "))
 	return nil
+}
+func (g *goGenerator) emitMapCallExpression(
+	body *strings.Builder,
+	name *nameExpression,
+	scope *goScope,
+	arguments, argumentTypes []string,
+) (bool, error) {
+	parts := strings.Split(name.name, ".")
+	if len(parts) != 2 {
+		return false, nil
+	}
+	receiver, exists := scope.locals[parts[0]]
+	if !exists {
+		return false, nil
+	}
+	keyType, valueType, isMap := mapTypeArgs(receiver.typ)
+	if !isMap {
+		return false, nil
+	}
+	argument := func(index int, target string) string {
+		return g.convert(arguments[index], argumentTypes[index], target)
+	}
+	switch parts[1] {
+	case "Get":
+		value := g.unique("mapValue")
+		present := g.unique("present")
+		fmt.Fprintf(body, "%s, %s := %s.get(%s)\n", value, present, receiver.name, argument(0, keyType))
+		fmt.Fprintf(body, "if !%s { return %s, nil }\n", present, g.zero(optionalOf(valueType)))
+		if isOptionalType(valueType) {
+			fmt.Fprintf(body, "return %s, nil\n", value)
+		} else {
+			fmt.Fprintf(body, "return slickSome(%s), nil\n", value)
+		}
+	case "Contains":
+		value := g.unique("mapValue")
+		present := g.unique("present")
+		fmt.Fprintf(body, "%s, %s := %s.get(%s)\n", value, present, receiver.name, argument(0, keyType))
+		fmt.Fprintf(body, "_ = %s\nreturn %s, nil\n", value, present)
+	case "With":
+		fmt.Fprintf(body, "return slickMapWith(%s, %s, %s), nil\n",
+			receiver.name, argument(0, keyType), argument(1, valueType))
+	case "Without":
+		fmt.Fprintf(body, "return slickMapWithout(%s, %s), nil\n", receiver.name, argument(0, keyType))
+	case "Length":
+		fmt.Fprintf(body, "return int64(%s.Len()), nil\n", receiver.name)
+	default:
+		return false, nil
+	}
+	return true, nil
 }
 
 func (g *goGenerator) emitCatchExpression(body *strings.Builder, node *catchExpression, scope *goScope, resultType string) error {
@@ -1114,6 +1241,7 @@ func (g *goGenerator) resolveDeclaredType(namespace string, aliases map[string]a
 		switch {
 		case base == resultTypeName && len(args) == 2:
 		case base == "Iterable" && len(args) == 1:
+		case base == mapTypeName && len(args) == 2:
 		default:
 			return "", fmt.Errorf("Go backend does not support type %s", name)
 		}
@@ -1161,6 +1289,9 @@ func (g *goGenerator) goType(typ string) string {
 	if element, isArray := arrayElementType(typ); isArray {
 		return "[]" + g.goType(element)
 	}
+	if key, value, ok := mapTypeArgs(typ); ok {
+		return "slickMap[" + g.goType(key) + ", " + g.goType(value) + "]"
+	}
 	if success, failure, ok := resultTypeArgs(typ); ok {
 		return "slickResult[" + g.goType(success) + ", " + g.goType(failure) + "]"
 	}
@@ -1171,6 +1302,8 @@ func (g *goGenerator) goType(typ string) string {
 		return "[]any"
 	}
 	switch typ {
+	case "bytes":
+		return "slickBytes"
 	case "bool":
 		return "bool"
 	case "float":

@@ -1,0 +1,17 @@
+// Immutable bytes require explicit UTF-8 conversion before displaying content.
+function Decode(Value: bytes) -> string {
+    match std.bytes.ToUtf8(Value) {
+        Ok(Text) => Text
+        Err(Failure) => Failure.Message
+    }
+}
+
+function main() -> string {
+    let Hello = std.bytes.FromUtf8("Hello, ")
+    let World = std.bytes.FromUtf8("世界")
+    let Joined = std.bytes.Concat([Hello, World])
+    let Text = Decode(Joined)
+    let Length = std.bytes.Length(Joined)
+    let First = std.bytes.At(Joined, 0)
+    `${Text}; ${Length}; ${First}; ${Joined}`
+}

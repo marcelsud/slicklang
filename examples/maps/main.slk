@@ -1,0 +1,16 @@
+// Maps infer key/value types, preserve insertion order, and update immutably.
+function main() -> string {
+    let Ages = map {
+        "Ada": 37
+        "Grace": 36
+    }
+    let Ada = Ages.Get("Ada")
+    let Updated = Ages.With("Linus", 55)
+    let Removed = Updated.Without("Grace")
+    let OriginalLength = Ages.Length()
+    let Output = ""
+    for Name, Age in Removed {
+        Output = Output + `${Name}=${Age};`
+    }
+    `${Ada}; ${OriginalLength}; ${Output}; ${Ages}`
+}

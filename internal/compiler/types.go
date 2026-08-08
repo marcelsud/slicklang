@@ -2,7 +2,10 @@ package compiler
 
 import "strings"
 
-const resultTypeName = "Result"
+const (
+	resultTypeName = "Result"
+	mapTypeName    = "Map"
+)
 
 // splitTypeList splits a comma-separated type list at bracket depth zero, so
 // nested generic and tuple commas stay inside their own element.
@@ -105,12 +108,34 @@ func resultTypeArgs(name string) (success, failure string, ok bool) {
 	return args[0], args[1], true
 }
 
+// mapTypeArgs returns the key and value types of a Map type.
+func mapTypeArgs(name string) (key, value string, ok bool) {
+	base, args, generic := genericType(name)
+	if !generic || base != mapTypeName || len(args) != 2 {
+		return "", "", false
+	}
+	return args[0], args[1], true
+}
+
+func mapType(key, value string) string {
+	return mapTypeName + "<" + key + "," + value + ">"
+}
+
+func isMapType(name string) bool {
+	_, _, ok := mapTypeArgs(name)
+	return ok
+}
+
+func isMapKeyType(name string) bool {
+	return name == "string" || name == "int" || name == "bool"
+}
+
 func isResultConstructor(name string) bool {
 	return name == "Ok" || name == "Err"
 }
 
 func isReservedTypeName(name string) bool {
-	return name == resultTypeName || isResultConstructor(name)
+	return name == resultTypeName || name == mapTypeName || isResultConstructor(name)
 }
 
 // typeKind names the outermost shape of a Slick type.
@@ -248,14 +273,17 @@ func joinTypes(left, right string) (string, bool) {
 // An optional compares with null, with its own base type, and with an optional
 // of the same base. Nothing else becomes comparable by being optional.
 func comparableTypes(left, right string) bool {
-	if left == right {
-		return true
-	}
 	if left == "null" {
 		return isOptionalType(right)
 	}
 	if right == "null" {
 		return isOptionalType(left)
+	}
+	if isMapOrOptionalMap(left) || isMapOrOptionalMap(right) {
+		return false
+	}
+	if left == right {
+		return true
 	}
 	leftBase, leftOptional := optionalBase(left)
 	rightBase, rightOptional := optionalBase(right)
@@ -268,4 +296,11 @@ func comparableTypes(left, right string) bool {
 		return rightBase == left
 	}
 	return false
+}
+
+func isMapOrOptionalMap(name string) bool {
+	if base, optional := optionalBase(name); optional {
+		name = base
+	}
+	return isMapType(name)
 }

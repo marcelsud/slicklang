@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strconv"
@@ -13,6 +14,7 @@ type runtimeValue struct {
 	fields   map[string]runtimeValue
 	elements []runtimeValue
 	iterable *runtimeIterable
+	mapping  *runtimeMap
 	result   *runtimeResult
 	optional *runtimeOptional
 }
@@ -32,6 +34,102 @@ type runtimeOptional struct {
 type runtimeResult struct {
 	ok      bool
 	payload runtimeValue
+}
+type runtimeMapKey struct {
+	kind byte
+	text string
+}
+
+type runtimeMapEntry struct {
+	key       runtimeValue
+	value     runtimeValue
+	canonical runtimeMapKey
+}
+
+type runtimeMap struct {
+	entries []runtimeMapEntry
+	index   map[runtimeMapKey]int
+}
+
+func canonicalRuntimeMapKey(value runtimeValue) (runtimeMapKey, error) {
+	switch value.typ {
+	case "string":
+		return runtimeMapKey{kind: 's', text: value.scalar.(string)}, nil
+	case "int":
+		return runtimeMapKey{kind: 'i', text: strconv.FormatInt(value.scalar.(int64), 10)}, nil
+	case "bool":
+		return runtimeMapKey{kind: 'b', text: strconv.FormatBool(value.scalar.(bool))}, nil
+	default:
+		return runtimeMapKey{}, fmt.Errorf("%s cannot be a Map key", displayName(value.typ))
+	}
+}
+
+func newRuntimeMap(entries []runtimeMapEntry) (*runtimeMap, error) {
+	result := &runtimeMap{
+		entries: make([]runtimeMapEntry, 0, len(entries)),
+		index:   make(map[runtimeMapKey]int, len(entries)),
+	}
+	for _, entry := range entries {
+		key, err := canonicalRuntimeMapKey(entry.key)
+		if err != nil {
+			return nil, err
+		}
+		if index, exists := result.index[key]; exists {
+			result.entries[index].value = entry.value
+			continue
+		}
+		entry.canonical = key
+		result.index[key] = len(result.entries)
+		result.entries = append(result.entries, entry)
+	}
+	return result, nil
+}
+
+func runtimeMapWith(source *runtimeMap, key, value runtimeValue) (*runtimeMap, error) {
+	canonical, err := canonicalRuntimeMapKey(key)
+	if err != nil {
+		return nil, err
+	}
+	if index, exists := source.index[canonical]; exists && runtimeEqual(source.entries[index].value, value) {
+		return source, nil
+	}
+	result := &runtimeMap{
+		entries: append([]runtimeMapEntry(nil), source.entries...),
+		index:   make(map[runtimeMapKey]int, len(source.index)+1),
+	}
+	for stored, index := range source.index {
+		result.index[stored] = index
+	}
+	if index, exists := result.index[canonical]; exists {
+		result.entries[index].value = value
+		return result, nil
+	}
+	result.index[canonical] = len(result.entries)
+	result.entries = append(result.entries, runtimeMapEntry{key: key, value: value, canonical: canonical})
+	return result, nil
+}
+
+func runtimeMapWithout(source *runtimeMap, key runtimeValue) (*runtimeMap, error) {
+	canonical, err := canonicalRuntimeMapKey(key)
+	if err != nil {
+		return nil, err
+	}
+	removed, exists := source.index[canonical]
+	if !exists {
+		return source, nil
+	}
+	result := &runtimeMap{
+		entries: make([]runtimeMapEntry, 0, len(source.entries)-1),
+		index:   make(map[runtimeMapKey]int, len(source.index)-1),
+	}
+	for index, entry := range source.entries {
+		if index == removed {
+			continue
+		}
+		result.index[entry.canonical] = len(result.entries)
+		result.entries = append(result.entries, entry)
+	}
+	return result, nil
 }
 
 func (r *runtimeResult) label() string {
@@ -310,6 +408,28 @@ func (p *program) evalExpression(expression expressionNode, frame *runtimeFrame)
 			}
 		}
 		return runtimeValue{typ: typ, elements: elements}, nil
+	case *mapExpression:
+		keyType, valueType, _ := mapTypeArgs(node.resolved)
+		entries := make([]runtimeMapEntry, 0, len(node.entries))
+		for _, entry := range node.entries {
+			key, err := p.evalExpression(entry.key, frame)
+			if err != nil {
+				return runtimeValue{}, err
+			}
+			value, err := p.evalExpression(entry.value, frame)
+			if err != nil {
+				return runtimeValue{}, err
+			}
+			entries = append(entries, runtimeMapEntry{
+				key:   coerceRuntimeValue(key, keyType),
+				value: coerceRuntimeValue(value, valueType),
+			})
+		}
+		mapping, err := newRuntimeMap(entries)
+		if err != nil {
+			return runtimeValue{}, runtimeError(node.pos, "%v", err)
+		}
+		return runtimeValue{typ: node.resolved, mapping: mapping}, nil
 	case *rangeExpression:
 		start, err := p.evalExpression(node.start, frame)
 		if err != nil {
@@ -448,6 +568,9 @@ func (p *program) evalCall(node *callExpression, frame *runtimeFrame) (runtimeVa
 				}
 				receiver = receiver.optional.value
 			}
+			if receiver.mapping != nil {
+				return evalRuntimeMapCall(node, parts[1], receiver, args)
+			}
 			class := p.classes[receiver.typ]
 			if class == nil {
 				return runtimeValue{}, runtimeError(node.pos, "%s is not a class value", parts[0])
@@ -465,6 +588,51 @@ func (p *program) evalCall(node *callExpression, frame *runtimeFrame) (runtimeVa
 		return runtimeValue{}, runtimeError(node.pos, "unknown function %s", name.name)
 	}
 	return p.callFunction(function, args, nil, append([]string(nil), node.resolvedTypeArgs...))
+}
+func evalRuntimeMapCall(node *callExpression, method string, receiver runtimeValue, args []runtimeValue) (runtimeValue, error) {
+	keyType, valueType, _ := mapTypeArgs(receiver.typ)
+	switch method {
+	case "Get":
+		key := coerceRuntimeValue(args[0], keyType)
+		canonical, err := canonicalRuntimeMapKey(key)
+		if err != nil {
+			return runtimeValue{}, err
+		}
+		index, present := receiver.mapping.index[canonical]
+		if isOptionalType(valueType) {
+			if !present {
+				return coerceRuntimeValue(nullRuntimeValue(), valueType), nil
+			}
+			return receiver.mapping.entries[index].value, nil
+		}
+		result := &runtimeOptional{}
+		if present {
+			result.present = true
+			result.value = receiver.mapping.entries[index].value
+		}
+		return runtimeValue{typ: optionalOf(valueType), optional: result}, nil
+	case "Contains":
+		key := coerceRuntimeValue(args[0], keyType)
+		canonical, err := canonicalRuntimeMapKey(key)
+		if err != nil {
+			return runtimeValue{}, err
+		}
+		_, present := receiver.mapping.index[canonical]
+		return runtimeValue{typ: "bool", scalar: present}, nil
+	case "With":
+		key := coerceRuntimeValue(args[0], keyType)
+		value := coerceRuntimeValue(args[1], valueType)
+		mapping, err := runtimeMapWith(receiver.mapping, key, value)
+		return runtimeValue{typ: receiver.typ, mapping: mapping}, err
+	case "Without":
+		key := coerceRuntimeValue(args[0], keyType)
+		mapping, err := runtimeMapWithout(receiver.mapping, key)
+		return runtimeValue{typ: receiver.typ, mapping: mapping}, err
+	case "Length":
+		return runtimeValue{typ: "int", scalar: int64(len(receiver.mapping.entries))}, nil
+	default:
+		return runtimeValue{}, runtimeError(node.pos, "%s has no method %s", displayName(receiver.typ), method)
+	}
 }
 
 func (p *program) evalBinary(node *binaryExpression, frame *runtimeFrame) (runtimeValue, error) {
@@ -539,6 +707,9 @@ func runtimeIterableLength(value runtimeValue) (int, error) {
 		if strings.HasSuffix(value.typ, "[]") {
 			return len(value.elements), nil
 		}
+		if value.mapping != nil {
+			return len(value.mapping.entries), nil
+		}
 		return 0, fmt.Errorf("%s is not iterable", displayName(value.typ))
 	}
 	switch value.iterable.kind {
@@ -575,6 +746,13 @@ func runtimeIterableLength(value runtimeValue) (int, error) {
 
 func runtimeIterableValues(value runtimeValue, index int) ([]runtimeValue, error) {
 	if value.iterable == nil {
+		if value.mapping != nil {
+			if index >= len(value.mapping.entries) {
+				return nil, fmt.Errorf("%s has no iterable value at %d", displayName(value.typ), index)
+			}
+			entry := value.mapping.entries[index]
+			return []runtimeValue{entry.key, entry.value}, nil
+		}
 		if !strings.HasSuffix(value.typ, "[]") || index >= len(value.elements) {
 			return nil, fmt.Errorf("%s has no iterable value at %d", displayName(value.typ), index)
 		}
@@ -799,6 +977,9 @@ func runtimeEqual(left, right runtimeValue) bool {
 		}
 		return !leftPresent || runtimeEqual(leftValue, rightValue)
 	}
+	if left.typ == "bytes" && right.typ == "bytes" {
+		return bytes.Equal(left.scalar.([]byte), right.scalar.([]byte))
+	}
 	if left.typ != right.typ {
 		return false
 	}
@@ -807,6 +988,18 @@ func runtimeEqual(left, right runtimeValue) bool {
 			return false
 		}
 		return left.result.ok == right.result.ok && runtimeEqual(left.result.payload, right.result.payload)
+	}
+	if left.mapping != nil || right.mapping != nil {
+		if left.mapping == nil || right.mapping == nil || len(left.mapping.entries) != len(right.mapping.entries) {
+			return false
+		}
+		for index, leftEntry := range left.mapping.entries {
+			rightEntry := right.mapping.entries[index]
+			if leftEntry.canonical != rightEntry.canonical || !runtimeEqual(leftEntry.value, rightEntry.value) {
+				return false
+			}
+		}
+		return true
 	}
 	if strings.HasSuffix(left.typ, "[]") || strings.HasPrefix(left.typ, "(") {
 		if len(left.elements) != len(right.elements) {
@@ -846,6 +1039,8 @@ func formatRuntimeValue(value runtimeValue) string {
 	switch value.typ {
 	case "null":
 		return ""
+	case "bytes":
+		return fmt.Sprintf("bytes[%d]", len(value.scalar.([]byte)))
 	case "string":
 		text, _ := value.scalar.(string)
 		return text
@@ -856,6 +1051,13 @@ func formatRuntimeValue(value runtimeValue) string {
 	case "bool":
 		return strconv.FormatBool(value.scalar.(bool))
 	default:
+		if value.mapping != nil {
+			items := make([]string, len(value.mapping.entries))
+			for index, entry := range value.mapping.entries {
+				items[index] = formatRuntimeValue(entry.key) + ": " + formatRuntimeValue(entry.value)
+			}
+			return "map {" + strings.Join(items, ", ") + "}"
+		}
 		if strings.HasSuffix(value.typ, "[]") || strings.HasPrefix(value.typ, "(") {
 			items := make([]string, 0, len(value.elements))
 			for _, element := range value.elements {

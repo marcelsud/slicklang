@@ -32,8 +32,8 @@ func TestHighlightReproducesSource(t *testing.T) {
 
 func TestHighlightClassifiesSlickTokens(t *testing.T) {
 	source := "// note\n" +
-		"function load(Count: int) -> Result<string, Failure> throws Failure {\n" +
-		"    match self.read()? { Ok(Text) => `${Text}` Err(_) => \"x\" }\n" +
+		"function load(Count: int, Data: Map<string, bytes>) -> Result<string, Failure> throws Failure {\n" +
+		"    map {} match self.read()? { Ok(Text) => `${Text}` Err(_) => \"x\" }\n" +
 		"}\n"
 
 	classes := make(map[string]compiler.TokenClass)
@@ -52,6 +52,9 @@ func TestHighlightClassifiesSlickTokens(t *testing.T) {
 		"int":       compiler.ClassType,
 		"string":    compiler.ClassType,
 		"Result":    compiler.ClassType,
+		"Map":       compiler.ClassType,
+		"bytes":     compiler.ClassType,
+		"map":       compiler.ClassKeyword,
 		"Ok":        compiler.ClassConstructor,
 		"Err":       compiler.ClassConstructor,
 		"Failure":   compiler.ClassIdent,

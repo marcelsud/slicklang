@@ -63,6 +63,9 @@ func (p *program) jsonTypeSupported(name string, visiting map[string]bool) bool 
 	if name == "" || name == typeUnknown || name == typeNever {
 		return false
 	}
+	if name == "bytes" || isMapType(name) {
+		return false
+	}
 	if isBuiltinType(name) {
 		return true
 	}
@@ -113,6 +116,12 @@ func (p *program) jsonTypeSupported(name string, visiting map[string]bool) bool 
 func (p *program) jsonUnsupportedReason(name string, visiting map[string]bool) string {
 	if name == "" || name == typeUnknown || name == typeNever {
 		return "unknown type"
+	}
+	if name == "bytes" {
+		return "bytes cannot be encoded or decoded as JSON"
+	}
+	if isMapType(name) {
+		return "Map cannot be encoded or decoded as JSON"
 	}
 	if isBuiltinType(name) {
 		return ""

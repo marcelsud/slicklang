@@ -57,29 +57,45 @@ func (p *program) checkTypeVisibility(namespace string, aliases map[string]alias
 }
 
 // checkTypeName walks a canonical type and validates every component: the base
-// and arity of each generic application, and namespace access for each named
-// class or interface.
+// and arity of each generic application, Map key restrictions, and namespace
+// access for each named class or interface.
 func (p *program) checkTypeName(pos position, namespace, name string) {
-	if element := strings.TrimSuffix(name, "[]"); element != name {
-		p.checkTypeName(pos, namespace, element)
+	parsed := parseTypeName(name)
+	switch parsed.kind {
+	case typeKindOptional, typeKindArray:
+		p.checkTypeName(pos, namespace, parsed.base)
 		return
-	}
-	if base, args, generic := genericType(name); generic {
-		switch base {
+	case typeKindTuple:
+		for _, element := range parsed.args {
+			p.checkTypeName(pos, namespace, element)
+		}
+		return
+	case typeKindGeneric:
+		switch parsed.base {
 		case resultTypeName:
-			if len(args) != 2 {
-				p.add(pos, "SLK361", "Result takes 2 type arguments, found %d", len(args))
+			if len(parsed.args) != 2 {
+				p.add(pos, "SLK361", "Result takes 2 type arguments, found %d", len(parsed.args))
 			}
 		case "Iterable":
-			if len(args) != 1 {
-				p.add(pos, "SLK361", "Iterable takes 1 type argument, found %d", len(args))
+			if len(parsed.args) != 1 {
+				p.add(pos, "SLK361", "Iterable takes 1 type argument, found %d", len(parsed.args))
+			}
+		case mapTypeName:
+			if len(parsed.args) != 2 {
+				p.add(pos, "SLK361", "Map takes 2 type arguments, found %d", len(parsed.args))
+			} else if !isMapKeyType(parsed.args[0]) {
+				p.add(pos, "SLK361", "Map key type must be string, int, or bool; found %s", displayName(parsed.args[0]))
 			}
 		default:
-			p.add(pos, "SLK361", "unknown generic type %s", base)
+			p.add(pos, "SLK361", "unknown generic type %s", parsed.base)
 		}
-		for _, arg := range args {
+		for _, arg := range parsed.args {
 			p.checkTypeName(pos, namespace, arg)
 		}
+		return
+	}
+	if name == mapTypeName {
+		p.add(pos, "SLK361", "Map takes 2 type arguments, found 0")
 		return
 	}
 	if strings.ContainsRune(name, '<') {

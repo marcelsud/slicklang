@@ -32,8 +32,9 @@ type HighlightToken struct {
 var highlightKeywords = map[string]struct{}{
 	"as": {}, "break": {}, "catch": {}, "class": {}, "continue": {},
 	"else": {}, "extension": {}, "for": {}, "function": {}, "if": {},
-	"implements": {}, "in": {}, "interface": {}, "let": {}, "match": {},
-	"return": {}, "self": {}, "throw": {}, "throws": {}, "use": {},
+	"implements": {}, "in": {}, "interface": {}, "let": {}, "map": {},
+	"match": {}, "return": {}, "self": {}, "throw": {}, "throws": {},
+	"use": {},
 }
 
 // Highlight splits source into classified spans. Concatenating every Text
@@ -92,7 +93,7 @@ func classifyIdent(text string) TokenClass {
 	switch text {
 	case "true", "false", "null":
 		return ClassConstant
-	case "Error", resultTypeName, "Iterable":
+	case "Error", resultTypeName, mapTypeName, "Iterable":
 		return ClassType
 	}
 	if isResultConstructor(text) || isIterableBuiltin(text) {

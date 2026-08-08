@@ -99,6 +99,22 @@ type arrayExpression struct {
 
 func (n *arrayExpression) expressionPos() position { return n.pos }
 
+type mapEntryExpression struct {
+	key   expressionNode
+	value expressionNode
+	pos   position
+}
+
+// mapExpression keeps its resolved type because an empty literal is typed by
+// its enclosing context and cannot recover that context during generation.
+type mapExpression struct {
+	entries  []mapEntryExpression
+	resolved string
+	pos      position
+}
+
+func (n *mapExpression) expressionPos() position { return n.pos }
+
 type rangeExpression struct {
 	start expressionNode
 	end   expressionNode
@@ -483,11 +499,42 @@ func (p *bodyParser) parsePrimary() expressionNode {
 		return nil
 	}
 	tok := p.current()
+	if p.accept("-") {
+		number := p.current()
+		switch number.kind {
+		case scanner.Int:
+			p.index++
+			value, err := strconv.ParseInt(number.text, 10, 64)
+			if err != nil {
+				p.error(tok.pos, "invalid integer literal")
+				return nil
+			}
+			return &literalExpression{value: -value, pos: tok.pos}
+		case scanner.Float:
+			p.index++
+			value, err := strconv.ParseFloat(number.text, 64)
+			if err != nil {
+				p.error(tok.pos, "invalid float literal")
+				return nil
+			}
+			return &literalExpression{value: -value, pos: tok.pos}
+		default:
+			p.error(tok.pos, "expected a number after '-'")
+			return nil
+		}
+	}
 	if p.accept("if") {
 		return p.parseIf(tok.pos)
 	}
 	if p.accept("match") {
 		return p.parseMatch(tok.pos)
+	}
+	if p.accept("map") {
+		if !p.accept("{") {
+			p.error(tok.pos, "expected '{' after map")
+			return nil
+		}
+		return p.parseMap(tok.pos)
 	}
 	if p.accept("[") {
 		return p.parseArray(tok.pos)
@@ -596,6 +643,36 @@ func (p *bodyParser) parseArray(pos position) expressionNode {
 		p.error(pos, "unterminated array literal")
 	}
 	return &arrayExpression{elements: elements, pos: pos}
+}
+func (p *bodyParser) parseMap(pos position) expressionNode {
+	var entries []mapEntryExpression
+	for !p.atEnd() && p.current().text != "}" {
+		if p.accept(",") || p.accept(";") {
+			continue
+		}
+		key := p.parseExpression()
+		if key == nil {
+			p.error(p.current().pos, "expected map key")
+			p.index++
+			continue
+		}
+		if !p.accept(":") {
+			p.error(p.current().pos, "expected ':' after map key")
+			continue
+		}
+		value := p.parseExpression()
+		if value == nil {
+			p.error(key.expressionPos(), "expected map value")
+			continue
+		}
+		entries = append(entries, mapEntryExpression{key: key, value: value, pos: key.expressionPos()})
+		p.accept(",")
+		p.accept(";")
+	}
+	if !p.accept("}") {
+		p.error(pos, "unterminated map literal")
+	}
+	return &mapExpression{entries: entries, pos: pos}
 }
 
 func (p *bodyParser) parseObjectFields() []objectFieldExpression {

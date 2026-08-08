@@ -223,6 +223,36 @@ func (p *program) resolveType(namespace string, aliases map[string]aliasDecl, re
 }
 
 func (p *program) methodForType(typeName, methodName string) (*methodSignature, bool) {
+	if keyType, valueType, ok := mapTypeArgs(typeName); ok {
+		method := &methodSignature{
+			name:     methodName,
+			aliases:  make(map[string]aliasDecl),
+			throwSet: make(map[string]struct{}),
+		}
+		switch methodName {
+		case "Get":
+			method.params = []paramDecl{{name: "Key", typ: typeRef{name: keyType}}}
+			method.result = typeRef{name: optionalOf(valueType)}
+		case "Contains", "Without":
+			method.params = []paramDecl{{name: "Key", typ: typeRef{name: keyType}}}
+			if methodName == "Contains" {
+				method.result = typeRef{name: "bool"}
+			} else {
+				method.result = typeRef{name: typeName}
+			}
+		case "With":
+			method.params = []paramDecl{
+				{name: "Key", typ: typeRef{name: keyType}},
+				{name: "Value", typ: typeRef{name: valueType}},
+			}
+			method.result = typeRef{name: typeName}
+		case "Length":
+			method.result = typeRef{name: "int"}
+		default:
+			return nil, false
+		}
+		return method, true
+	}
 	if class := p.classes[typeName]; class != nil {
 		method := class.effective[methodName]
 		return method, method != nil
@@ -251,7 +281,7 @@ func (p *program) resolveErrorIn(namespace string, aliases map[string]aliasDecl,
 
 func isBuiltinType(name string) bool {
 	switch name {
-	case "bool", "float", "int", "null", "string":
+	case "bool", "bytes", "float", "int", "null", "string":
 		return true
 	default:
 		return false

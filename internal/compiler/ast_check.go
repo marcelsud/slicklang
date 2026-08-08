@@ -224,6 +224,8 @@ func (p *program) checkASTExpressionExpecting(expression expressionNode, scope *
 		return expressionInfo{typ: literalType(node.value), effects: make(effectSet)}
 	case *arrayExpression:
 		return p.checkArrayExpression(node, scope, expected)
+	case *mapExpression:
+		return p.checkMapExpression(node, scope, expected)
 	case *rangeExpression:
 		return p.checkRangeExpression(node, scope)
 	case *templateExpression:
@@ -309,6 +311,69 @@ func (p *program) checkArrayExpression(node *arrayExpression, scope *astScope, e
 	if elementType != "" {
 		info.typ = elementType + "[]"
 	}
+	return info
+}
+func (p *program) checkMapExpression(node *mapExpression, scope *astScope, expected string) expressionInfo {
+	info := expressionInfo{typ: typeUnknown, effects: make(effectSet)}
+	expectedKey, expectedValue, hasExpectedMap := mapTypeArgs(expected)
+	if len(node.entries) == 0 {
+		if node.resolved != "" {
+			info.typ = node.resolved
+			return info
+		}
+		if !hasExpectedMap {
+			p.add(node.pos, "SLK382", "empty map literal needs a known Map<K, V> type here")
+			return info
+		}
+		node.resolved = expected
+		info.typ = expected
+		return info
+	}
+
+	keyType, valueType := "", ""
+	staticKeys := make(map[any]struct{})
+	for _, entry := range node.entries {
+		keyExpected, valueExpected := "", ""
+		if hasExpectedMap {
+			keyExpected, valueExpected = expectedKey, expectedValue
+		}
+		keyInfo := p.checkASTExpressionExpecting(entry.key, scope, keyExpected)
+		valueInfo := p.checkASTExpressionExpecting(entry.value, scope, valueExpected)
+		mergeEffects(info.effects, keyInfo.effects)
+		mergeEffects(info.effects, valueInfo.effects)
+
+		if keyInfo.typ != typeUnknown && !isMapKeyType(keyInfo.typ) {
+			p.add(entry.key.expressionPos(), "SLK383", "Map key type must be string, int, or bool; found %s", displayName(keyInfo.typ))
+		}
+		if keyType == "" {
+			keyType = keyInfo.typ
+		} else if joined, ok := joinTypes(keyType, keyInfo.typ); ok {
+			keyType = joined
+		} else {
+			p.add(entry.key.expressionPos(), "SLK342", "map keys must share one type; found %s and %s", displayName(keyType), displayName(keyInfo.typ))
+			keyType = typeUnknown
+		}
+		if valueType == "" {
+			valueType = valueInfo.typ
+		} else if joined, ok := joinTypes(valueType, valueInfo.typ); ok {
+			valueType = joined
+		} else {
+			p.add(entry.value.expressionPos(), "SLK342", "map values must share one type; found %s and %s", displayName(valueType), displayName(valueInfo.typ))
+			valueType = typeUnknown
+		}
+
+		if literal, ok := entry.key.(*literalExpression); ok {
+			switch literal.value.(type) {
+			case string, int64, bool:
+				if _, duplicate := staticKeys[literal.value]; duplicate {
+					p.add(entry.pos, "SLK384", "duplicate static map key %v", literal.value)
+				}
+				staticKeys[literal.value] = struct{}{}
+			}
+		}
+	}
+	info.typ = mapType(keyType, valueType)
+	node.resolved = info.typ
 	return info
 }
 
@@ -1028,6 +1093,9 @@ func iterableElementType(name string) (string, bool) {
 	if element, isArray := arrayElementType(name); isArray {
 		return element, true
 	}
+	if key, value, isMap := mapTypeArgs(name); isMap {
+		return "(" + key + "," + value + ")", true
+	}
 	base, args, generic := genericType(name)
 	if generic && base == "Iterable" && len(args) == 1 {
 		return args[0], true
@@ -1058,6 +1126,8 @@ func expressionLabel(expression expressionNode) string {
 		return expressionLabel(node.callee)
 	case *objectExpression:
 		return node.typeName
+	case *mapExpression:
+		return "map literal"
 	case *resultExpression:
 		return node.label()
 	case *propagateExpression:

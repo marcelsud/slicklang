@@ -5,11 +5,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 )
 
 type nativeFunction string
 
 const (
+	nativeStdBytesFromUtf8  nativeFunction = "std.bytes.FromUtf8"
+	nativeStdBytesToUtf8    nativeFunction = "std.bytes.ToUtf8"
+	nativeStdBytesLength    nativeFunction = "std.bytes.Length"
+	nativeStdBytesAt        nativeFunction = "std.bytes.At"
+	nativeStdBytesConcat    nativeFunction = "std.bytes.Concat"
 	nativeStdEnvGet         nativeFunction = "std.env.Get"
 	nativeStdEnvSet         nativeFunction = "std.env.Set"
 	nativeStdEnvUnset       nativeFunction = "std.env.Unset"
@@ -22,8 +28,9 @@ const (
 	nativeStdPathExtension  nativeFunction = "std.path.Extension"
 	nativeStdPathIsAbsolute nativeFunction = "std.path.IsAbsolute"
 
-	stdEnvFailureName  = "std.env.Failure"
-	stdJsonFailureName = "std.json.Failure"
+	stdBytesUtf8FailureName = "std.bytes.Utf8Failure"
+	stdEnvFailureName       = "std.env.Failure"
+	stdJsonFailureName      = "std.json.Failure"
 )
 
 type standardFunctionDecl struct {
@@ -52,6 +59,49 @@ var standardLibraryRegistry = struct {
 	classes   []standardClassDecl
 }{
 	functions: []standardFunctionDecl{
+		{
+			canonical: string(nativeStdBytesFromUtf8),
+			namespace: "std.bytes",
+			name:      "FromUtf8",
+			params:    []paramDecl{{name: "Text", typ: typeRef{name: "string"}}},
+			result:    typeRef{name: "bytes"},
+			native:    nativeStdBytesFromUtf8,
+		},
+		{
+			canonical: string(nativeStdBytesToUtf8),
+			namespace: "std.bytes",
+			name:      "ToUtf8",
+			params:    []paramDecl{{name: "Value", typ: typeRef{name: "bytes"}}},
+			result:    typeRef{name: "Result<string,std.bytes.Utf8Failure>"},
+			native:    nativeStdBytesToUtf8,
+		},
+		{
+			canonical: string(nativeStdBytesLength),
+			namespace: "std.bytes",
+			name:      "Length",
+			params:    []paramDecl{{name: "Value", typ: typeRef{name: "bytes"}}},
+			result:    typeRef{name: "int"},
+			native:    nativeStdBytesLength,
+		},
+		{
+			canonical: string(nativeStdBytesAt),
+			namespace: "std.bytes",
+			name:      "At",
+			params: []paramDecl{
+				{name: "Value", typ: typeRef{name: "bytes"}},
+				{name: "Index", typ: typeRef{name: "int"}},
+			},
+			result: typeRef{name: "int?"},
+			native: nativeStdBytesAt,
+		},
+		{
+			canonical: string(nativeStdBytesConcat),
+			namespace: "std.bytes",
+			name:      "Concat",
+			params:    []paramDecl{{name: "Values", typ: typeRef{name: "bytes[]"}}},
+			result:    typeRef{name: "bytes"},
+			native:    nativeStdBytesConcat,
+		},
 		{
 			canonical: string(nativeStdEnvGet),
 			namespace: "std.env",
@@ -148,6 +198,15 @@ var standardLibraryRegistry = struct {
 	},
 	classes: []standardClassDecl{
 		{
+			canonical: stdBytesUtf8FailureName,
+			namespace: "std.bytes",
+			name:      "Utf8Failure",
+			isError:   true,
+			fields: []fieldDecl{
+				{name: "Message", typ: typeRef{name: "string"}},
+			},
+		},
+		{
 			canonical: stdEnvFailureName,
 			namespace: "std.env",
 			name:      "Failure",
@@ -214,6 +273,48 @@ func isAbsoluteCanonicalName(name string) bool {
 func (p *program) callNativeFunction(function *functionDecl, frame *runtimeFrame, typeArgs []string) (runtimeValue, error) {
 	resultType := p.resolveType(function.namespace, function.aliases, function.result)
 	switch function.native {
+	case nativeStdBytesFromUtf8:
+		text := frame.locals["Text"].scalar.(string)
+		return runtimeValue{typ: "bytes", scalar: []byte(text)}, nil
+	case nativeStdBytesToUtf8:
+		value := frame.locals["Value"].scalar.([]byte)
+		if utf8.Valid(value) {
+			return runtimeValue{
+				typ:    resultType,
+				result: &runtimeResult{ok: true, payload: runtimeValue{typ: "string", scalar: string(value)}},
+			}, nil
+		}
+		failure := runtimeValue{
+			typ: stdBytesUtf8FailureName,
+			fields: map[string]runtimeValue{
+				"Message": {typ: "string", scalar: "invalid UTF-8"},
+			},
+		}
+		return runtimeValue{typ: resultType, result: &runtimeResult{payload: failure}}, nil
+	case nativeStdBytesLength:
+		value := frame.locals["Value"].scalar.([]byte)
+		return runtimeValue{typ: "int", scalar: int64(len(value))}, nil
+	case nativeStdBytesAt:
+		value := frame.locals["Value"].scalar.([]byte)
+		index := frame.locals["Index"].scalar.(int64)
+		optional := &runtimeOptional{}
+		if index >= 0 && index < int64(len(value)) {
+			optional.present = true
+			optional.value = runtimeValue{typ: "int", scalar: int64(value[index])}
+		}
+		return runtimeValue{typ: "int?", optional: optional}, nil
+	case nativeStdBytesConcat:
+		values := frame.locals["Values"].elements
+		total := 0
+		for _, value := range values {
+			total += len(value.scalar.([]byte))
+		}
+		joined := make([]byte, total)
+		offset := 0
+		for _, value := range values {
+			offset += copy(joined[offset:], value.scalar.([]byte))
+		}
+		return runtimeValue{typ: "bytes", scalar: joined}, nil
 	case nativeStdEnvGet:
 		name := frame.locals["Name"].scalar.(string)
 		value, present := os.LookupEnv(name)
@@ -310,6 +411,32 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 	}
 	g.line("func %s(%s) (%s, error) {", goFunctionName(function.qualified), strings.Join(parameters, ", "), g.goType(resultType))
 	switch function.native {
+	case nativeStdBytesFromUtf8:
+		g.line("return slickBytes([]byte(%s)), nil", arguments[0])
+	case nativeStdBytesToUtf8:
+		result := g.goType(resultType)
+		failure := goClassName(stdBytesUtf8FailureName)
+		g.line("if !utf8.Valid(%s) {", arguments[0])
+		g.line("return %s{failure: &%s{%s: %q}}, nil", result, failure, goFieldName("Message"), "invalid UTF-8")
+		g.line("}")
+		g.line("return %s{ok: true, value: string(%s)}, nil", result, arguments[0])
+	case nativeStdBytesLength:
+		g.line("return int64(len(%s)), nil", arguments[0])
+	case nativeStdBytesAt:
+		base, _ := optionalBase(resultType)
+		g.line("if %s < 0 || %s >= int64(len(%s)) { return slickNone[%s](), nil }", arguments[1], arguments[1], arguments[0], g.goType(base))
+		g.line("return slickSome(int64(%s[%s])), nil", arguments[0], arguments[1])
+	case nativeStdBytesConcat:
+		total := g.unique("total")
+		value := g.unique("value")
+		result := g.unique("bytes")
+		offset := g.unique("offset")
+		g.line("%s := 0", total)
+		g.line("for _, %s := range %s { %s += len(%s) }", value, arguments[0], total, value)
+		g.line("%s := make(slickBytes, %s)", result, total)
+		g.line("%s := 0", offset)
+		g.line("for _, %s := range %s { %s += copy(%s[%s:], %s) }", value, arguments[0], offset, result, offset, value)
+		g.line("return %s, nil", result)
 	case nativeStdEnvGet:
 		base, _ := optionalBase(resultType)
 		g.line("value, present := os.LookupEnv(%s)", arguments[0])
