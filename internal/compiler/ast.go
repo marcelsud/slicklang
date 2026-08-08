@@ -135,9 +135,14 @@ type objectExpression struct {
 func (n *objectExpression) expressionPos() position { return n.pos }
 
 type callExpression struct {
-	callee expressionNode
-	args   []expressionNode
-	pos    position
+	callee           expressionNode
+	typeArgs         []typeRef
+	args             []expressionNode
+	resolvedTypeArgs []string
+	resolvedParams   []string
+	resolvedResult   string
+	resolvedNative   nativeFunction
+	pos              position
 }
 
 func (n *callExpression) expressionPos() position { return n.pos }
@@ -440,6 +445,20 @@ func (p *bodyParser) parsePostfix() expressionNode {
 				continue
 			}
 		}
+		if typeArgs, ok := p.tryParseCallTypeArguments(); ok {
+			if !p.accept("(") {
+				p.error(p.current().pos, "expected '(' after type arguments")
+				return expression
+			}
+			args := p.parseArguments()
+			expression = &callExpression{
+				callee:   expression,
+				typeArgs: typeArgs,
+				args:     args,
+				pos:      expression.expressionPos(),
+			}
+			continue
+		}
 		if p.accept("(") {
 			args := p.parseArguments()
 			expression = &callExpression{callee: expression, args: args, pos: expression.expressionPos()}
@@ -627,6 +646,88 @@ func (p *bodyParser) parseArguments() []expressionNode {
 		p.error(p.current().pos, "unterminated call")
 	}
 	return args
+}
+
+// tryParseCallTypeArguments consumes <...> only when the angle brackets form
+// type arguments for a call: the closing > must be followed by (. Ordinary
+// comparison expressions that use < or > are left untouched.
+func (p *bodyParser) tryParseCallTypeArguments() ([]typeRef, bool) {
+	if p.atEnd() || p.current().text != "<" {
+		return nil, false
+	}
+	close := matching(p.tokens, p.index, "<", ">")
+	if close < 0 || close+1 >= len(p.tokens) || p.tokens[close+1].text != "(" {
+		return nil, false
+	}
+	start := p.index
+	p.index++
+	var typeArgs []typeRef
+	for p.index < close {
+		if p.accept(",") {
+			continue
+		}
+		typeArg, ok := p.parseTypeArgument()
+		if !ok {
+			p.index = close + 1
+			return nil, true
+		}
+		typeArgs = append(typeArgs, typeArg)
+		if p.index >= close {
+			break
+		}
+		if !p.accept(",") {
+			p.error(p.current().pos, "expected ',' between type arguments")
+			p.index = close + 1
+			return typeArgs, true
+		}
+	}
+	if p.index != close {
+		p.error(p.tokens[start].pos, "malformed type arguments")
+	}
+	p.index = close + 1
+	if len(typeArgs) == 0 {
+		p.error(p.tokens[start].pos, "expected at least one type argument")
+	}
+	return typeArgs, true
+}
+
+func (p *bodyParser) parseTypeArgument() (typeRef, bool) {
+	start := p.index
+	pos := p.current().pos
+	if p.current().text == "(" {
+		close := matching(p.tokens, p.index, "(", ")")
+		if close < 0 {
+			p.error(pos, "unterminated tuple type")
+			return typeRef{}, false
+		}
+		p.index = close + 1
+	} else {
+		_, next, ok := readQualified(p.tokens, p.index)
+		if !ok {
+			p.error(pos, "expected type")
+			return typeRef{}, false
+		}
+		p.index = next
+	}
+	if p.current().text == "<" {
+		close := matching(p.tokens, p.index, "<", ">")
+		if close < 0 {
+			p.error(p.current().pos, "unterminated generic type")
+			return typeRef{}, false
+		}
+		p.index = close + 1
+	}
+	for p.current().text == "?" || (p.current().text == "[" && p.index+1 < len(p.tokens) && p.tokens[p.index+1].text == "]") {
+		if p.accept("?") {
+			continue
+		}
+		p.index += 2
+	}
+	var text strings.Builder
+	for _, tok := range p.tokens[start:p.index] {
+		text.WriteString(tok.text)
+	}
+	return typeRef{name: text.String(), pos: pos}, true
 }
 
 func (p *bodyParser) parseCatchExpression(value expressionNode) expressionNode {

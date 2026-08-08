@@ -1,0 +1,21 @@
+class Config {
+    Name: string
+    Port: int
+    Debug: bool?
+    Tags: string[]
+}
+
+function RoundTrip(Text: string)
+    -> Result<string, std.json.Failure> {
+    let Config = std.json.Decode<Config>(Text)?
+    std.json.Encode<Config>(Config)
+}
+
+function main() -> string {
+    match RoundTrip(
+        `{"Name":"Slick","Port":8080,"Tags":["strict","native"]}`
+    ) {
+        Ok(Text) => Text
+        Err(Failure) => `${Failure.Path}: ${Failure.Message}`
+    }
+}

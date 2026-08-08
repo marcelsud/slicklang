@@ -11,12 +11,15 @@ const (
 )
 
 type callableTarget struct {
-	name      string
-	namespace string
-	aliases   map[string]aliasDecl
-	params    []paramDecl
-	result    typeRef
-	throwSet  map[string]struct{}
+	name       string
+	namespace  string
+	aliases    map[string]aliasDecl
+	typeParams []string
+	params     []paramDecl
+	result     typeRef
+	throwSet   map[string]struct{}
+	native     nativeFunction
+	function   *functionDecl
 }
 
 type effectOrigin struct {
@@ -368,12 +371,18 @@ func (p *program) checkCallExpression(node *callExpression, scope *astScope) exp
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	}
 	if info, builtin := p.checkIterableCall(node, scope, name); builtin {
+		if len(node.typeArgs) > 0 {
+			p.add(node.pos, "SLK380", "%s does not take type arguments", name.name)
+		}
 		return info
 	}
 	if className, isError := p.resolveErrorIn(scope.function.namespace, scope.function.aliases, name.name); isError && p.classes[className] != nil {
 		class := p.classes[className]
 		p.requireAccess(node.pos, scope.function.namespace, class.namespace, class.name, "error class")
 		info := expressionInfo{typ: className, effects: make(effectSet)}
+		if len(node.typeArgs) > 0 {
+			p.add(node.pos, "SLK380", "%s does not take type arguments", name.name)
+		}
 		for _, argument := range node.args {
 			mergeEffects(info.effects, p.checkASTExpression(argument, scope).effects)
 		}
@@ -385,21 +394,78 @@ func (p *program) checkCallExpression(node *callExpression, scope *astScope) exp
 		if !reported {
 			p.add(node.pos, "SLK203", "unknown function or method %s", name.name)
 		}
+		// Avoid cascade diagnostics for type arguments on unknown callables.
+		for _, argument := range node.args {
+			mergeEffects(make(effectSet), p.checkASTExpression(argument, scope).effects)
+		}
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	}
+
 	info := expressionInfo{
 		typ:     p.resolveType(target.namespace, target.aliases, target.result),
 		effects: make(effectSet),
 	}
-	if len(node.args) != len(target.params) {
-		p.add(node.pos, "SLK320", "%s expects %d arguments, found %d", target.name, len(target.params), len(node.args))
+	params := target.params
+	result := target.result
+	typeArgs := make([]string, 0, len(node.typeArgs))
+
+	if len(target.typeParams) == 0 {
+		if len(node.typeArgs) > 0 {
+			p.add(node.pos, "SLK380", "%s does not take type arguments", target.name)
+		}
+	} else {
+		if len(node.typeArgs) != len(target.typeParams) {
+			p.add(node.pos, "SLK380", "%s expects %d type arguments, found %d", target.name, len(target.typeParams), len(node.typeArgs))
+			for _, argument := range node.args {
+				mergeEffects(info.effects, p.checkASTExpression(argument, scope).effects)
+			}
+			return info
+		}
+		substitutions := make(map[string]string, len(target.typeParams))
+		for index, typeArg := range node.typeArgs {
+			canonical := p.canonicalType(scope.function.namespace, scope.function.aliases, typeArg)
+			p.checkTypeName(typeArg.pos, scope.function.namespace, canonical)
+			if reason := p.jsonUnsupportedReason(canonical, map[string]bool{}); reason != "" {
+				// Only Decode/Encode currently own JSON type contracts.
+				if target.native == nativeStdJsonDecode || target.native == nativeStdJsonEncode {
+					p.add(typeArg.pos, "SLK381", "%s", reason)
+				}
+			}
+			typeArgs = append(typeArgs, canonical)
+			substitutions[target.typeParams[index]] = canonical
+		}
+		params = make([]paramDecl, len(target.params))
+		for index, param := range target.params {
+			params[index] = paramDecl{
+				name: param.name,
+				typ:  typeRef{name: substituteTypeParams(p.resolveType(target.namespace, target.aliases, param.typ), substitutions), pos: param.typ.pos},
+			}
+		}
+		result = typeRef{name: substituteTypeParams(p.resolveType(target.namespace, target.aliases, target.result), substitutions), pos: target.result.pos}
+		info.typ = result.name
+	}
+
+	node.resolvedTypeArgs = typeArgs
+	node.resolvedParams = make([]string, len(params))
+	for index, param := range params {
+		if len(target.typeParams) == 0 {
+			node.resolvedParams[index] = p.resolveType(target.namespace, target.aliases, param.typ)
+		} else {
+			node.resolvedParams[index] = param.typ.name
+		}
+	}
+	node.resolvedResult = info.typ
+	node.resolvedNative = target.native
+
+	if len(node.args) != len(params) {
+		p.add(node.pos, "SLK320", "%s expects %d arguments, found %d", target.name, len(params), len(node.args))
 	}
 	for index, argument := range node.args {
-		if index >= len(target.params) {
+		if index >= len(params) {
 			mergeEffects(info.effects, p.checkASTExpression(argument, scope).effects)
 			continue
 		}
-		expected := p.resolveType(target.namespace, target.aliases, target.params[index].typ)
+		expected := node.resolvedParams[index]
 		argumentInfo := p.checkASTExpressionExpecting(argument, scope, expected)
 		mergeEffects(info.effects, argumentInfo.effects)
 		p.checkAssignable(node.pos, argumentInfo.typ, expected, target.name, index+1)
@@ -484,7 +550,17 @@ func (p *program) resolveASTCall(function *functionDecl, name *nameExpression, s
 	if !p.requireAccess(name.pos, function.namespace, callee.namespace, callee.name, "function") {
 		return nil, true
 	}
-	return &callableTarget{name: name.name, namespace: callee.namespace, aliases: callee.aliases, params: callee.params, result: callee.result, throwSet: callee.throwSet}, false
+	return &callableTarget{
+		name:       name.name,
+		namespace:  callee.namespace,
+		aliases:    callee.aliases,
+		typeParams: callee.typeParams,
+		params:     callee.params,
+		result:     callee.result,
+		throwSet:   callee.throwSet,
+		native:     callee.native,
+		function:   callee,
+	}, false
 }
 
 // assignable is the single decision point for storing a value of type actual

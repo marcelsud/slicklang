@@ -110,6 +110,7 @@ type functionDecl struct {
 	qualified         string
 	namespace         string
 	aliases           map[string]aliasDecl
+	typeParams        []string
 	params            []paramDecl
 	result            typeRef
 	throws            []typeRef

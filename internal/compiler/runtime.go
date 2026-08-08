@@ -154,25 +154,48 @@ func (p *program) runMain() (runtimeValue, error) {
 	if len(main.params) != 0 {
 		return runtimeValue{}, errors.New("root.main must not accept parameters")
 	}
-	return p.callFunction(main, nil, nil)
+	return p.callFunction(main, nil, nil, nil)
 }
 
-func (p *program) callFunction(function *functionDecl, args []runtimeValue, self *runtimeValue) (runtimeValue, error) {
+func (p *program) callFunction(function *functionDecl, args []runtimeValue, self *runtimeValue, typeArgs []string) (runtimeValue, error) {
 	if len(args) != len(function.params) {
 		return runtimeValue{}, fmt.Errorf("%s expects %d arguments, found %d", function.qualified, len(function.params), len(args))
 	}
 	frame := &runtimeFrame{function: function, locals: make(map[string]runtimeValue, len(args)+1)}
+	paramTypes := make([]string, len(function.params))
+	if len(function.typeParams) > 0 {
+		if len(typeArgs) != len(function.typeParams) {
+			return runtimeValue{}, fmt.Errorf("%s expects %d type arguments, found %d", function.qualified, len(function.typeParams), len(typeArgs))
+		}
+		substitutions := make(map[string]string, len(function.typeParams))
+		for index, name := range function.typeParams {
+			substitutions[name] = typeArgs[index]
+		}
+		for index, param := range function.params {
+			paramTypes[index] = substituteTypeParams(p.resolveType(function.namespace, function.aliases, param.typ), substitutions)
+		}
+	} else {
+		for index, param := range function.params {
+			paramTypes[index] = p.resolveType(function.namespace, function.aliases, param.typ)
+		}
+	}
 	for index, param := range function.params {
-		declared := p.resolveType(function.namespace, function.aliases, param.typ)
-		frame.locals[param.name] = coerceRuntimeValue(args[index], declared)
+		frame.locals[param.name] = coerceRuntimeValue(args[index], paramTypes[index])
 	}
 	if self != nil {
 		frame.locals["self"] = *self
 	}
 	if function.native != "" {
-		return p.callNativeFunction(function, frame)
+		return p.callNativeFunction(function, frame, typeArgs)
 	}
 	result := p.resolveType(function.namespace, function.aliases, function.result)
+	if len(function.typeParams) > 0 {
+		substitutions := make(map[string]string, len(function.typeParams))
+		for index, name := range function.typeParams {
+			substitutions[name] = typeArgs[index]
+		}
+		result = substituteTypeParams(result, substitutions)
+	}
 	value, err := p.evalBlock(function.ast, frame)
 	var returned *returnSignal
 	if errors.As(err, &returned) {
@@ -430,7 +453,7 @@ func (p *program) evalCall(node *callExpression, frame *runtimeFrame) (runtimeVa
 			if implementation == nil {
 				return runtimeValue{}, runtimeError(node.pos, "%s has no implemented method %s", class.name, parts[1])
 			}
-			return p.callFunction(implementation, args, &receiver)
+			return p.callFunction(implementation, args, &receiver, nil)
 		}
 	}
 	canonical := p.resolveNameIn(frame.function.namespace, frame.function.aliases, name.name)
@@ -438,7 +461,7 @@ func (p *program) evalCall(node *callExpression, frame *runtimeFrame) (runtimeVa
 	if function == nil {
 		return runtimeValue{}, runtimeError(node.pos, "unknown function %s", name.name)
 	}
-	return p.callFunction(function, args, nil)
+	return p.callFunction(function, args, nil, append([]string(nil), node.resolvedTypeArgs...))
 }
 
 func (p *program) evalBinary(node *binaryExpression, frame *runtimeFrame) (runtimeValue, error) {

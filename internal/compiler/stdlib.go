@@ -9,20 +9,24 @@ import (
 type nativeFunction string
 
 const (
-	nativeStdEnvGet   nativeFunction = "std.env.Get"
-	nativeStdEnvSet   nativeFunction = "std.env.Set"
-	nativeStdEnvUnset nativeFunction = "std.env.Unset"
+	nativeStdEnvGet     nativeFunction = "std.env.Get"
+	nativeStdEnvSet     nativeFunction = "std.env.Set"
+	nativeStdEnvUnset   nativeFunction = "std.env.Unset"
+	nativeStdJsonDecode nativeFunction = "std.json.Decode"
+	nativeStdJsonEncode nativeFunction = "std.json.Encode"
 
-	stdEnvFailureName = "std.env.Failure"
+	stdEnvFailureName  = "std.env.Failure"
+	stdJsonFailureName = "std.json.Failure"
 )
 
 type standardFunctionDecl struct {
-	canonical string
-	namespace string
-	name      string
-	params    []paramDecl
-	result    typeRef
-	native    nativeFunction
+	canonical  string
+	namespace  string
+	name       string
+	typeParams []string
+	params     []paramDecl
+	result     typeRef
+	native     nativeFunction
 }
 
 type standardClassDecl struct {
@@ -68,6 +72,24 @@ var standardLibraryRegistry = struct {
 			result:    typeRef{name: "Result<null,std.env.Failure>"},
 			native:    nativeStdEnvUnset,
 		},
+		{
+			canonical:  string(nativeStdJsonDecode),
+			namespace:  "std.json",
+			name:       "Decode",
+			typeParams: []string{"T"},
+			params:     []paramDecl{{name: "Text", typ: typeRef{name: "string"}}},
+			result:     typeRef{name: "Result<T,std.json.Failure>"},
+			native:     nativeStdJsonDecode,
+		},
+		{
+			canonical:  string(nativeStdJsonEncode),
+			namespace:  "std.json",
+			name:       "Encode",
+			typeParams: []string{"T"},
+			params:     []paramDecl{{name: "Value", typ: typeRef{name: "T"}}},
+			result:     typeRef{name: "Result<string,std.json.Failure>"},
+			native:     nativeStdJsonEncode,
+		},
 	},
 	classes: []standardClassDecl{
 		{
@@ -81,19 +103,31 @@ var standardLibraryRegistry = struct {
 				{name: "Message", typ: typeRef{name: "string"}},
 			},
 		},
+		{
+			canonical: stdJsonFailureName,
+			namespace: "std.json",
+			name:      "Failure",
+			isError:   true,
+			fields: []fieldDecl{
+				{name: "Operation", typ: typeRef{name: "string"}},
+				{name: "Path", typ: typeRef{name: "string"}},
+				{name: "Message", typ: typeRef{name: "string"}},
+			},
+		},
 	},
 }
 
 func registerStandardLibrary(p *program) {
 	for _, declaration := range standardLibraryRegistry.functions {
 		p.functions[declaration.canonical] = &functionDecl{
-			name:      declaration.name,
-			qualified: declaration.canonical,
-			namespace: declaration.namespace,
-			aliases:   make(map[string]aliasDecl),
-			params:    declaration.params,
-			result:    declaration.result,
-			native:    declaration.native,
+			name:       declaration.name,
+			qualified:  declaration.canonical,
+			namespace:  declaration.namespace,
+			aliases:    make(map[string]aliasDecl),
+			typeParams: append([]string(nil), declaration.typeParams...),
+			params:     declaration.params,
+			result:     declaration.result,
+			native:     declaration.native,
 		}
 	}
 	for _, declaration := range standardLibraryRegistry.classes {
@@ -122,11 +156,11 @@ func isAbsoluteCanonicalName(name string) bool {
 	return strings.HasPrefix(name, "root.") || strings.HasPrefix(name, "std.")
 }
 
-func (p *program) callNativeFunction(function *functionDecl, frame *runtimeFrame) (runtimeValue, error) {
+func (p *program) callNativeFunction(function *functionDecl, frame *runtimeFrame, typeArgs []string) (runtimeValue, error) {
 	resultType := p.resolveType(function.namespace, function.aliases, function.result)
-	name := frame.locals["Name"].scalar.(string)
 	switch function.native {
 	case nativeStdEnvGet:
+		name := frame.locals["Name"].scalar.(string)
 		value, present := os.LookupEnv(name)
 		optional := &runtimeOptional{present: present}
 		if present {
@@ -134,10 +168,23 @@ func (p *program) callNativeFunction(function *functionDecl, frame *runtimeFrame
 		}
 		return runtimeValue{typ: resultType, optional: optional}, nil
 	case nativeStdEnvSet:
+		name := frame.locals["Name"].scalar.(string)
 		value := frame.locals["Value"].scalar.(string)
 		return runtimeEnvMutationResult(resultType, "Set", name, os.Setenv(name, value)), nil
 	case nativeStdEnvUnset:
+		name := frame.locals["Name"].scalar.(string)
 		return runtimeEnvMutationResult(resultType, "Unset", name, os.Unsetenv(name)), nil
+	case nativeStdJsonDecode:
+		if len(typeArgs) != 1 {
+			return runtimeValue{}, fmt.Errorf("std.json.Decode requires one type argument")
+		}
+		text := frame.locals["Text"].scalar.(string)
+		return p.runtimeJSONDecode(typeArgs[0], text), nil
+	case nativeStdJsonEncode:
+		if len(typeArgs) != 1 {
+			return runtimeValue{}, fmt.Errorf("std.json.Encode requires one type argument")
+		}
+		return p.runtimeJSONEncode(typeArgs[0], frame.locals["Value"]), nil
 	default:
 		return runtimeValue{}, fmt.Errorf("unknown native Slick function %s", function.native)
 	}
@@ -165,6 +212,10 @@ func runtimeEnvMutationResult(resultType, operation, name string, err error) run
 }
 
 func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
+	if function.native == nativeStdJsonDecode || function.native == nativeStdJsonEncode {
+		// Concrete codecs are emitted per call site type argument.
+		return nil
+	}
 	resultType, err := g.declaredType(function.namespace, function.aliases, function.result)
 	if err != nil {
 		return err
