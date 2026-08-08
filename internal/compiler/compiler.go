@@ -795,6 +795,7 @@ func readQualified(tokens []token, start int) (qualifiedRef, int, bool) {
 func (p *program) check() {
 	p.parseBodies()
 	p.checkAliases()
+	p.checkDeclaredTypes()
 	p.checkVisibility()
 	p.resolveThrowSets()
 	p.linkMethods()
@@ -827,6 +828,53 @@ func (p *program) checkAliases() {
 		if alias.target != local && (localClassExists || localInterfaceExists || localFunctionExists) {
 			p.add(alias.pos, "SLK204", "alias %s conflicts with a declaration in %s", alias.name, alias.namespace)
 		}
+	}
+}
+
+// checkDeclaredTypes rejects type spellings that are structurally wrong before
+// any body is typed, so one type has exactly one canonical spelling. Inline
+// class methods are skipped in methodImpls: the class already carries their
+// declaration, and reporting both would duplicate the diagnostic.
+func (p *program) checkDeclaredTypes() {
+	for _, name := range sortedKeys(p.functions) {
+		function := p.functions[name]
+		p.checkCallableTypes(function.params, function.result)
+	}
+	for _, implementation := range p.methodImpls {
+		if implementation.inline {
+			continue
+		}
+		p.checkCallableTypes(implementation.params, implementation.result)
+	}
+	for _, name := range sortedKeys(p.classes) {
+		class := p.classes[name]
+		for _, fieldName := range sortedKeys(class.fields) {
+			p.checkTypeRef(class.fields[fieldName].typ)
+		}
+		for _, methodName := range sortedKeys(class.methods) {
+			method := class.methods[methodName]
+			p.checkCallableTypes(method.params, method.result)
+		}
+	}
+	for _, name := range sortedKeys(p.interfaces) {
+		iface := p.interfaces[name]
+		for _, methodName := range sortedKeys(iface.methods) {
+			method := iface.methods[methodName]
+			p.checkCallableTypes(method.params, method.result)
+		}
+	}
+}
+
+func (p *program) checkCallableTypes(params []paramDecl, result typeRef) {
+	for _, param := range params {
+		p.checkTypeRef(param.typ)
+	}
+	p.checkTypeRef(result)
+}
+
+func (p *program) checkTypeRef(ref typeRef) {
+	if redundantOptional(ref.name) {
+		p.add(ref.pos, "SLK373", "%s is redundant; a type is optional at most once", ref.name)
 	}
 }
 
@@ -889,19 +937,23 @@ func containsError(set map[string]struct{}, name string) bool {
 	return ok
 }
 
-// displayName shortens a canonical type for diagnostics, descending into array
-// elements and generic arguments so Result<root.User,root.Missing> reads as
-// Result<User, Missing> instead of losing its shape to the last dot.
+// displayName shortens a canonical type for diagnostics, descending through
+// every structural layer so Result<root.User,root.Missing> reads as
+// Result<User, Missing> and root.User?[] as User?[] instead of losing their
+// shape to the last dot.
 func displayName(name string) string {
-	if element := strings.TrimSuffix(name, "[]"); element != name {
-		return displayName(element) + "[]"
-	}
-	if base, args, generic := genericType(name); generic {
-		short := make([]string, len(args))
-		for index, arg := range args {
+	parsed := parseTypeName(name)
+	switch parsed.kind {
+	case typeKindOptional:
+		return displayName(parsed.base) + "?"
+	case typeKindArray:
+		return displayName(parsed.base) + "[]"
+	case typeKindGeneric:
+		short := make([]string, len(parsed.args))
+		for index, arg := range parsed.args {
 			short[index] = displayName(arg)
 		}
-		return displayName(base) + "<" + strings.Join(short, ", ") + ">"
+		return displayName(parsed.base) + "<" + strings.Join(short, ", ") + ">"
 	}
 	if index := strings.LastIndexByte(name, '.'); index >= 0 {
 		return name[index+1:]

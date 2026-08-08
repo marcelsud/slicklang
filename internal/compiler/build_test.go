@@ -11,12 +11,15 @@ import (
 )
 
 // exampleOutputs pins the observable output of every example project. The
-// result-* examples double as the Result documentation, so the output each one
-// documents is verified here instead of being left to rot.
+// result-* and optional examples double as the documentation for those
+// features, so the output each one documents is verified here instead of being
+// left to rot.
 var exampleOutputs = map[string]string{
 	"hello":              "Ada: woof",
 	"range-loop":         "0:Ada;2:Grace;",
 	"checked-errors":     "Ada: woof",
+	"optional":           "missing user",
+	"optional-throws":    "Ada; Grace has no nickname; missing; Countess",
 	"result":             "missing user",
 	"result-match":       "on is true; bad flag maybe; yes; no; false",
 	"result-propagation": "localhost:8080; empty host; 6; zero is not scorable",

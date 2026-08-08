@@ -14,6 +14,16 @@ type runtimeValue struct {
 	elements []runtimeValue
 	iterable *runtimeIterable
 	result   *runtimeResult
+	optional *runtimeOptional
+}
+
+// runtimeOptional is the tagged representation of a T? value. The complete
+// static optional type stays on the owning runtimeValue's typ, so an absent
+// int? never collapses into an absent User?, and present never depends on the
+// payload being non-zero: 0, false, and "" are ordinary present values.
+type runtimeOptional struct {
+	present bool
+	value   runtimeValue
 }
 
 // runtimeResult is a tagged Result payload. The complete static Result type
@@ -31,6 +41,47 @@ func (r *runtimeResult) label() string {
 	return "Err"
 }
 
+// coerceRuntimeValue promotes value into target's shape: T becomes a present
+// T?, null becomes an absent T?, and arrays convert element by element. Every
+// place a value enters typed storage — a parameter, a return, a local, a
+// field, an array element — goes through it, so promotion lives in one place.
+func coerceRuntimeValue(value runtimeValue, target string) runtimeValue {
+	if target == "" || value.typ == target {
+		return value
+	}
+	if base, optional := optionalBase(target); optional {
+		switch {
+		case value.typ == "null":
+			return runtimeValue{typ: target, optional: &runtimeOptional{}}
+		case value.optional != nil:
+			return runtimeValue{typ: target, optional: value.optional}
+		default:
+			return runtimeValue{typ: target, optional: &runtimeOptional{present: true, value: coerceRuntimeValue(value, base)}}
+		}
+	}
+	if element, isArray := arrayElementType(target); isArray && value.elements != nil {
+		elements := make([]runtimeValue, len(value.elements))
+		for index, item := range value.elements {
+			elements[index] = coerceRuntimeValue(item, element)
+		}
+		return runtimeValue{typ: target, elements: elements}
+	}
+	return value
+}
+
+// runtimeOptionalParts reads a value as an optional: an absent optional and a
+// null literal are both absent, and any other value is its own payload. It lets
+// equality compare T? with null, with T, and with T? uniformly.
+func runtimeOptionalParts(value runtimeValue) (bool, runtimeValue) {
+	if value.optional != nil {
+		return value.optional.present, value.optional.value
+	}
+	if value.typ == "null" {
+		return false, runtimeValue{}
+	}
+	return true, value
+}
+
 type runtimeIterable struct {
 	kind    string
 	sources []runtimeValue
@@ -38,9 +89,14 @@ type runtimeIterable struct {
 	end     int64
 }
 
+// runtimeFrame separates declared storage from branch refinements the same way
+// the checker's scope does: locals holds what a name was bound to, narrowed
+// holds the payload a null test proved present. Assignment writes storage and
+// retires the refinement, so a narrowed branch never hides a write.
 type runtimeFrame struct {
 	function *functionDecl
 	locals   map[string]runtimeValue
+	narrowed map[string]runtimeValue
 	parent   *runtimeFrame
 }
 
@@ -107,17 +163,22 @@ func (p *program) callFunction(function *functionDecl, args []runtimeValue, self
 	}
 	frame := &runtimeFrame{function: function, locals: make(map[string]runtimeValue, len(args)+1)}
 	for index, param := range function.params {
-		frame.locals[param.name] = args[index]
+		declared := p.resolveType(function.namespace, function.aliases, param.typ)
+		frame.locals[param.name] = coerceRuntimeValue(args[index], declared)
 	}
 	if self != nil {
 		frame.locals["self"] = *self
 	}
+	result := p.resolveType(function.namespace, function.aliases, function.result)
 	value, err := p.evalBlock(function.ast, frame)
 	var returned *returnSignal
 	if errors.As(err, &returned) {
-		return returned.value, nil
+		return coerceRuntimeValue(returned.value, result), nil
 	}
-	return value, err
+	if err != nil {
+		return runtimeValue{}, err
+	}
+	return coerceRuntimeValue(value, result), nil
 }
 
 func (p *program) evalBlock(block *blockNode, frame *runtimeFrame) (runtimeValue, error) {
@@ -142,14 +203,17 @@ func (p *program) evalStatement(statement statementNode, frame *runtimeFrame) (r
 		if err != nil {
 			return runtimeValue{}, err
 		}
-		frame.locals[node.name] = value
+		// A fresh binding replaces any refinement of the same name, exactly as
+		// the checker's scope does.
+		delete(frame.narrowed, node.name)
+		frame.locals[node.name] = coerceRuntimeValue(value, node.resolved)
 		return nullRuntimeValue(), nil
 	case *assignmentStatement:
 		value, err := p.evalExpression(node.value, frame)
 		if err != nil {
 			return runtimeValue{}, err
 		}
-		if !frame.assign(node.name, value) {
+		if !frame.assign(node.name, coerceRuntimeValue(value, node.resolved)) {
 			return runtimeValue{}, runtimeError(node.pos, "unknown value %s", node.name)
 		}
 		return nullRuntimeValue(), nil
@@ -192,16 +256,29 @@ func (p *program) evalExpression(expression expressionNode, frame *runtimeFrame)
 		return runtimeValue{typ: literalType(node.value), scalar: node.value}, nil
 	case *arrayExpression:
 		elements := make([]runtimeValue, 0, len(node.elements))
+		elementType := ""
 		for _, element := range node.elements {
 			value, err := p.evalExpression(element, frame)
 			if err != nil {
 				return runtimeValue{}, err
 			}
 			elements = append(elements, value)
+			if elementType == "" {
+				elementType = value.typ
+				continue
+			}
+			// The same join the checker applied, so a literal mixing values and
+			// null materializes as one homogeneous optional array.
+			if joined, ok := joinTypes(elementType, value.typ); ok {
+				elementType = joined
+			}
 		}
 		typ := typeUnknown + "[]"
-		if len(elements) > 0 {
-			typ = elements[0].typ + "[]"
+		if elementType != "" {
+			typ = elementType + "[]"
+			for index := range elements {
+				elements[index] = coerceRuntimeValue(elements[index], elementType)
+			}
 		}
 		return runtimeValue{typ: typ, elements: elements}, nil
 	case *rangeExpression:
@@ -250,6 +327,15 @@ func (p *program) evalName(node *nameExpression, frame *runtimeFrame) (runtimeVa
 		return runtimeValue{}, runtimeError(node.pos, "unknown value %s", node.name)
 	}
 	for _, fieldName := range parts[1:] {
+		// The checker only lets a field read past an optional inside a branch
+		// that proved the value present, so the payload is there; an absent one
+		// is a compiler bug and is reported rather than silently zeroed.
+		if value.optional != nil {
+			if !value.optional.present {
+				return runtimeValue{}, runtimeError(node.pos, "%s is null and has no field %s", displayName(value.typ), fieldName)
+			}
+			value = value.optional.value
+		}
 		field, ok := value.fields[fieldName]
 		if !ok {
 			return runtimeValue{}, runtimeError(node.pos, "%s has no field %s", displayName(value.typ), fieldName)
@@ -266,15 +352,19 @@ func (p *program) evalObject(node *objectExpression, frame *runtimeFrame) (runti
 		return runtimeValue{}, runtimeError(node.pos, "unknown class %s", node.typeName)
 	}
 	value := runtimeValue{typ: canonical, fields: make(map[string]runtimeValue, len(class.fields))}
-	for name := range class.fields {
-		value.fields[name] = nullRuntimeValue()
+	declared := make(map[string]string, len(class.fields))
+	for name, field := range class.fields {
+		// An omitted optional field defaults to a typed absent value, not to a
+		// bare null, so it stays distinguishable from every other optional.
+		declared[name] = p.resolveType(class.namespace, class.aliases, field.typ)
+		value.fields[name] = coerceRuntimeValue(nullRuntimeValue(), declared[name])
 	}
 	for _, field := range node.fields {
 		fieldValue, err := p.evalExpression(field.value, frame)
 		if err != nil {
 			return runtimeValue{}, err
 		}
-		value.fields[field.name] = fieldValue
+		value.fields[field.name] = coerceRuntimeValue(fieldValue, declared[field.name])
 	}
 	return value, nil
 }
@@ -321,6 +411,14 @@ func (p *program) evalCall(node *callExpression, frame *runtimeFrame) (runtimeVa
 	parts := strings.Split(name.name, ".")
 	if len(parts) == 2 {
 		if receiver, exists := frame.lookup(parts[0]); exists {
+			// Narrowing proved the receiver present before the checker allowed
+			// this call, so the payload is the real receiver.
+			if receiver.optional != nil {
+				if !receiver.optional.present {
+					return runtimeValue{}, runtimeError(node.pos, "%s is null and has no method %s", displayName(receiver.typ), parts[1])
+				}
+				receiver = receiver.optional.value
+			}
 			class := p.classes[receiver.typ]
 			if class == nil {
 				return runtimeValue{}, runtimeError(node.pos, "%s is not a class value", parts[0])
@@ -498,12 +596,29 @@ func (p *program) evalIf(node *ifExpression, frame *runtimeFrame) (runtimeValue,
 		return runtimeValue{}, runtimeError(node.pos, "if condition is not bool")
 	}
 	if truth {
-		return p.evalBlock(node.thenBlock, frame.clone())
+		return p.evalBlock(node.thenBlock, narrowedFrame(node.condition, frame, true))
 	}
 	if node.elseBlock != nil {
-		return p.evalBlock(node.elseBlock, frame.clone())
+		return p.evalBlock(node.elseBlock, narrowedFrame(node.condition, frame, false))
 	}
 	return nullRuntimeValue(), nil
+}
+
+// narrowedFrame mirrors the checker's branch narrowing: inside the branch a
+// null test proved present, the local reads as its payload while its declared
+// storage stays where it was.
+func narrowedFrame(condition expressionNode, frame *runtimeFrame, thenBranch bool) *runtimeFrame {
+	branch := frame.clone()
+	name, present, ok := nullTestOf(condition)
+	if !ok || present != thenBranch {
+		return branch
+	}
+	value, exists := frame.lookup(name)
+	if !exists || value.optional == nil || !value.optional.present {
+		return branch
+	}
+	branch.narrowed = map[string]runtimeValue{name: value.optional.value}
+	return branch
 }
 
 func (p *program) evalCatch(node *catchExpression, frame *runtimeFrame) (runtimeValue, error) {
@@ -610,8 +725,13 @@ func (frame *runtimeFrame) clone() *runtimeFrame {
 	return &runtimeFrame{function: frame.function, locals: make(map[string]runtimeValue), parent: frame}
 }
 
+// lookup reads a name as the nearest frame sees it: a refinement proven on that
+// frame wins over the storage it refines, and both win over any outer frame.
 func (frame *runtimeFrame) lookup(name string) (runtimeValue, bool) {
 	for current := frame; current != nil; current = current.parent {
+		if value, exists := current.narrowed[name]; exists {
+			return value, true
+		}
 		if value, exists := current.locals[name]; exists {
 			return value, true
 		}
@@ -619,14 +739,19 @@ func (frame *runtimeFrame) lookup(name string) (runtimeValue, bool) {
 	return runtimeValue{}, false
 }
 
+// assign writes the declared storage and retires every refinement of the name
+// along the way, so a narrowed branch cannot swallow the write or keep reading
+// the value the test proved.
 func (frame *runtimeFrame) assign(name string, value runtimeValue) bool {
+	assigned := false
 	for current := frame; current != nil; current = current.parent {
-		if _, exists := current.locals[name]; exists {
+		delete(current.narrowed, name)
+		if _, exists := current.locals[name]; exists && !assigned {
 			current.locals[name] = value
-			return true
+			assigned = true
 		}
 	}
-	return false
+	return assigned
 }
 
 func nullRuntimeValue() runtimeValue {
@@ -634,6 +759,17 @@ func nullRuntimeValue() runtimeValue {
 }
 
 func runtimeEqual(left, right runtimeValue) bool {
+	// Optional comparison runs before the type check: T? compares with null,
+	// with T, and with another T?, and only absence-versus-presence decides
+	// the result before the payloads are looked at.
+	if left.optional != nil || right.optional != nil {
+		leftPresent, leftValue := runtimeOptionalParts(left)
+		rightPresent, rightValue := runtimeOptionalParts(right)
+		if leftPresent != rightPresent {
+			return false
+		}
+		return !leftPresent || runtimeEqual(leftValue, rightValue)
+	}
 	if left.typ != right.typ {
 		return false
 	}
@@ -670,6 +806,14 @@ func runtimeEqual(left, right runtimeValue) bool {
 }
 
 func formatRuntimeValue(value runtimeValue) string {
+	// A present optional reads as its payload and an absent one as nothing, so
+	// an absent optional main result prints no line at all.
+	if value.optional != nil {
+		if !value.optional.present {
+			return ""
+		}
+		return formatRuntimeValue(value.optional.value)
+	}
 	switch value.typ {
 	case "null":
 		return ""

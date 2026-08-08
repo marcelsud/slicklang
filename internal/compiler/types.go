@@ -112,3 +112,160 @@ func isResultConstructor(name string) bool {
 func isReservedTypeName(name string) bool {
 	return name == resultTypeName || isResultConstructor(name)
 }
+
+// typeKind names the outermost shape of a Slick type.
+type typeKind int
+
+const (
+	typeKindName typeKind = iota
+	typeKindOptional
+	typeKindArray
+	typeKindTuple
+	typeKindGeneric
+)
+
+// parsedType is one level of a Slick type's structure. Every helper that needs
+// to look inside a type goes through parseTypeName instead of trimming
+// suffixes, so User[]? and User?[] can never collapse into each other and a
+// nested Result<User?, LookupError> keeps its argument shape.
+type parsedType struct {
+	kind typeKind
+	// base is the element of an optional or array, the base name of a generic
+	// application, and the whole type otherwise.
+	base string
+	// args holds generic arguments or tuple elements.
+	args []string
+}
+
+// parseTypeName decomposes the outermost layer of name. An unbalanced type is
+// reported as a plain name so a malformed fragment never looks structural.
+func parseTypeName(name string) parsedType {
+	if !balancedType(name) {
+		return parsedType{kind: typeKindName, base: name}
+	}
+	if suffix := strings.TrimSuffix(name, "?"); suffix != name {
+		return parsedType{kind: typeKindOptional, base: suffix}
+	}
+	if suffix := strings.TrimSuffix(name, "[]"); suffix != name {
+		return parsedType{kind: typeKindArray, base: suffix}
+	}
+	if strings.HasPrefix(name, "(") && strings.HasSuffix(name, ")") {
+		return parsedType{kind: typeKindTuple, base: name, args: splitTypeList(name[1 : len(name)-1])}
+	}
+	if base, args, generic := genericType(name); generic {
+		return parsedType{kind: typeKindGeneric, base: base, args: args}
+	}
+	return parsedType{kind: typeKindName, base: name}
+}
+
+// optionalBase returns the type contained by an optional type. It is the only
+// place the "?" suffix is recognised.
+func optionalBase(name string) (string, bool) {
+	parsed := parseTypeName(name)
+	if parsed.kind != typeKindOptional {
+		return "", false
+	}
+	return parsed.base, true
+}
+
+func isOptionalType(name string) bool {
+	_, optional := optionalBase(name)
+	return optional
+}
+
+// arrayElementType returns the element type of an array type.
+func arrayElementType(name string) (string, bool) {
+	parsed := parseTypeName(name)
+	if parsed.kind != typeKindArray {
+		return "", false
+	}
+	return parsed.base, true
+}
+
+// optionalOf returns the optional form of name. null is already the absent
+// value and an optional is its own optional form, so both are left alone: one
+// type has exactly one canonical spelling.
+func optionalOf(name string) string {
+	switch {
+	case name == "null", name == typeUnknown, name == typeNever, isOptionalType(name):
+		return name
+	default:
+		return name + "?"
+	}
+}
+
+// redundantOptional reports whether name spells an optional of an optional at
+// any depth, such as User?? or Result<User??, E>.
+func redundantOptional(name string) bool {
+	parsed := parseTypeName(name)
+	switch parsed.kind {
+	case typeKindOptional:
+		return isOptionalType(parsed.base) || redundantOptional(parsed.base)
+	case typeKindArray:
+		return redundantOptional(parsed.base)
+	case typeKindTuple, typeKindGeneric:
+		for _, arg := range parsed.args {
+			if redundantOptional(arg) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// joinTypes returns the single type able to hold both left and right. A branch
+// or collection that mixes a value with null joins to that value's optional
+// type; anything else must already agree.
+func joinTypes(left, right string) (string, bool) {
+	switch {
+	case left == right:
+		return left, true
+	case left == typeNever:
+		return right, true
+	case right == typeNever:
+		return left, true
+	case left == typeUnknown || right == typeUnknown:
+		return typeUnknown, true
+	case left == "null":
+		return optionalOf(right), true
+	case right == "null":
+		return optionalOf(left), true
+	}
+	leftBase, leftOptional := optionalBase(left)
+	rightBase, rightOptional := optionalBase(right)
+	switch {
+	case leftOptional && rightOptional:
+		return "", false
+	case leftOptional && leftBase == right:
+		return left, true
+	case rightOptional && rightBase == left:
+		return right, true
+	}
+	return "", false
+}
+
+// comparableTypes reports whether two values may be compared with == or !=.
+// An optional compares with null, with its own base type, and with an optional
+// of the same base. Nothing else becomes comparable by being optional.
+func comparableTypes(left, right string) bool {
+	if left == right {
+		return true
+	}
+	if left == "null" {
+		return isOptionalType(right)
+	}
+	if right == "null" {
+		return isOptionalType(left)
+	}
+	leftBase, leftOptional := optionalBase(left)
+	rightBase, rightOptional := optionalBase(right)
+	switch {
+	case leftOptional && rightOptional:
+		return leftBase == rightBase
+	case leftOptional:
+		return leftBase == right
+	case rightOptional:
+		return rightBase == left
+	}
+	return false
+}

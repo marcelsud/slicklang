@@ -185,19 +185,22 @@ func (p *program) canonicalType(namespace string, aliases map[string]aliasDecl, 
 	return p.canonicalTypeName(namespace, aliases, ref.name)
 }
 
-// canonicalTypeName resolves name to its fully qualified form, descending into
-// array elements and generic arguments so nested types canonicalize the same
-// way a bare type does.
+// canonicalTypeName resolves name to its fully qualified form, descending
+// through the structural layers parseTypeName reports so an optional, array,
+// or generic argument canonicalizes the same way a bare type does.
 func (p *program) canonicalTypeName(namespace string, aliases map[string]aliasDecl, name string) string {
-	if element := strings.TrimSuffix(name, "[]"); element != name {
-		return p.canonicalTypeName(namespace, aliases, element) + "[]"
-	}
-	if base, args, generic := genericType(name); generic {
-		canonical := make([]string, len(args))
-		for index, arg := range args {
+	parsed := parseTypeName(name)
+	switch parsed.kind {
+	case typeKindOptional:
+		return optionalOf(p.canonicalTypeName(namespace, aliases, parsed.base))
+	case typeKindArray:
+		return p.canonicalTypeName(namespace, aliases, parsed.base) + "[]"
+	case typeKindGeneric:
+		canonical := make([]string, len(parsed.args))
+		for index, arg := range parsed.args {
 			canonical[index] = p.canonicalTypeName(namespace, aliases, arg)
 		}
-		return base + "<" + strings.Join(canonical, ",") + ">"
+		return parsed.base + "<" + strings.Join(canonical, ",") + ">"
 	}
 	if isBuiltinType(name) || strings.ContainsAny(name, "<>()[]?|,") {
 		return name

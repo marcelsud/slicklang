@@ -1,0 +1,112 @@
+// Optional and checked errors together
+// ====================================
+//
+// Absence and failure are different things, and Slick keeps them apart:
+//
+//   T?        the value may be missing. Ordinary value flow: no `throws`
+//             clause, nothing for a caller to catch, and the checker demands a
+//             null comparison before the value is read.
+//
+//   throws E  the operation may fail. An effect: it is part of the signature,
+//             every caller must catch it or declare it in turn, and it
+//             interrupts the caller by default.
+//
+// A function returning `T?` never implicitly throws. `find_user` below returns
+// null all day without declaring a single error.
+//
+// The two meet at the boundary where a caller decides that a missing value is
+// a failure. `require_user` is that boundary: it narrows the optional and
+// turns absence into a thrown UserNotFoundError. Past that boundary callers are
+// back to plain values, with no null check left to write.
+//
+// Run it two ways; both print:
+//
+//   Ada; Grace has no nickname; missing; Countess
+//
+//   slick run examples/optional-throws
+//   slick build examples/optional-throws -o /tmp/slick-optional-throws
+
+class UserNotFoundError implements Error {
+    Message: string
+}
+
+class User {
+    Name: string
+    Nickname: string?
+}
+
+// A lookup that may find nothing. Absence is the ordinary outcome here, so the
+// signature is `User?` and there is no `throws` clause: the caller writes a
+// null comparison, not a catch.
+function find_user(Id: int) -> User? {
+    if (Id == 1) {
+        User {
+            Name: "Ada"
+            Nickname: "Countess"
+        }
+    } else {
+        if (Id == 2) {
+            User {
+                Name: "Grace"
+            }
+        } else {
+            null
+        }
+    }
+}
+
+// The boundary between the two mechanisms. The else branch proves the value
+// present, so a plain User flows out; the null branch raises the effect
+// instead. The signature says both things at once: the result is not optional,
+// and the failure is checked.
+function require_user(Id: int) -> User throws UserNotFoundError {
+    let Found = find_user(Id)
+
+    if (Found == null) {
+        throw UserNotFoundError {
+            Message: "no such user"
+        }
+    } else {
+        Found
+    }
+}
+
+// Past the boundary, `Person` is a User and never a User?, so there is no null
+// check here. The `throws` clause is the only thing that carried over.
+function describe(Id: int) -> string throws UserNotFoundError {
+    let Person = require_user(Id)
+    Person.Name
+}
+
+// An optional field narrows the same way a local does, through a binding. Note
+// that a missing nickname is still not an error: it takes a null comparison,
+// not a catch.
+function nickname_of(Id: int) -> string throws UserNotFoundError {
+    let Person = require_user(Id)
+    let Nickname = Person.Nickname
+
+    if (Nickname == null) {
+        Person.Name + " has no nickname"
+    } else {
+        Nickname
+    }
+}
+
+// Every call has to answer the declared error. Drop a catch and main fails to
+// compile unless it declares `throws UserNotFoundError` itself.
+function main() -> string {
+    let Named = describe(1) catch (error) {
+        UserNotFoundError => "missing"
+    }
+    let Plain = nickname_of(2) catch (error) {
+        UserNotFoundError => "missing"
+    }
+    let Absent = describe(9) catch (error) {
+        UserNotFoundError => "missing"
+    }
+    let Nicknamed = nickname_of(1) catch (error) {
+        UserNotFoundError => "missing"
+    }
+
+    `${Named}; ${Plain}; ${Absent}; ${Nicknamed}`
+}

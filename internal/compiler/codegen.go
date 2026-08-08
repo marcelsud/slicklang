@@ -53,9 +53,19 @@ func BuildPath(path, output string) ([]Diagnostic, error) {
 	return nil, nil
 }
 
+// goBinding is one Slick local in generated Go. name is what an expression
+// reads, which inside a narrowed branch is the unwrapped payload variable;
+// storage is the variable the declared value lives in, so an assignment always
+// writes the optional back rather than the refinement.
 type goBinding struct {
-	name string
-	typ  string
+	name     string
+	typ      string
+	storage  string
+	declared string
+}
+
+func newGoBinding(name, typ string) goBinding {
+	return goBinding{name: name, typ: typ, storage: name, declared: typ}
 }
 
 type goScope struct {
@@ -138,6 +148,17 @@ func (g *goGenerator) emitRuntime() {
 	g.line(`func (result slickResult[T, E]) String() string {`)
 	g.line(`if result.ok { return "Ok(" + slickFormat(result.value) + ")" }`)
 	g.line(`return "Err(" + slickFormat(result.failure) + ")"`)
+	g.line(`}`)
+	g.line("")
+	// slickOptional is a tagged value, not a pointer: an absent int? costs no
+	// allocation, and a present 0, false, or "" stays distinct from absence
+	// because presence is a separate field and never the Go zero value.
+	g.line(`type slickOptional[T any] struct { present bool; value T }`)
+	g.line(`func slickSome[T any](value T) slickOptional[T] { return slickOptional[T]{present: true, value: value} }`)
+	g.line(`func slickNone[T any]() slickOptional[T] { return slickOptional[T]{} }`)
+	g.line(`func (optional slickOptional[T]) String() string {`)
+	g.line(`if !optional.present { return "" }`)
+	g.line(`return slickFormat(optional.value)`)
 	g.line(`}`)
 	g.line("")
 	g.line(`type slickSeq interface { Len() int; Width() int; At(int, int) any }`)
@@ -308,19 +329,19 @@ func (g *goGenerator) emitFunction(function *functionDecl, receiver string) erro
 			return err
 		}
 		variable := g.unique("argument")
-		scope.locals[parameter.name] = goBinding{name: variable, typ: typ}
+		scope.locals[parameter.name] = newGoBinding(variable, typ)
 		parameters = append(parameters, variable+" "+g.goType(typ))
 	}
 	functionName := goFunctionName(function.qualified)
 	if receiver != "" {
 		self := g.unique("self")
-		scope.locals["self"] = goBinding{name: self, typ: receiver}
+		scope.locals["self"] = newGoBinding(self, receiver)
 		functionName = goMethodName(function.name)
 		g.line("func (%s %s) %s(%s) (%s, error) {", self, g.goType(receiver), functionName, strings.Join(parameters, ", "), g.goType(resultType))
 	} else {
 		g.line("func %s(%s) (%s, error) {", functionName, strings.Join(parameters, ", "), g.goType(resultType))
 	}
-	body, err := g.blockExpression(function.ast, scope, resultType)
+	body, err := g.blockExpression(function.ast, scope, resultType, "")
 	if err != nil {
 		return err
 	}
@@ -338,11 +359,15 @@ func (g *goGenerator) emitFunction(function *functionDecl, receiver string) erro
 	return nil
 }
 
-func (g *goGenerator) blockExpression(block *blockNode, scope *goScope, resultType string) (string, error) {
+// blockExpression renders a block as a Go closure. prelude is emitted first and
+// carries the payload reads a narrowed branch needs, so an optional is unwrapped
+// only inside the branch that proved it present.
+func (g *goGenerator) blockExpression(block *blockNode, scope *goScope, resultType, prelude string) (string, error) {
 	var body strings.Builder
 	body.WriteString("func() (")
 	body.WriteString(g.goType(resultType))
 	body.WriteString(", error) {\n")
+	body.WriteString(prelude)
 	if block == nil || len(block.statements) == 0 {
 		fmt.Fprintf(&body, "return %s, nil\n", g.zero(resultType))
 	} else {
@@ -372,11 +397,15 @@ func (g *goGenerator) emitStatement(body *strings.Builder, statement statementNo
 		fmt.Fprintf(body, "%s, %s := %s\n", variable, callError, expression)
 		g.emitErrorReturn(body, callError, resultType)
 		fmt.Fprintf(body, "_ = %s\n", variable)
-		scope.locals[node.name] = goBinding{name: variable, typ: typ}
+		scope.locals[node.name] = newGoBinding(variable, typ)
 	case *assignmentStatement:
 		binding, ok := scope.locals[node.name]
 		if !ok {
 			return fmt.Errorf("unknown generated binding %s", node.name)
+		}
+		valueType, err := g.expressionType(node.value, scope)
+		if err != nil {
+			return err
 		}
 		expression, err := g.expression(node.value, scope)
 		if err != nil {
@@ -386,7 +415,11 @@ func (g *goGenerator) emitStatement(body *strings.Builder, statement statementNo
 		callError := g.unique("error")
 		fmt.Fprintf(body, "%s, %s := %s\n", value, callError, expression)
 		g.emitErrorReturn(body, callError, resultType)
-		fmt.Fprintf(body, "%s = %s\n", binding.name, value)
+		fmt.Fprintf(body, "_ = %s\n", value)
+		// The write lands on the declared storage, never on a narrowed payload,
+		// and it retires the refinement the way the checker does.
+		fmt.Fprintf(body, "%s = %s\n", binding.storage, g.convert(value, valueType, binding.declared))
+		scope.locals[node.name] = newGoBinding(binding.storage, binding.declared)
 	case *forStatement:
 		if err := g.emitFor(body, node, scope, resultType); err != nil {
 			return err
@@ -409,6 +442,14 @@ func (g *goGenerator) emitStatement(body *strings.Builder, statement statementNo
 		fmt.Fprintf(body, "return %s, %s\n", g.zero(resultType), value)
 		return nil
 	case *returnStatement:
+		declared, err := g.declaredType(scope.function.namespace, scope.function.aliases, scope.function.result)
+		if err != nil {
+			return err
+		}
+		valueType, err := g.expressionType(node.value, scope)
+		if err != nil {
+			return err
+		}
 		expression, err := g.expression(node.value, scope)
 		if err != nil {
 			return err
@@ -417,7 +458,8 @@ func (g *goGenerator) emitStatement(body *strings.Builder, statement statementNo
 		callError := g.unique("error")
 		fmt.Fprintf(body, "%s, %s := %s\n", value, callError, expression)
 		g.emitErrorReturn(body, callError, resultType)
-		fmt.Fprintf(body, "return %s, &slickReturn{value: %s}\n", g.zero(resultType), value)
+		fmt.Fprintf(body, "_ = %s\n", value)
+		fmt.Fprintf(body, "return %s, &slickReturn{value: %s}\n", g.zero(resultType), g.convert(value, valueType, declared))
 		return nil
 	case *expressionStatement:
 		expression, err := g.expression(node.value, scope)
@@ -432,11 +474,11 @@ func (g *goGenerator) emitStatement(body *strings.Builder, statement statementNo
 		if err != nil {
 			return err
 		}
-		if last && actualType == resultType {
-			fmt.Fprintf(body, "return %s, nil\n", value)
+		fmt.Fprintf(body, "_ = %s\n", value)
+		if last && actualType != typeNever && g.program.assignable(actualType, resultType) {
+			fmt.Fprintf(body, "return %s, nil\n", g.convert(value, actualType, resultType))
 			return nil
 		}
-		fmt.Fprintf(body, "_ = %s\n", value)
 	default:
 		return fmt.Errorf("unsupported generated statement %T", statement)
 	}
@@ -484,9 +526,9 @@ func (g *goGenerator) emitFor(body *strings.Builder, node *forStatement, scope *
 			valueExpression = fmt.Sprintf("slickItem(%s, %s)", sequence, index)
 		}
 		fmt.Fprintf(body, "%s := %s.(%s)\n", variable, valueExpression, g.goType(bindingTypes[bindingIndex]))
-		loopScope.locals[name] = goBinding{name: variable, typ: bindingTypes[bindingIndex]}
+		loopScope.locals[name] = newGoBinding(variable, bindingTypes[bindingIndex])
 	}
-	loopBody, err := g.blockExpression(node.body, loopScope, "null")
+	loopBody, err := g.blockExpression(node.body, loopScope, "null", "")
 	if err != nil {
 		return err
 	}
@@ -513,14 +555,18 @@ func (g *goGenerator) expression(expression expressionNode, scope *goScope) (str
 	case *literalExpression:
 		fmt.Fprintf(&body, "return %s, nil\n", goLiteral(node.value))
 	case *arrayExpression:
-		elementType, _ := iterableElementType(typ)
+		elementType, _ := arrayElementType(typ)
 		values := make([]string, 0, len(node.elements))
 		for _, element := range node.elements {
 			value, err := g.evalExpression(&body, element, scope, "array", typ)
 			if err != nil {
 				return "", err
 			}
-			values = append(values, value)
+			valueType, err := g.expressionType(element, scope)
+			if err != nil {
+				return "", err
+			}
+			values = append(values, g.convert(value, valueType, elementType))
 		}
 		fmt.Fprintf(&body, "return []%s{%s}, nil\n", g.goType(elementType), strings.Join(values, ", "))
 	case *rangeExpression:
@@ -565,23 +611,33 @@ func (g *goGenerator) expression(expression expressionNode, scope *goScope) (str
 		switch node.op {
 		case "+":
 			fmt.Fprintf(&body, "return %s + %s, nil\n", left, right)
-		case "==":
-			fmt.Fprintf(&body, "return slickEqual(%s, %s), nil\n", left, right)
-		case "!=":
-			fmt.Fprintf(&body, "return !slickEqual(%s, %s), nil\n", left, right)
+		default:
+			// Both sides are lifted to their join first, so an optional and a
+			// null literal are compared as the same tagged Go type instead of
+			// an optional against an empty struct.
+			left, right, err = g.comparedOperands(node, scope, left, right)
+			if err != nil {
+				return "", err
+			}
+			negate := ""
+			if node.op == "!=" {
+				negate = "!"
+			}
+			fmt.Fprintf(&body, "return %sslickEqual(%s, %s), nil\n", negate, left, right)
 		}
 	case *ifExpression:
 		condition, err := g.evalExpression(&body, node.condition, scope, "condition", typ)
 		if err != nil {
 			return "", err
 		}
-		thenBlock, err := g.blockExpression(node.thenBlock, scope.clone(), typ)
+		thenScope, elseScope := scope.clone(), scope.clone()
+		thenBlock, err := g.blockExpression(node.thenBlock, thenScope, typ, g.narrowBranch(node.condition, scope, thenScope, true))
 		if err != nil {
 			return "", err
 		}
 		fmt.Fprintf(&body, "if %s { return %s }\n", condition, thenBlock)
 		if node.elseBlock != nil {
-			elseBlock, err := g.blockExpression(node.elseBlock, scope.clone(), typ)
+			elseBlock, err := g.blockExpression(node.elseBlock, elseScope, typ, g.narrowBranch(node.condition, scope, elseScope, false))
 			if err != nil {
 				return "", err
 			}
@@ -621,7 +677,50 @@ func (g *goGenerator) evalExpression(body *strings.Builder, expression expressio
 	callError := g.unique("error")
 	fmt.Fprintf(body, "%s, %s := %s\n", value, callError, generated)
 	g.emitErrorReturn(body, callError, resultType)
+	// A conversion may drop the raw value, so keep it referenced either way.
+	fmt.Fprintf(body, "_ = %s\n", value)
 	return value, nil
+}
+
+// comparedOperands lifts both sides of == or != into the type that can hold
+// them both, so an optional compares against null and against its own base
+// type as one tagged Go value rather than two unrelated shapes.
+func (g *goGenerator) comparedOperands(node *binaryExpression, scope *goScope, left, right string) (string, string, error) {
+	leftType, err := g.expressionType(node.left, scope)
+	if err != nil {
+		return "", "", err
+	}
+	rightType, err := g.expressionType(node.right, scope)
+	if err != nil {
+		return "", "", err
+	}
+	compared, ok := joinTypes(leftType, rightType)
+	if !ok {
+		return left, right, nil
+	}
+	return g.convert(left, leftType, compared), g.convert(right, rightType, compared), nil
+}
+
+// narrowBranch applies to branch the refinement a null test proves, returning
+// the prelude statement that reads the payload. The read is emitted inside the
+// branch, so a generated program touches the stored value only where the test
+// proved it present.
+func (g *goGenerator) narrowBranch(condition expressionNode, outer, branch *goScope, thenBranch bool) string {
+	name, present, ok := nullTestOf(condition)
+	if !ok || present != thenBranch {
+		return ""
+	}
+	binding, exists := outer.locals[name]
+	if !exists {
+		return ""
+	}
+	base, optional := optionalBase(binding.typ)
+	if !optional {
+		return ""
+	}
+	variable := g.unique("narrowed")
+	branch.locals[name] = goBinding{name: variable, typ: base, storage: binding.storage, declared: binding.declared}
+	return fmt.Sprintf("%s := %s.value\n_ = %s\n", variable, binding.name, variable)
 }
 
 func (g *goGenerator) emitObjectExpression(body *strings.Builder, node *objectExpression, scope *goScope, typ string) error {
@@ -635,7 +734,15 @@ func (g *goGenerator) emitObjectExpression(body *strings.Builder, node *objectEx
 		if err != nil {
 			return err
 		}
-		fields = append(fields, goFieldName(field.name)+": "+value)
+		valueType, err := g.expressionType(field.value, scope)
+		if err != nil {
+			return err
+		}
+		declared, err := g.declaredType(class.namespace, class.aliases, class.fields[field.name].typ)
+		if err != nil {
+			return err
+		}
+		fields = append(fields, goFieldName(field.name)+": "+g.convert(value, valueType, declared))
 	}
 	value := goClassName(typ) + "{" + strings.Join(fields, ", ") + "}"
 	if class.isError {
@@ -686,11 +793,22 @@ func (g *goGenerator) emitCallExpression(body *strings.Builder, node *callExpres
 		return nil
 	}
 	call := ""
+	var params []paramDecl
+	var owner *methodSignature
 	parts := strings.Split(name.name, ".")
 	if len(parts) == 2 {
 		if receiver, exists := scope.locals[parts[0]]; exists {
 			call = receiver.name + "." + goMethodName(parts[1])
+			method, found := g.program.methodForType(receiver.typ, parts[1])
+			if !found {
+				return fmt.Errorf("unknown generated method %s", name.name)
+			}
+			owner, params = method, method.params
 		}
+	}
+	namespace, aliases := scope.function.namespace, scope.function.aliases
+	if owner != nil {
+		namespace, aliases = owner.namespace, owner.aliases
 	}
 	if call == "" {
 		function := g.program.resolveFunction(scope.function, name.name)
@@ -698,6 +816,19 @@ func (g *goGenerator) emitCallExpression(body *strings.Builder, node *callExpres
 			return fmt.Errorf("unknown generated function %s", name.name)
 		}
 		call = goFunctionName(function.qualified)
+		namespace, aliases, params = function.namespace, function.aliases, function.params
+	}
+	// Each argument enters the parameter's storage type, so passing a T to a T?
+	// parameter promotes at the call rather than inside the callee.
+	for index := range arguments {
+		if index >= len(params) {
+			break
+		}
+		declared, err := g.declaredType(namespace, aliases, params[index].typ)
+		if err != nil {
+			return err
+		}
+		arguments[index] = g.convert(arguments[index], argumentTypes[index], declared)
 	}
 	fmt.Fprintf(body, "return %s(%s)\n", call, strings.Join(arguments, ", "))
 	return nil
@@ -752,11 +883,19 @@ func (g *goGenerator) emitResultExpression(body *strings.Builder, node *resultEx
 	if err != nil {
 		return err
 	}
-	field := "value"
-	if !node.ok {
-		field = "failure"
+	payloadType, err := g.expressionType(node.value, scope)
+	if err != nil {
+		return err
 	}
-	fmt.Fprintf(body, "return %s{ok: %t, %s: %s}, nil\n", g.goType(typ), node.ok, field, payload)
+	success, failure, ok := resultTypeArgs(typ)
+	if !ok {
+		return fmt.Errorf("generated %s outside a Result type", node.label())
+	}
+	field, declared := "value", success
+	if !node.ok {
+		field, declared = "failure", failure
+	}
+	fmt.Fprintf(body, "return %s{ok: %t, %s: %s}, nil\n", g.goType(typ), node.ok, field, g.convert(payload, payloadType, declared))
 	return nil
 }
 
@@ -900,12 +1039,19 @@ func (g *goGenerator) declaredType(namespace string, aliases map[string]aliasDec
 }
 
 func (g *goGenerator) resolveDeclaredType(namespace string, aliases map[string]aliasDecl, name string) (string, error) {
-	if strings.HasSuffix(name, "[]") {
-		element, err := g.resolveDeclaredType(namespace, aliases, strings.TrimSuffix(name, "[]"))
+	if base, optional := optionalBase(name); optional {
+		element, err := g.resolveDeclaredType(namespace, aliases, base)
 		if err != nil {
 			return "", err
 		}
-		return element + "[]", nil
+		return optionalOf(element), nil
+	}
+	if element, isArray := arrayElementType(name); isArray {
+		resolved, err := g.resolveDeclaredType(namespace, aliases, element)
+		if err != nil {
+			return "", err
+		}
+		return resolved + "[]", nil
 	}
 	// Generic arguments resolve exactly as canonicalTypeName resolves them, so a
 	// declared Iterable<Dog> or Result<Dog, E> names the same type in the
@@ -953,8 +1099,13 @@ func (g *goGenerator) parameterTypes(namespace string, aliases map[string]aliasD
 }
 
 func (g *goGenerator) goType(typ string) string {
-	if strings.HasSuffix(typ, "[]") {
-		return "[]" + g.goType(strings.TrimSuffix(typ, "[]"))
+	// Optional is checked before array so User[]? maps to an optional slice and
+	// User?[] to a slice of optionals; the two never collapse.
+	if base, optional := optionalBase(typ); optional {
+		return "slickOptional[" + g.goType(base) + "]"
+	}
+	if element, isArray := arrayElementType(typ); isArray {
+		return "[]" + g.goType(element)
 	}
 	if success, failure, ok := resultTypeArgs(typ); ok {
 		return "slickResult[" + g.goType(success) + ", " + g.goType(failure) + "]"
@@ -1009,6 +1160,26 @@ func (g *goGenerator) zero(typ string) string {
 		return "nil"
 	}
 	return goType + "{}"
+}
+
+// convert adapts a generated value to the Go type of to. It is the single
+// place a T becomes a present T? and a null literal becomes an absent T?, so
+// no call site invents its own promotion.
+func (g *goGenerator) convert(value, from, to string) string {
+	if from == to || to == "" || from == typeUnknown || from == typeNever {
+		return value
+	}
+	base, optional := optionalBase(to)
+	if !optional {
+		return value
+	}
+	if from == "null" {
+		return fmt.Sprintf("slickNone[%s]()", g.goType(base))
+	}
+	if isOptionalType(from) {
+		return value
+	}
+	return fmt.Sprintf("slickSome[%s](%s)", g.goType(base), value)
 }
 
 func (g *goGenerator) sequenceExpression(value, typ string) string {

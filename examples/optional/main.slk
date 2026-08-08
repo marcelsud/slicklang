@@ -1,0 +1,62 @@
+// Optional values: T?
+// ===================
+//
+// `T?` is either a value of type `T` or `null`. Slick has one absence value,
+// `null`; there is no `undefined`. Optionality is part of the type, so the
+// checker knows exactly where a value may be missing and refuses to read
+// through it until a comparison has proven it is present.
+//
+// Absence is not an error effect. A function returning `T?` does not throw, so
+// it needs no `throws` clause and its caller writes no `catch`.
+//
+// Run it two ways; both print `missing user`:
+//
+//   slick run examples/optional
+//   slick build examples/optional -o /tmp/slick-optional && /tmp/slick-optional
+
+// A required field must always be given a value. An optional field may be left
+// out of a construction, and then it holds null.
+class User {
+    Name: string
+    Nickname: string?
+}
+
+// The return type is User?, so both branches type-check: a User promotes into a
+// present User?, and null becomes an absent one. Declaring `-> User` here would
+// reject the null branch instead.
+function find_user(Found: bool) -> User? {
+    if (Found) {
+        User {
+            Name: "Ada"
+        }
+    } else {
+        null
+    }
+}
+
+// `User` is a User? here, so `User.Name` is rejected until a null comparison
+// proves the value is present. The else branch of `== null` is such a proof, so
+// the field read is allowed inside it. Narrowing is branch-local: the storage
+// type of `User` is still User? once the branch ends.
+//
+// A field of optional type narrows the same way, through a local binding.
+// Narrowing applies to simple local names only, never to a field path.
+function display_user(Found: bool) -> string {
+    let User = find_user(Found)
+
+    if (User == null) {
+        "missing user"
+    } else {
+        let Nickname = User.Nickname
+
+        if (Nickname == null) {
+            User.Name
+        } else {
+            Nickname
+        }
+    }
+}
+
+function main() -> string {
+    display_user(false)
+}

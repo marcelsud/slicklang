@@ -19,18 +19,25 @@ type expressionNode interface {
 	expressionPos() position
 }
 
+// letStatement introduces a local. resolved is the storage type the checker
+// inferred for it, which the interpreter needs in order to promote a value
+// into an optional; it cannot be recovered from the node alone.
 type letStatement struct {
-	name  string
-	value expressionNode
-	pos   position
+	name     string
+	value    expressionNode
+	resolved string
+	pos      position
 }
 
 func (n *letStatement) statementPos() position { return n.pos }
 
+// assignmentStatement writes a local. resolved is the local's declared storage
+// type, which branch narrowing never changes.
 type assignmentStatement struct {
-	name  string
-	value expressionNode
-	pos   position
+	name     string
+	value    expressionNode
+	resolved string
+	pos      position
 }
 
 func (n *assignmentStatement) statementPos() position { return n.pos }
