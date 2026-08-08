@@ -223,6 +223,19 @@ type propagateExpression struct {
 
 func (n *propagateExpression) expressionPos() position { return n.pos }
 
+// usingExpression owns the initializer value until body exits. resolved is the
+// static resource type and result is the block type selected by the checker.
+type usingExpression struct {
+	name        string
+	initializer expressionNode
+	body        *blockNode
+	resolved    string
+	result      string
+	pos         position
+}
+
+func (n *usingExpression) expressionPos() position { return n.pos }
+
 type matchPattern int
 
 const (
@@ -523,6 +536,9 @@ func (p *bodyParser) parsePrimary() expressionNode {
 			return nil
 		}
 	}
+	if p.accept("using") {
+		return p.parseUsing(tok.pos)
+	}
 	if p.accept("if") {
 		return p.parseIf(tok.pos)
 	}
@@ -595,6 +611,51 @@ func (p *bodyParser) parsePrimary() expressionNode {
 	default:
 		return nil
 	}
+}
+
+func (p *bodyParser) parseUsing(pos position) expressionNode {
+	p.program.usesUsing = true
+	name, ok := p.expectIdent("using binding")
+	if !ok {
+		return nil
+	}
+	if !p.accept("=") {
+		p.error(p.current().pos, "expected '=' after using binding")
+		return nil
+	}
+	outerStop := p.stopObjectLiteral
+	p.stopObjectLiteral = outerStop || p.usingInitializerIsBareName()
+	initializer := p.parseExpression()
+	p.stopObjectLiteral = outerStop
+	if initializer == nil {
+		p.error(p.current().pos, "expected resource initializer")
+		return nil
+	}
+	if !p.accept("{") {
+		p.error(p.current().pos, "expected using body")
+		return nil
+	}
+	body := p.parseBlock(true, pos)
+	return &usingExpression{name: name.text, initializer: initializer, body: body, pos: pos}
+}
+func (p *bodyParser) usingInitializerIsBareName() bool {
+	_, next, ok := readQualified(p.tokens, p.index)
+	if !ok || next >= len(p.tokens) || p.tokens[next].text != "{" {
+		return false
+	}
+	depth := 0
+	for index := next; index < len(p.tokens); index++ {
+		switch p.tokens[index].text {
+		case "{":
+			depth++
+		case "}":
+			depth--
+			if depth == 0 {
+				return index+1 >= len(p.tokens) || p.tokens[index+1].text != "{"
+			}
+		}
+	}
+	return true
 }
 
 func (p *bodyParser) parseIf(pos position) expressionNode {

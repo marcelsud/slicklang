@@ -34,23 +34,29 @@ type expressionInfo struct {
 	effects effectSet
 }
 
+type usingBinding struct {
+	outerLocals map[string]struct{}
+}
+
 // astScope keeps the two type facts a local carries apart. locals holds the
 // declared or inferred storage type, which assignment validates against and
 // which narrowing never rewrites. narrowed holds the branch-local refinement a
 // null comparison proved. Reading a name prefers the refinement; writing one
 // discards it.
 type astScope struct {
-	function  *functionDecl
-	locals    map[string]string
-	narrowed  map[string]string
-	loopDepth int
+	function      *functionDecl
+	locals        map[string]string
+	narrowed      map[string]string
+	usingBindings map[string]usingBinding
+	loopDepth     int
 }
 
 func newASTScope(function *functionDecl, size int) *astScope {
 	return &astScope{
-		function: function,
-		locals:   make(map[string]string, size),
-		narrowed: make(map[string]string),
+		function:      function,
+		locals:        make(map[string]string, size),
+		narrowed:      make(map[string]string),
+		usingBindings: make(map[string]usingBinding),
 	}
 }
 
@@ -68,6 +74,7 @@ func (scope *astScope) lookup(name string) (string, bool) {
 func (scope *astScope) bind(name, typ string) {
 	scope.locals[name] = typ
 	delete(scope.narrowed, name)
+	delete(scope.usingBindings, name)
 }
 
 func (p *program) checkASTFunction(function *functionDecl) {
@@ -122,6 +129,9 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		scope.bind(node.name, info.typ)
 		return expressionInfo{typ: "null", effects: info.effects}
 	case *assignmentStatement:
+		if _, active := scope.usingBindings[node.name]; active {
+			p.add(node.pos, "SLK390", "using binding %s is immutable", node.name)
+		}
 		declared, exists := scope.locals[node.name]
 		if !exists {
 			p.add(node.pos, "SLK341", "cannot assign unknown value %s", node.name)
@@ -135,6 +145,11 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		}
 		// The stored value is no longer the one a branch proved non-null.
 		delete(scope.narrowed, node.name)
+		if resource, binding, ok := directUsingBinding(node.value, scope); ok {
+			if _, escapes := binding.outerLocals[node.name]; escapes && node.name != resource {
+				p.add(node.pos, "SLK389", "using binding %s cannot be assigned outside its scope", resource)
+			}
+		}
 		return expressionInfo{typ: "null", effects: info.effects}
 	case *forStatement:
 		iterable := p.checkASTExpression(node.iterable, scope)
@@ -193,6 +208,9 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		info.typ = typeNever
 		return info
 	case *returnStatement:
+		if resource, _, ok := directUsingBinding(node.value, scope); ok {
+			p.add(node.pos, "SLK389", "using binding %s cannot be returned outside its scope", resource)
+		}
 		declared := p.resolveType(scope.function.namespace, scope.function.aliases, scope.function.result)
 		info := p.checkASTExpressionExpecting(node.value, scope, declared)
 		if !p.assignable(info.typ, declared) {
@@ -246,6 +264,8 @@ func (p *program) checkASTExpressionExpecting(expression expressionNode, scope *
 		return p.checkResultExpression(node, scope, expected)
 	case *propagateExpression:
 		return p.checkPropagateExpression(node, scope)
+	case *usingExpression:
+		return p.checkUsingExpression(node, scope, expected)
 	case *matchExpression:
 		return p.checkMatchExpression(node, scope, expected)
 	default:
@@ -436,11 +456,85 @@ func (p *program) checkObjectExpression(node *objectExpression, scope *astScope)
 	return info
 }
 
+func (p *program) checkUsingExpression(node *usingExpression, scope *astScope, expected string) expressionInfo {
+	info := p.checkASTExpression(node.initializer, scope)
+	node.resolved = info.typ
+
+	bodyScope := scope.clone()
+	outerLocals := make(map[string]struct{}, len(scope.locals))
+	for name := range scope.locals {
+		outerLocals[name] = struct{}{}
+	}
+	bodyScope.bind(node.name, info.typ)
+	bodyScope.usingBindings[node.name] = usingBinding{outerLocals: outerLocals}
+	body := p.checkASTBlock(node.body, bodyScope, expected)
+	mergeEffects(info.effects, body.effects)
+	info.typ = body.typ
+
+	if resource, _, ok := directUsingBlockValue(node.body, bodyScope); ok {
+		p.add(node.pos, "SLK389", "using binding %s cannot escape its scope", resource)
+	}
+	node.result = body.typ
+	if node.resolved == typeUnknown {
+		return info
+	}
+	closeMethod, ok := p.methodForType(node.resolved, "Close")
+	if !ok {
+		p.add(node.pos, "SLK385", "%s has no accessible Close method", displayName(node.resolved))
+		return info
+	}
+	if !p.requireAccess(node.pos, scope.function.namespace, closeMethod.ownerNamespace, closeMethod.name, "method") {
+		return info
+	}
+	valid := true
+	if len(closeMethod.params) != 0 {
+		p.add(node.pos, "SLK386", "%s.Close must take no arguments", displayName(node.resolved))
+		valid = false
+	}
+	closeResult := p.resolveType(closeMethod.namespace, closeMethod.aliases, closeMethod.result)
+	if closeResult != "null" {
+		p.add(node.pos, "SLK387", "%s.Close must return null, found %s", displayName(node.resolved), displayName(closeResult))
+		valid = false
+	}
+	if valid {
+		for thrown := range closeMethod.throwSet {
+			info.effects[thrown] = effectOrigin{pos: node.pos, origin: node.name + ".Close"}
+		}
+	}
+	return info
+}
+
+func directUsingBinding(expression expressionNode, scope *astScope) (string, usingBinding, bool) {
+	name, ok := expression.(*nameExpression)
+	if !ok {
+		return "", usingBinding{}, false
+	}
+	binding, ok := scope.usingBindings[name.name]
+	return name.name, binding, ok
+}
+
+func directUsingBlockValue(block *blockNode, scope *astScope) (string, usingBinding, bool) {
+	if block == nil || len(block.statements) == 0 {
+		return "", usingBinding{}, false
+	}
+	statement, ok := block.statements[len(block.statements)-1].(*expressionStatement)
+	if !ok {
+		return "", usingBinding{}, false
+	}
+	return directUsingBinding(statement.value, scope)
+}
+
 func (p *program) checkCallExpression(node *callExpression, scope *astScope) expressionInfo {
 	name, ok := node.callee.(*nameExpression)
 	if !ok {
 		p.add(node.pos, "SLK341", "call target is not a function or method")
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
+	}
+	parts := strings.Split(name.name, ".")
+	if len(parts) == 2 && parts[1] == "Close" {
+		if _, active := scope.usingBindings[parts[0]]; active {
+			p.add(node.pos, "SLK388", "cannot call Close directly on active using binding %s", parts[0])
+		}
 	}
 	if info, builtin := p.checkIterableCall(node, scope, name); builtin {
 		if len(node.typeArgs) > 0 {
@@ -1009,6 +1103,9 @@ func dropAssignedNarrowings(node any, narrowed map[string]string) {
 		dropAssignedNarrowings(value.value, narrowed)
 	case *expressionStatement:
 		dropAssignedNarrowings(value.value, narrowed)
+	case *usingExpression:
+		dropAssignedNarrowings(value.initializer, narrowed)
+		dropAssignedNarrowings(value.body, narrowed)
 	case *arrayExpression:
 		for _, element := range value.elements {
 			dropAssignedNarrowings(element, narrowed)
@@ -1057,7 +1154,17 @@ func (scope *astScope) clone() *astScope {
 	for name, typ := range scope.narrowed {
 		narrowed[name] = typ
 	}
-	return &astScope{function: scope.function, locals: locals, narrowed: narrowed, loopDepth: scope.loopDepth}
+	usingBindings := make(map[string]usingBinding, len(scope.usingBindings))
+	for name, binding := range scope.usingBindings {
+		usingBindings[name] = binding
+	}
+	return &astScope{
+		function:      scope.function,
+		locals:        locals,
+		narrowed:      narrowed,
+		usingBindings: usingBindings,
+		loopDepth:     scope.loopDepth,
+	}
 }
 
 func mergeEffects(target, source effectSet) {

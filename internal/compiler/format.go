@@ -139,7 +139,7 @@ func isNumber(kind rune) bool {
 
 func startsValueAfter(text string) bool {
 	switch text {
-	case "(", "[", "{", ",", ":", "=", "=>", "return", "throw", "in", "+":
+	case "(", "[", "{", ",", ":", "=", "=>", "return", "throw", "in", "using", "+":
 		return true
 	default:
 		return false
@@ -233,6 +233,9 @@ func (f *sourceFormatter) collectExpression(expression expressionNode) {
 		f.collectExpression(node.value)
 	case *propagateExpression:
 		f.collectExpression(node.value)
+	case *usingExpression:
+		f.collectExpression(node.initializer)
+		f.collectBlock(node.body)
 	case *matchExpression:
 		f.collectExpression(node.value)
 		for _, arm := range node.arms {
@@ -373,7 +376,7 @@ func (f *sourceFormatter) needsSpace(current formatToken) bool {
 func isSuffixTarget(token formatToken) bool {
 	if token.kind == scanner.Ident {
 		switch token.text {
-		case "return", "throw", "in", "let", "if", "else", "match", "for":
+		case "return", "throw", "in", "let", "if", "else", "match", "for", "using":
 			return false
 		default:
 			return true

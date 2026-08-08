@@ -34,7 +34,7 @@ var highlightKeywords = map[string]struct{}{
 	"else": {}, "extension": {}, "for": {}, "function": {}, "if": {},
 	"implements": {}, "in": {}, "interface": {}, "let": {}, "map": {},
 	"match": {}, "return": {}, "self": {}, "throw": {}, "throws": {},
-	"use": {},
+	"use": {}, "using": {},
 }
 
 // Highlight splits source into classified spans. Concatenating every Text

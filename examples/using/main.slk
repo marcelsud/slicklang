@@ -1,0 +1,55 @@
+// Lexical resource cleanup
+// ========================
+//
+// Acquisition appends A, the body appends B, and Close appends C. The final
+// output is `value;ABC`, proving deterministic cleanup after the block value is
+// produced. The environment entry is reset on every run.
+
+class Resource {
+    Marker: string
+    function Close() -> null {
+        Append(self.Marker)
+    }
+}
+
+function Reset() -> null {
+    match std.env.Unset("SLICK_USING_EXAMPLE") {
+        Ok(_) => null
+        Err(_) => null
+    }
+}
+
+function Store(Value: string) -> null {
+    match std.env.Set("SLICK_USING_EXAMPLE", Value) {
+        Ok(_) => null
+        Err(_) => null
+    }
+}
+
+function Append(Value: string) -> null {
+    let Current = std.env.Get("SLICK_USING_EXAMPLE")
+    if (Current == null) {
+        Store(Value)
+    } else {
+        Store(Current + Value)
+    }
+}
+
+function Trace() -> string {
+    let Current = std.env.Get("SLICK_USING_EXAMPLE")
+    if (Current == null) { "" } else { Current }
+}
+
+function Acquire() -> Resource {
+    Append("A")
+    Resource { Marker: "C" }
+}
+
+function main() -> string {
+    Reset()
+    let Value = using Handle = Acquire() {
+        Append("B")
+        "value"
+    }
+    Value + ";" + Trace()
+}
