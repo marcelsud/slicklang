@@ -167,6 +167,7 @@ func writeHumanDescription(output io.Writer, description compiler.SymbolDescript
 	fmt.Fprintf(output, "Name: %s\n", description.CanonicalName)
 	fmt.Fprintf(output, "Kind: %s\n", description.Kind)
 	fmt.Fprintf(output, "Visibility: %s\n", description.Visibility)
+	writeDocumentation(output, description.Documentation)
 
 	if description.Kind == "generic type" {
 		fmt.Fprintf(output, "Type parameters: %s\n", strings.Join(description.TypeParameters, ", "))
@@ -176,6 +177,14 @@ func writeHumanDescription(output io.Writer, description compiler.SymbolDescript
 		fmt.Fprintf(output, "Returns: %s\n", description.ReturnType)
 		writeThrows(output, description.Throws)
 		fmt.Fprintf(output, "Native: %t\n", description.Native)
+	}
+	if description.Kind == "method" {
+		writeParameters(output, description.Parameters)
+		fmt.Fprintf(output, "Returns: %s\n", description.ReturnType)
+		writeThrows(output, description.Throws)
+	}
+	if description.Kind == "field" {
+		fmt.Fprintf(output, "Type: %s\n", description.Type)
 	}
 	if description.Kind == "class" {
 		writeFields(output, description.Fields, omittedFrom(budget, "fields"), budget)
@@ -193,13 +202,33 @@ func writeHumanDescription(output io.Writer, description compiler.SymbolDescript
 			fmt.Fprintln(output, "  none")
 		}
 		for _, child := range description.Children {
-			fmt.Fprintf(output, "  %s %s (%s)\n", child.Kind, child.CanonicalName, child.Visibility)
+			fmt.Fprintf(output, "  %s %s (%s)%s\n", child.Kind, child.CanonicalName, child.Visibility, documentationSummary(child.Documentation))
 		}
 		writeElisionMarker(output, omitted, budget)
 	}
 	if description.Source != nil {
 		fmt.Fprintf(output, "Source: %s:%d:%d\n", description.Source.File, description.Source.Line, description.Source.Column)
 	}
+}
+
+func writeDocumentation(output io.Writer, documentation *string) {
+	if documentation == nil {
+		return
+	}
+	fmt.Fprintln(output, "Documentation:")
+	fmt.Fprintln(output, *documentation)
+	fmt.Fprintln(output)
+}
+
+func documentationSummary(documentation *string) string {
+	if documentation == nil {
+		return ""
+	}
+	summary, _, _ := strings.Cut(*documentation, "\n")
+	if summary == "" {
+		return ""
+	}
+	return " — " + summary
 }
 
 func writeParameters(output io.Writer, parameters []compiler.ParameterDescription) {
@@ -226,7 +255,7 @@ func writeFields(output io.Writer, fields []compiler.FieldDescription, omitted i
 		fmt.Fprintln(output, "  none")
 	}
 	for _, field := range fields {
-		fmt.Fprintf(output, "  %s %s: %s%s\n", field.Visibility, field.Name, field.Type, sourceSuffix(field.Source))
+		fmt.Fprintf(output, "  %s %s: %s%s%s\n", field.Visibility, field.Name, field.Type, sourceSuffix(field.Source), documentationSummary(field.Documentation))
 	}
 	writeElisionMarker(output, omitted, budget)
 }
@@ -245,7 +274,15 @@ func writeMethods(output io.Writer, label string, methods []compiler.MethodDescr
 		if len(method.Throws) > 0 {
 			throws = " throws " + strings.Join(method.Throws, ", ")
 		}
-		fmt.Fprintf(output, "  %s %s(%s) -> %s%s%s\n", method.Visibility, method.CanonicalName, strings.Join(parameters, ", "), method.ReturnType, throws, sourceSuffix(method.Source))
+		fmt.Fprintf(output, "  %s %s(%s) -> %s%s%s%s\n",
+			method.Visibility,
+			method.CanonicalName,
+			strings.Join(parameters, ", "),
+			method.ReturnType,
+			throws,
+			sourceSuffix(method.Source),
+			documentationSummary(method.Documentation),
+		)
 	}
 	writeElisionMarker(output, omitted, budget)
 }

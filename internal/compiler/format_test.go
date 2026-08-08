@@ -212,3 +212,40 @@ function main() -> string {
 		t.Fatalf("formatted using source:\n%s\nwant:\n%s", formatted, want)
 	}
 }
+
+func TestFormatPreservesDocumentationAttachmentAndParagraphs(t *testing.T) {
+	source := compiler.Source{
+		Name:      "main.slk",
+		Namespace: "root",
+		Text: `/// Loads a value.
+///
+/// Returns a stable result.
+function Load()->string{"ok"}
+
+// Ordinary comment.
+class Value{
+/// Public field.
+Name:string}
+`,
+	}
+	formatted, diagnostics, err := compiler.Format(source)
+	if err != nil || len(diagnostics) != 0 {
+		t.Fatalf("format documented source: diagnostics=%+v err=%v", diagnostics, err)
+	}
+	const want = `/// Loads a value.
+///
+/// Returns a stable result.
+function Load() -> string {
+    "ok"
+}
+
+// Ordinary comment.
+class Value {
+    /// Public field.
+    Name: string
+}
+`
+	if formatted != want {
+		t.Fatalf("formatted documented source:\n%s\nwant:\n%s", formatted, want)
+	}
+}

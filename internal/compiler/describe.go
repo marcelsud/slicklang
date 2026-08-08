@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const DescriptionSchemaVersion = 2
+const DescriptionSchemaVersion = 3
 
 var ErrUnknownSymbol = errors.New("unknown symbol")
 
@@ -20,6 +20,8 @@ type SymbolDescription struct {
 	CanonicalName      string                 `json:"canonical_name"`
 	Kind               string                 `json:"kind"`
 	Visibility         string                 `json:"visibility"`
+	Documentation      *string                `json:"documentation"`
+	Type               string                 `json:"type"`
 	TypeParameters     []string               `json:"type_parameters"`
 	Parameters         []ParameterDescription `json:"parameters"`
 	ReturnType         string                 `json:"return_type"`
@@ -39,15 +41,17 @@ type ParameterDescription struct {
 }
 
 type FieldDescription struct {
-	Name       string             `json:"name"`
-	Type       string             `json:"type"`
-	Visibility string             `json:"visibility"`
-	Source     *SourceDescription `json:"source"`
+	Name          string             `json:"name"`
+	Type          string             `json:"type"`
+	Visibility    string             `json:"visibility"`
+	Documentation *string            `json:"documentation"`
+	Source        *SourceDescription `json:"source"`
 }
 
 type MethodDescription struct {
 	CanonicalName string                 `json:"canonical_name"`
 	Visibility    string                 `json:"visibility"`
+	Documentation *string                `json:"documentation"`
 	Parameters    []ParameterDescription `json:"parameters"`
 	ReturnType    string                 `json:"return_type"`
 	Throws        []string               `json:"throws"`
@@ -55,9 +59,10 @@ type MethodDescription struct {
 }
 
 type ChildDescription struct {
-	CanonicalName string `json:"canonical_name"`
-	Kind          string `json:"kind"`
-	Visibility    string `json:"visibility"`
+	CanonicalName string  `json:"canonical_name"`
+	Kind          string  `json:"kind"`
+	Documentation *string `json:"documentation"`
+	Visibility    string  `json:"visibility"`
 }
 
 type SourceDescription struct {
@@ -108,8 +113,12 @@ func (p *program) describeSymbol(name string) (SymbolDescription, bool) {
 	if iface := p.interfaces[name]; iface != nil {
 		return p.describeInterface(iface), true
 	}
+	if member, ok := p.describeMember(name); ok {
+		return member, true
+	}
 	if p.namespaceExists(name) {
 		description := emptySymbol(name, "namespace", "public")
+		description.Documentation = p.namespaceDocumentation[name]
 		description.Children = p.describeChildren(name)
 		return description, true
 	}
@@ -134,6 +143,7 @@ func emptySymbol(name, kind, visibility string) SymbolDescription {
 
 func (p *program) describeFunction(function *functionDecl) SymbolDescription {
 	description := emptySymbol(function.qualified, "function", visibility(function.name))
+	description.Documentation = function.documentation
 	description.TypeParameters = append(description.TypeParameters, function.typeParams...)
 	description.Parameters = p.describeParameters(function.namespace, function.aliases, function.params)
 	description.ReturnType = p.canonicalType(function.namespace, function.aliases, function.result)
@@ -145,14 +155,16 @@ func (p *program) describeFunction(function *functionDecl) SymbolDescription {
 
 func (p *program) describeClass(class *classDecl) SymbolDescription {
 	description := emptySymbol(class.qualified, "class", visibility(class.name))
+	description.Documentation = class.documentation
 	description.Source = describeSource(class.pos)
 	for _, name := range sortedKeys(class.fields) {
 		field := class.fields[name]
 		description.Fields = append(description.Fields, FieldDescription{
-			Name:       field.name,
-			Type:       p.canonicalType(class.namespace, class.aliases, field.typ),
-			Visibility: visibility(field.name),
-			Source:     describeSource(field.pos),
+			Name:          field.name,
+			Type:          p.canonicalType(class.namespace, class.aliases, field.typ),
+			Visibility:    visibility(field.name),
+			Documentation: field.documentation,
+			Source:        describeSource(field.pos),
 		})
 	}
 	for _, name := range sortedKeys(class.methods) {
@@ -162,6 +174,7 @@ func (p *program) describeClass(class *classDecl) SymbolDescription {
 		implementation := class.implementations[name]
 		description.ImplementedMethods = append(description.ImplementedMethods, MethodDescription{
 			CanonicalName: class.qualified + "." + implementation.name,
+			Documentation: implementation.documentation,
 			Visibility:    visibility(implementation.name),
 			Parameters:    p.describeParameters(implementation.namespace, implementation.aliases, implementation.params),
 			ReturnType:    p.canonicalType(implementation.namespace, implementation.aliases, implementation.result),
@@ -183,6 +196,7 @@ func (p *program) describeClass(class *classDecl) SymbolDescription {
 
 func (p *program) describeInterface(iface *interfaceDecl) SymbolDescription {
 	description := emptySymbol(iface.qualified, "interface", visibility(iface.name))
+	description.Documentation = iface.documentation
 	description.Source = describeSource(iface.pos)
 	for _, name := range sortedKeys(iface.methods) {
 		description.DeclaredMethods = append(description.DeclaredMethods, p.describeMethod(iface.qualified, iface.methods[name]))
@@ -193,12 +207,62 @@ func (p *program) describeInterface(iface *interfaceDecl) SymbolDescription {
 func (p *program) describeMethod(owner string, method *methodSignature) MethodDescription {
 	return MethodDescription{
 		CanonicalName: owner + "." + method.name,
+		Documentation: method.documentation,
 		Visibility:    visibility(method.name),
 		Parameters:    p.describeParameters(method.namespace, method.aliases, method.params),
 		ReturnType:    p.canonicalType(method.namespace, method.aliases, method.result),
 		Throws:        sortedSet(method.throwSet),
 		Source:        describeSource(method.pos),
 	}
+}
+
+func (p *program) describeMember(name string) (SymbolDescription, bool) {
+	separator := strings.LastIndexByte(name, '.')
+	if separator < 0 {
+		return SymbolDescription{}, false
+	}
+	owner, member := name[:separator], name[separator+1:]
+	if class := p.classes[owner]; class != nil {
+		if field, ok := class.fields[member]; ok {
+			description := emptySymbol(name, "field", visibility(field.name))
+			description.Documentation = field.documentation
+			description.Type = p.canonicalType(class.namespace, class.aliases, field.typ)
+			description.Source = describeSource(field.pos)
+			return description, true
+		}
+		if implementation := class.implementations[member]; implementation != nil {
+			return p.describeFunctionMember(name, implementation), true
+		}
+		if method := class.methods[member]; method != nil {
+			return p.describeMethodMember(name, method), true
+		}
+	}
+	if iface := p.interfaces[owner]; iface != nil {
+		if method := iface.methods[member]; method != nil {
+			return p.describeMethodMember(name, method), true
+		}
+	}
+	return SymbolDescription{}, false
+}
+
+func (p *program) describeFunctionMember(name string, function *functionDecl) SymbolDescription {
+	description := emptySymbol(name, "method", visibility(function.name))
+	description.Documentation = function.documentation
+	description.Parameters = p.describeParameters(function.namespace, function.aliases, function.params)
+	description.ReturnType = p.canonicalType(function.namespace, function.aliases, function.result)
+	description.Throws = sortedSet(function.throwSet)
+	description.Source = describeSource(function.pos)
+	return description
+}
+
+func (p *program) describeMethodMember(name string, method *methodSignature) SymbolDescription {
+	description := emptySymbol(name, "method", visibility(method.name))
+	description.Documentation = method.documentation
+	description.Parameters = p.describeParameters(method.namespace, method.aliases, method.params)
+	description.ReturnType = p.canonicalType(method.namespace, method.aliases, method.result)
+	description.Throws = sortedSet(method.throwSet)
+	description.Source = describeSource(method.pos)
+	return description
 }
 
 func (p *program) describeParameters(namespace string, aliases map[string]aliasDecl, params []paramDecl) []ParameterDescription {
@@ -234,7 +298,7 @@ func (p *program) namespaceExists(namespace string) bool {
 
 func (p *program) describeChildren(namespace string) []ChildDescription {
 	children := make(map[string]ChildDescription)
-	add := func(name, kind, declarationName string) {
+	add := func(name, kind, declarationName string, documentation *string) {
 		prefix := namespace + "."
 		if !strings.HasPrefix(name, prefix) {
 			return
@@ -242,19 +306,29 @@ func (p *program) describeChildren(namespace string) []ChildDescription {
 		remainder := strings.TrimPrefix(name, prefix)
 		if separator := strings.IndexByte(remainder, '.'); separator >= 0 {
 			childName := prefix + remainder[:separator]
-			children[childName] = ChildDescription{CanonicalName: childName, Kind: "namespace", Visibility: "public"}
+			children[childName] = ChildDescription{
+				CanonicalName: childName,
+				Kind:          "namespace",
+				Visibility:    "public",
+				Documentation: p.namespaceDocumentation[childName],
+			}
 			return
 		}
-		children[name] = ChildDescription{CanonicalName: name, Kind: kind, Visibility: visibility(declarationName)}
+		children[name] = ChildDescription{
+			CanonicalName: name,
+			Kind:          kind,
+			Visibility:    visibility(declarationName),
+			Documentation: documentation,
+		}
 	}
 	for name, function := range p.functions {
-		add(name, "function", function.name)
+		add(name, "function", function.name, function.documentation)
 	}
 	for name, class := range p.classes {
-		add(name, "class", class.name)
+		add(name, "class", class.name, class.documentation)
 	}
 	for name, iface := range p.interfaces {
-		add(name, "interface", iface.name)
+		add(name, "interface", iface.name, iface.documentation)
 	}
 	names := sortedKeys(children)
 	descriptions := make([]ChildDescription, 0, len(names))

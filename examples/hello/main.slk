@@ -1,3 +1,4 @@
+/// Builds a dog and returns its greeting.
 function main() -> string {
     let dog = root.models.Dog {
         Name: "Ada"

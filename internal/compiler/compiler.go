@@ -40,6 +40,13 @@ type token struct {
 	pos  position
 }
 
+type docBlock struct {
+	text       string
+	pos        position
+	targetLine int
+	claimed    bool
+}
+
 type typeRef struct {
 	name string
 	pos  position
@@ -51,16 +58,18 @@ type paramDecl struct {
 }
 
 type fieldDecl struct {
-	name string
-	typ  typeRef
-	pos  position
+	name          string
+	typ           typeRef
+	documentation *string
+	pos           position
 }
 
 type aliasDecl struct {
-	name      string
-	target    string
-	namespace string
-	pos       position
+	name          string
+	target        string
+	namespace     string
+	documentation *string
+	pos           position
 }
 
 type extensionPolicy string
@@ -80,6 +89,7 @@ type methodSignature struct {
 	result         typeRef
 	throws         []typeRef
 	throwSet       map[string]struct{}
+	documentation  *string
 	pos            position
 }
 
@@ -94,15 +104,17 @@ type classDecl struct {
 	methods         map[string]*methodSignature
 	effective       map[string]*methodSignature
 	implementations map[string]*functionDecl
+	documentation   *string
 	pos             position
 }
 
 type interfaceDecl struct {
-	name      string
-	qualified string
-	namespace string
-	methods   map[string]*methodSignature
-	pos       position
+	name          string
+	qualified     string
+	namespace     string
+	methods       map[string]*methodSignature
+	documentation *string
+	pos           position
 }
 
 type functionDecl struct {
@@ -121,17 +133,19 @@ type functionDecl struct {
 	receiverCanonical string
 	inline            bool
 	native            nativeFunction
+	documentation     *string
 	pos               position
 }
 
 type program struct {
-	aliases     []aliasDecl
-	classes     map[string]*classDecl
-	interfaces  map[string]*interfaceDecl
-	functions   map[string]*functionDecl
-	methodImpls []*functionDecl
-	diags       []Diagnostic
-	usesUsing   bool
+	aliases                []aliasDecl
+	classes                map[string]*classDecl
+	interfaces             map[string]*interfaceDecl
+	functions              map[string]*functionDecl
+	namespaceDocumentation map[string]*string
+	methodImpls            []*functionDecl
+	diags                  []Diagnostic
+	usesUsing              bool
 }
 
 func CheckPath(path string) ([]Diagnostic, error) {
@@ -206,9 +220,10 @@ func Check(sources []Source) []Diagnostic {
 
 func compile(sources []Source) (*program, []Diagnostic) {
 	prog := &program{
-		classes:    make(map[string]*classDecl),
-		interfaces: make(map[string]*interfaceDecl),
-		functions:  make(map[string]*functionDecl),
+		classes:                make(map[string]*classDecl),
+		interfaces:             make(map[string]*interfaceDecl),
+		functions:              make(map[string]*functionDecl),
+		namespaceDocumentation: make(map[string]*string),
 	}
 	registerStandardLibrary(prog)
 	for _, source := range sources {
@@ -242,28 +257,73 @@ func parseSource(prog *program, source Source) {
 }
 
 func parseSourceTokens(prog *program, source Source, tokens []token) {
+	blocks := collectDocBlocks(source)
 	p := parser{
-		prog:    prog,
-		source:  source,
-		tokens:  tokens,
-		aliases: make(map[string]aliasDecl),
+		prog:      prog,
+		source:    source,
+		tokens:    tokens,
+		aliases:   make(map[string]aliasDecl),
+		docByLine: make(map[int]*docBlock, len(blocks)),
+	}
+	for _, block := range blocks {
+		p.docByLine[block.targetLine] = block
 	}
 	for !p.atEnd() {
 		switch {
+		case p.acceptDocumented("class"):
+			p.parseClass()
+		case p.acceptDocumented("interface"):
+			p.parseInterface()
+		case p.acceptDocumented("function"):
+			p.parseFunction()
 		case p.accept("use"):
 			p.parseUse()
-		case p.accept("class"):
-			p.parseClass()
-		case p.accept("interface"):
-			p.parseInterface()
-		case p.accept("function"):
-			p.parseFunction()
 		default:
 			tok := p.current()
 			p.error(tok.pos, "expected 'use', 'class', 'interface', or 'function', found %q", tok.text)
 			p.advance()
 		}
 	}
+	for _, block := range blocks {
+		if !block.claimed {
+			prog.add(block.pos, "SLK391", "documentation comment is not attached to a describable declaration")
+		}
+	}
+}
+
+func collectDocBlocks(source Source) []*docBlock {
+	text := strings.ReplaceAll(source.Text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	lines := strings.Split(text, "\n")
+	var blocks []*docBlock
+	for index := 0; index < len(lines); {
+		trimmed := strings.TrimLeft(lines[index], " \t")
+		if !strings.HasPrefix(trimmed, "///") {
+			index++
+			continue
+		}
+		start := index
+		var content []string
+		for index < len(lines) {
+			line := strings.TrimLeft(lines[index], " \t")
+			if !strings.HasPrefix(line, "///") {
+				break
+			}
+			line = strings.TrimPrefix(line, "///")
+			line = strings.TrimPrefix(line, " ")
+			content = append(content, line)
+			index++
+		}
+		block := &docBlock{
+			text: strings.Join(content, "\n"),
+			pos:  position{file: source.Name, line: start + 1, column: strings.Index(lines[start], "///") + 1},
+		}
+		if index < len(lines) && strings.TrimSpace(lines[index]) != "" {
+			block.targetLine = index + 1
+		}
+		blocks = append(blocks, block)
+	}
+	return blocks
 }
 
 func scanTokens(source Source, comments bool) ([]token, []Diagnostic) {
@@ -317,11 +377,38 @@ func scanTokens(source Source, comments bool) ([]token, []Diagnostic) {
 }
 
 type parser struct {
-	prog    *program
-	source  Source
-	tokens  []token
-	aliases map[string]aliasDecl
-	index   int
+	prog                 *program
+	source               Source
+	tokens               []token
+	aliases              map[string]aliasDecl
+	docByLine            map[int]*docBlock
+	pendingDocumentation *string
+	index                int
+}
+
+func (p *parser) acceptDocumented(text string) bool {
+	if p.current().text != text {
+		return false
+	}
+	p.pendingDocumentation = p.takeDocumentation(p.current().pos.line)
+	p.advance()
+	return true
+}
+
+func (p *parser) takeDocumentation(line int) *string {
+	block := p.docByLine[line]
+	if block == nil {
+		return nil
+	}
+	block.claimed = true
+	text := block.text
+	return &text
+}
+
+func (p *parser) consumeDocumentation() *string {
+	documentation := p.pendingDocumentation
+	p.pendingDocumentation = nil
+	return documentation
 }
 
 func (p *parser) parseUse() {
@@ -367,6 +454,7 @@ func (p *parser) parseClass() {
 		methods:         make(map[string]*methodSignature),
 		effective:       make(map[string]*methodSignature),
 		implementations: make(map[string]*functionDecl),
+		documentation:   p.consumeDocumentation(),
 		pos:             name.pos,
 	}
 
@@ -416,6 +504,7 @@ func (p *parser) parseClass() {
 
 	registered := true
 	if previous, exists := p.prog.classes[class.qualified]; exists {
+		p.reportDocumentationConflict(name.pos, class.qualified, previous.documentation, class.documentation)
 		p.error(name.pos, "duplicate class %s; first declared at %s:%d:%d", class.qualified, previous.pos.file, previous.pos.line, previous.pos.column)
 		registered = false
 	} else {
@@ -423,6 +512,7 @@ func (p *parser) parseClass() {
 	}
 
 	for !p.atEnd() && p.current().text != "}" {
+		p.pendingDocumentation = p.takeDocumentation(p.current().pos.line)
 		if p.accept("function") {
 			p.parseClassMethod(class, registered)
 		} else {
@@ -451,10 +541,12 @@ func (p *parser) parseClassMethod(class *classDecl, registered bool) {
 		params:         params,
 		result:         result,
 		throws:         throws,
+		documentation:  p.consumeDocumentation(),
 		pos:            name.pos,
 	}
 	if previous, exists := class.methods[name.text]; exists {
 		p.error(name.pos, "duplicate method declaration %s.%s; first declared at %s:%d:%d", class.qualified, name.text, previous.pos.file, previous.pos.line, previous.pos.column)
+		p.reportDocumentationConflict(name.pos, class.qualified+"."+name.text, previous.documentation, signature.documentation)
 		return
 	}
 	class.methods[name.text] = signature
@@ -471,6 +563,7 @@ func (p *parser) parseClassMethod(class *classDecl, registered bool) {
 			receiver:          typeRef{name: class.qualified, pos: name.pos},
 			receiverCanonical: class.qualified,
 			inline:            true,
+			documentation:     signature.documentation,
 			pos:               name.pos,
 		})
 	}
@@ -490,10 +583,12 @@ func (p *parser) parseClassField(class *classDecl) {
 	if !ok {
 		return
 	}
+	documentation := p.consumeDocumentation()
 	if previous, exists := class.fields[name.text]; exists {
+		p.reportDocumentationConflict(name.pos, class.qualified+"."+name.text, previous.documentation, documentation)
 		p.error(name.pos, "duplicate field %s.%s; first declared at %s:%d:%d", class.qualified, name.text, previous.pos.file, previous.pos.line, previous.pos.column)
 	} else {
-		class.fields[name.text] = fieldDecl{name: name.text, typ: typ, pos: name.pos}
+		class.fields[name.text] = fieldDecl{name: name.text, typ: typ, documentation: documentation, pos: name.pos}
 	}
 	p.accept(",")
 	p.accept(";")
@@ -512,20 +607,23 @@ func (p *parser) parseInterface() {
 		return
 	}
 	decl := &interfaceDecl{
-		name:      name.text,
-		qualified: qualify(p.source.Namespace, name.text),
-		namespace: p.source.Namespace,
-		methods:   make(map[string]*methodSignature),
-		pos:       name.pos,
+		name:          name.text,
+		qualified:     qualify(p.source.Namespace, name.text),
+		namespace:     p.source.Namespace,
+		methods:       make(map[string]*methodSignature),
+		documentation: p.consumeDocumentation(),
+		pos:           name.pos,
 	}
 	registered := true
 	if previous, exists := p.prog.interfaces[decl.qualified]; exists {
+		p.reportDocumentationConflict(name.pos, decl.qualified, previous.documentation, decl.documentation)
 		p.error(name.pos, "duplicate interface %s; first declared at %s:%d:%d", decl.qualified, previous.pos.file, previous.pos.line, previous.pos.column)
 		registered = false
 	} else {
 		p.prog.interfaces[decl.qualified] = decl
 	}
 	for !p.atEnd() && p.current().text != "}" {
+		p.pendingDocumentation = p.takeDocumentation(p.current().pos.line)
 		if !p.accept("function") {
 			p.error(p.current().pos, "interfaces may contain only method declarations")
 			p.advance()
@@ -550,9 +648,11 @@ func (p *parser) parseInterface() {
 			params:         params,
 			result:         result,
 			throws:         throws,
+			documentation:  p.consumeDocumentation(),
 			pos:            methodName.pos,
 		}
 		if previous, exists := decl.methods[methodName.text]; exists {
+			p.reportDocumentationConflict(methodName.pos, decl.qualified+"."+methodName.text, previous.documentation, signature.documentation)
 			p.error(methodName.pos, "duplicate interface method %s.%s; first declared at %s:%d:%d", decl.qualified, methodName.text, previous.pos.file, previous.pos.line, previous.pos.column)
 		} else if registered {
 			decl.methods[methodName.text] = signature
@@ -590,19 +690,21 @@ func (p *parser) parseFunction() {
 	if len(parts) == 1 {
 		qualified := qualify(p.source.Namespace, ref.name)
 		if previous, exists := p.prog.functions[qualified]; exists {
+			p.reportDocumentationConflict(ref.pos, qualified, previous.documentation, p.pendingDocumentation)
 			p.error(ref.pos, "duplicate function %s; first declared at %s:%d:%d", qualified, previous.pos.file, previous.pos.line, previous.pos.column)
 			return
 		}
 		p.prog.functions[qualified] = &functionDecl{
-			name:      ref.name,
-			qualified: qualified,
-			namespace: p.source.Namespace,
-			aliases:   p.aliases,
-			params:    params,
-			result:    result,
-			throws:    throws,
-			body:      body,
-			pos:       ref.pos,
+			name:          ref.name,
+			qualified:     qualified,
+			namespace:     p.source.Namespace,
+			aliases:       p.aliases,
+			params:        params,
+			result:        result,
+			throws:        throws,
+			body:          body,
+			documentation: p.consumeDocumentation(),
+			pos:           ref.pos,
 		}
 		return
 	}
@@ -610,16 +712,17 @@ func (p *parser) parseFunction() {
 	methodName := parts[len(parts)-1]
 	receiverName := strings.Join(parts[:len(parts)-1], ".")
 	p.prog.methodImpls = append(p.prog.methodImpls, &functionDecl{
-		name:      methodName,
-		qualified: receiverName + "." + methodName,
-		namespace: p.source.Namespace,
-		aliases:   p.aliases,
-		params:    params,
-		result:    result,
-		throws:    throws,
-		body:      body,
-		receiver:  typeRef{name: receiverName, pos: ref.pos},
-		pos:       ref.pos,
+		name:          methodName,
+		qualified:     receiverName + "." + methodName,
+		namespace:     p.source.Namespace,
+		aliases:       p.aliases,
+		params:        params,
+		result:        result,
+		throws:        throws,
+		body:          body,
+		receiver:      typeRef{name: receiverName, pos: ref.pos},
+		documentation: p.consumeDocumentation(),
+		pos:           ref.pos,
 	})
 }
 
@@ -794,6 +897,12 @@ func (p *parser) advance() {
 
 func (p *parser) atEnd() bool {
 	return p.current().kind == scanner.EOF
+}
+
+func (p *parser) reportDocumentationConflict(pos position, name string, first, second *string) {
+	if first != nil && second != nil {
+		p.prog.add(pos, "SLK392", "competing documentation for %s", name)
+	}
 }
 
 func (p *parser) error(pos position, format string, args ...any) {
