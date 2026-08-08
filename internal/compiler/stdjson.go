@@ -609,6 +609,9 @@ func (g *goGenerator) collectJSONCodecs() []jsonCodecNeed {
 			walk(node.value)
 		case *propagateExpression:
 			walk(node.value)
+		case *usingExpression:
+			walk(node.initializer)
+			walkBlock(node.body)
 		case *matchExpression:
 			walk(node.value)
 			for _, arm := range node.arms {

@@ -224,6 +224,44 @@ type continueSignal struct{}
 
 func (e *continueSignal) Error() string { return "continue" }
 
+type panicFailure struct {
+	value any
+}
+
+func (e *panicFailure) Error() string { return fmt.Sprintf("panic: %v", e.value) }
+
+type suppressedFailure struct {
+	primary    error
+	suppressed []error
+}
+
+func (e *suppressedFailure) Error() string {
+	items := make([]string, len(e.suppressed))
+	for index, err := range e.suppressed {
+		items[index] = err.Error()
+	}
+	return e.primary.Error() + " (suppressed: " + strings.Join(items, "; ") + ")"
+}
+
+func (e *suppressedFailure) Unwrap() error { return e.primary }
+
+func suppressFailure(primary, suppressed error) error {
+	if combined, ok := primary.(*suppressedFailure); ok {
+		failures := make([]error, len(combined.suppressed), len(combined.suppressed)+1)
+		copy(failures, combined.suppressed)
+		failures = append(failures, suppressed)
+		return &suppressedFailure{primary: combined.primary, suppressed: failures}
+	}
+	return &suppressedFailure{primary: primary, suppressed: []error{suppressed}}
+}
+
+func isControlSignal(err error) bool {
+	var returned *returnSignal
+	var shouldBreak *breakSignal
+	var shouldContinue *continueSignal
+	return errors.As(err, &returned) || errors.As(err, &shouldBreak) || errors.As(err, &shouldContinue)
+}
+
 func RunPath(path string) (string, []Diagnostic, error) {
 	sources, err := loadSources(path)
 	if err != nil {
@@ -462,11 +500,54 @@ func (p *program) evalExpression(expression expressionNode, frame *runtimeFrame)
 		return p.evalResult(node, frame)
 	case *propagateExpression:
 		return p.evalPropagate(node, frame)
+	case *usingExpression:
+		return p.evalUsing(node, frame)
 	case *matchExpression:
 		return p.evalMatch(node, frame)
 	default:
 		return runtimeValue{}, fmt.Errorf("unsupported expression at %s:%d:%d", expression.expressionPos().file, expression.expressionPos().line, expression.expressionPos().column)
 	}
+}
+func (p *program) evalUsing(node *usingExpression, frame *runtimeFrame) (runtimeValue, error) {
+	resource, err := p.evalExpression(node.initializer, frame)
+	if err != nil {
+		return runtimeValue{}, err
+	}
+	bodyFrame := frame.clone()
+	bodyFrame.locals[node.name] = resource
+	value, bodyError := p.evalUsingBody(node.body, bodyFrame)
+	closeError := p.closeUsingResource(resource, node)
+	if closeError == nil {
+		return value, bodyError
+	}
+	if bodyError == nil || isControlSignal(bodyError) {
+		return runtimeValue{}, closeError
+	}
+	return runtimeValue{}, suppressFailure(bodyError, closeError)
+}
+
+func (p *program) evalUsingBody(body *blockNode, frame *runtimeFrame) (value runtimeValue, err error) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			value = runtimeValue{}
+			err = &panicFailure{value: failure}
+		}
+	}()
+	return p.evalBlock(body, frame)
+}
+
+func (p *program) closeUsingResource(resource runtimeValue, node *usingExpression) (err error) {
+	defer func() {
+		if failure := recover(); failure != nil {
+			err = &panicFailure{value: failure}
+		}
+	}()
+	class := p.classes[resource.typ]
+	if class == nil || class.implementations["Close"] == nil {
+		return runtimeError(node.pos, "%s has no implemented Close method", displayName(resource.typ))
+	}
+	_, err = p.callFunction(class.implementations["Close"], nil, &resource, nil)
+	return err
 }
 
 func (p *program) evalName(node *nameExpression, frame *runtimeFrame) (runtimeValue, error) {

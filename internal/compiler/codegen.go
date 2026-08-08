@@ -172,6 +172,9 @@ func (g *goGenerator) emitRuntime() {
 	g.line(`switch err.(type) { case *slickReturn, *slickBreak, *slickContinue: return true }`)
 	g.line(`return false`)
 	g.line(`}`)
+	if g.program.usesUsing {
+		g.emitUsingRuntime()
+	}
 	g.line("")
 	g.line(`type slickResult[T, E any] struct { ok bool; value T; failure E }`)
 	g.line(`func (result slickResult[T, E]) String() string {`)
@@ -296,6 +299,42 @@ func (g *goGenerator) emitRuntime() {
 	g.line(`return "[" + strings.Join(items, ", ") + "]"`)
 	g.line(`}`)
 	g.line(`return fmt.Sprint(value)`)
+	g.line(`}`)
+	g.line("")
+}
+
+func (g *goGenerator) emitUsingRuntime() {
+	g.line(`type slickPanicFailure struct { value any }`)
+	g.line(`func (failure *slickPanicFailure) Error() string { return fmt.Sprintf("panic: %%v", failure.value) }`)
+	g.line(`type slickSuppressedFailure struct { primary error; suppressed []error }`)
+	g.line(`func (failure *slickSuppressedFailure) Error() string {`)
+	g.line(`items := make([]string, len(failure.suppressed))`)
+	g.line(`for index, err := range failure.suppressed { items[index] = err.Error() }`)
+	g.line(`return failure.primary.Error() + " (suppressed: " + strings.Join(items, "; ") + ")"`)
+	g.line(`}`)
+	g.line(`func (failure *slickSuppressedFailure) Unwrap() error { return failure.primary }`)
+	g.line(`func slickSuppress(primary, suppressed error) error {`)
+	g.line(`if combined, ok := primary.(*slickSuppressedFailure); ok {`)
+	g.line(`failures := append([]error(nil), combined.suppressed...)`)
+	g.line(`return &slickSuppressedFailure{primary: combined.primary, suppressed: append(failures, suppressed)}`)
+	g.line(`}`)
+	g.line(`return &slickSuppressedFailure{primary: primary, suppressed: []error{suppressed}}`)
+	g.line(`}`)
+	g.line(`func slickUsingBody[T any](body func() (T, error)) (value T, err error) {`)
+	g.line(`defer func() { if failure := recover(); failure != nil { var zero T; value = zero; err = &slickPanicFailure{value: failure} } }()`)
+	g.line(`return body()`)
+	g.line(`}`)
+	g.line(`func slickUsingClose(close func() error) (err error) {`)
+	g.line(`defer func() { if failure := recover(); failure != nil { err = &slickPanicFailure{value: failure} } }()`)
+	g.line(`return close()`)
+	g.line(`}`)
+	g.line(`func slickUsing[T any](body func() (T, error), close func() error) (T, error) {`)
+	g.line(`value, bodyError := slickUsingBody(body)`)
+	g.line(`closeError := slickUsingClose(close)`)
+	g.line(`if closeError == nil { return value, bodyError }`)
+	g.line(`var zero T`)
+	g.line(`if bodyError == nil || slickIsControl(bodyError) { return zero, closeError }`)
+	g.line(`return zero, slickSuppress(bodyError, closeError)`)
 	g.line(`}`)
 	g.line("")
 }
@@ -767,6 +806,10 @@ func (g *goGenerator) expression(expression expressionNode, scope *goScope) (str
 		if err := g.emitPropagateExpression(&body, node, scope, typ); err != nil {
 			return "", err
 		}
+	case *usingExpression:
+		if err := g.emitUsingExpression(&body, node, scope, typ); err != nil {
+			return "", err
+		}
 	case *matchExpression:
 		if err := g.emitMatchExpression(&body, node, scope, typ); err != nil {
 			return "", err
@@ -859,6 +902,21 @@ func (g *goGenerator) emitObjectExpression(body *strings.Builder, node *objectEx
 		value = "&" + value
 	}
 	fmt.Fprintf(body, "return %s, nil\n", value)
+	return nil
+}
+func (g *goGenerator) emitUsingExpression(body *strings.Builder, node *usingExpression, scope *goScope, resultType string) error {
+	resource, err := g.evalExpression(body, node.initializer, scope, "resource", resultType)
+	if err != nil {
+		return err
+	}
+	usingScope := scope.clone()
+	usingScope.locals[node.name] = newGoBinding(resource, node.resolved)
+	usingBody, err := g.blockExpression(node.body, usingScope, resultType, "")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(body, "return slickUsing(%s, func() error { _, err := %s.%s(); return err })\n",
+		strings.TrimSuffix(usingBody, "()"), resource, goMethodName("Close"))
 	return nil
 }
 
@@ -1042,7 +1100,8 @@ func (g *goGenerator) emitCatchExpression(body *strings.Builder, node *catchExpr
 			return nil
 		}
 		caught := g.unique("caught")
-		fmt.Fprintf(body, "if %s, ok := %s.(*%s); ok {\n", caught, caughtError, goClassName(errorType))
+		fmt.Fprintf(body, "var %s *%s\n", caught, goClassName(errorType))
+		fmt.Fprintf(body, "if errors.As(%s, &%s) {\n", caughtError, caught)
 		fmt.Fprintf(body, "_ = %s\n", caught)
 		if node.binding != "" {
 			armScope.locals[node.binding] = goBinding{name: caught, typ: errorType}
@@ -1206,6 +1265,9 @@ func (g *goGenerator) expressionType(expression expressionNode, scope *goScope) 
 	if node, ok := expression.(*arrayExpression); ok && node.resolved != "" {
 		return node.resolved, nil
 	}
+	if node, ok := expression.(*usingExpression); ok && node.result != "" {
+		return node.result, nil
+	}
 	locals := make(map[string]string, len(scope.locals))
 	for name, binding := range scope.locals {
 		locals[name] = binding.typ
@@ -1339,7 +1401,7 @@ func (g *goGenerator) zero(typ string) string {
 		return "\"\""
 	case "struct{}":
 		return "struct{}{}"
-	case "slickSeq", "error", "[]any":
+	case "slickSeq", "error", "[]any", "any":
 		return "nil"
 	}
 	if strings.HasPrefix(goType, "[]") || strings.HasPrefix(goType, "*") || g.program.interfaces[typ] != nil {

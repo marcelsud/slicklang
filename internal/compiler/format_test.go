@@ -181,3 +181,34 @@ func TestEveryExampleFormatsToAValidFixedPoint(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatUsingScope(t *testing.T) {
+	source := compiler.Source{
+		Name:      "main.slk",
+		Namespace: "root",
+		Text:      `class Resource{function Close()->null{null}}function Open()->Resource{Resource{}}function main()->string{using Handle=Open(){"value"}}`,
+	}
+	formatted, diagnostics, err := compiler.Format(source)
+	if err != nil || len(diagnostics) != 0 {
+		t.Fatalf("format using source: diagnostics=%+v err=%v", diagnostics, err)
+	}
+	const want = `class Resource {
+    function Close() -> null {
+        null
+    }
+}
+
+function Open() -> Resource {
+    Resource {}
+}
+
+function main() -> string {
+    using Handle = Open() {
+        "value"
+    }
+}
+`
+	if formatted != want {
+		t.Fatalf("formatted using source:\n%s\nwant:\n%s", formatted, want)
+	}
+}

@@ -131,6 +131,7 @@ type program struct {
 	functions   map[string]*functionDecl
 	methodImpls []*functionDecl
 	diags       []Diagnostic
+	usesUsing   bool
 }
 
 func CheckPath(path string) ([]Diagnostic, error) {

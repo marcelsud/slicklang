@@ -28,6 +28,7 @@ var exampleOutputs = map[string]string{
 	"result-types":       "42; corrupt payload; no such record; [alpha, beta]; cannot divide by zero; 7",
 	"result-vs-throws":   "recovered from a thrown error; disk unavailable; disk unavailable",
 	"std-env":            "missing;Ada;missing",
+	"using":              "value;ABC",
 }
 
 func examplePath(project string) string {
