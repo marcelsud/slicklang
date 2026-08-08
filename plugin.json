@@ -1,0 +1,15 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "slicklang",
+  "version": "0.1.0",
+  "description": "Portable skills for using the Slick CLI and writing Slick programs.",
+  "homepage": "https://github.com/marcelsud/slicklang",
+  "repository": "https://github.com/marcelsud/slicklang",
+  "keywords": [
+    "slick",
+    "slicklang",
+    "compiler",
+    "programming-language",
+    "cli"
+  ]
+}
