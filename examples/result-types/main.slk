@@ -1,0 +1,91 @@
+// Result in type positions
+// ========================
+//
+// Result is an ordinary type, so it goes wherever a type goes: nested inside
+// another Result, holding an array, stored in a field, accepted as a parameter.
+//
+// Its two type arguments are invariant. Result<int, Alpha> and Result<int, Beta>
+// are unrelated types and neither converts to the other, so passing one where
+// the other is expected is a compile error (SLK320).
+//
+// The failure type is not restricted to classes implementing Error. Any
+// statically known type works, including a builtin like string.
+//
+// Prints: 42; corrupt payload; no such record; [alpha, beta]; cannot divide by zero; 7
+
+class DecodeError implements Error {
+    Message: string
+}
+
+class RecordError implements Error {
+    Message: string
+}
+
+// A Result can hold another Result, and the two failure types are independent.
+// Here the outer Err means "no record was found" while the inner Err means
+// "a record was found but could not be decoded" -- two failures a single
+// Result<int, E> could not tell apart.
+function fetch(Present: bool, Valid: bool) -> Result<Result<int, DecodeError>, RecordError> {
+    if (Present) {
+        if (Valid) {
+            Ok(Ok(42))
+        } else {
+            Ok(Err(DecodeError { Message: "corrupt payload" }))
+        }
+    } else {
+        Err(RecordError { Message: "no such record" })
+    }
+}
+
+// Arrays work as either type argument: Result<string[], E> here, and
+// Result<T, E[]> would be just as valid.
+function labels(Ready: bool) -> Result<string[], RecordError> {
+    if (Ready) {
+        Ok(["alpha", "beta"])
+    } else {
+        Err(RecordError { Message: "not ready" })
+    }
+}
+
+// A plain string as the failure type. Reach for a class when the failure needs
+// structure; a string is enough when it does not.
+function ratio(Divisor: int) -> Result<int, string> {
+    if (Divisor == 0) { Err("cannot divide by zero") } else { Ok(Divisor) }
+}
+
+// Result is a perfectly ordinary field type ...
+class Slot {
+    Value: Result<int, DecodeError>
+}
+
+// ... and a perfectly ordinary parameter type. A Result parameter is just a
+// value: it is not unwrapped on the way in, so the callee decides how to read
+// it.
+function read_slot(Container: Slot) -> string {
+    match Container.Value {
+        Ok(Number) => `${Number}`
+        Err(Problem) => Problem.Message
+    }
+}
+
+// Opening a nested Result means one match per layer. The outer arm binds the
+// inner Result, which is then matched in turn.
+function decode(Present: bool, Valid: bool) -> string {
+    match fetch(Present, Valid) {
+        Ok(Decoded) => match Decoded {
+            Ok(Number) => `${Number}`
+            Err(Problem) => Problem.Message
+        }
+        Err(Problem) => Problem.Message
+    }
+}
+
+function main() -> string {
+    let Found = decode(true, true)
+    let Corrupt = decode(true, false)
+    let Missing = decode(false, true)
+    let Names = match labels(true) { Ok(Values) => `${Values}` Err(Problem) => Problem.Message }
+    let Divided = match ratio(0) { Ok(Number) => `${Number}` Err(Reason) => Reason }
+    let Slotted = read_slot(Slot { Value: Ok(7) })
+    `${Found}; ${Corrupt}; ${Missing}; ${Names}; ${Divided}; ${Slotted}`
+}

@@ -1,0 +1,59 @@
+// Result<T, E>
+// ============
+//
+// A Result is an ordinary value that is either a success (Ok) or a failure
+// (Err). It is not an exception: returning Err is normal value flow, so a
+// function that returns Result needs no `throws` clause and its caller writes
+// no `catch`.
+//
+// This example is the short tour. The other result-* examples go deeper:
+//
+//   result-match         every match pattern
+//   result-propagation   the ? operator
+//   result-types         Result in nested, array, field, and parameter types
+//   result-vs-throws     how Result and checked errors stay separate
+//
+// Run it two ways; both print `missing user`:
+//
+//   slick run examples/result
+//   slick build examples/result -o /tmp/slick-result && /tmp/slick-result
+
+// The failure type. Implementing Error is not required by Result, but it is the
+// usual choice for a real error, and it is what `throws` would demand.
+class LookupError implements Error {
+    Message: string
+}
+
+class User {
+    Name: string
+}
+
+// The two type arguments of Result<T, E> are the success type and the failure
+// type. `Ok(...)` and `Err(...)` take their types from that return type, so the
+// payloads below are checked against User and LookupError respectively.
+function find_user(Found: bool) -> Result<User, LookupError> {
+    if (Found) {
+        Ok(User { Name: "Ada" })
+    } else {
+        Err(LookupError { Message: "missing user" })
+    }
+}
+
+// Postfix `?` unwraps a Result. On Ok it evaluates to the value, so `User` here
+// is a User and not a Result. On Err it returns that Err straight out of
+// user_name, which is why user_name must itself return a Result with the same
+// error type.
+function user_name(Found: bool) -> Result<string, LookupError> {
+    let User = find_user(Found)?
+    Ok(User.Name)
+}
+
+// `match` is the exhaustive way to read a Result back into a plain value. Both
+// sides must be handled and both arms must produce the same type, so the match
+// can be the body of a function returning string.
+function main() -> string {
+    match user_name(false) {
+        Ok(Name) => Name
+        Err(Error) => Error.Message
+    }
+}

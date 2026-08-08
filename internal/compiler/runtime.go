@@ -13,6 +13,22 @@ type runtimeValue struct {
 	fields   map[string]runtimeValue
 	elements []runtimeValue
 	iterable *runtimeIterable
+	result   *runtimeResult
+}
+
+// runtimeResult is a tagged Result payload. The complete static Result type
+// stays on the owning runtimeValue's typ; ok selects which side payload holds.
+// An Err is an ordinary value and never a slickThrow.
+type runtimeResult struct {
+	ok      bool
+	payload runtimeValue
+}
+
+func (r *runtimeResult) label() string {
+	if r.ok {
+		return "Ok"
+	}
+	return "Err"
 }
 
 type runtimeIterable struct {
@@ -216,6 +232,12 @@ func (p *program) evalExpression(expression expressionNode, frame *runtimeFrame)
 		return p.evalIf(node, frame)
 	case *catchExpression:
 		return p.evalCatch(node, frame)
+	case *resultExpression:
+		return p.evalResult(node, frame)
+	case *propagateExpression:
+		return p.evalPropagate(node, frame)
+	case *matchExpression:
+		return p.evalMatch(node, frame)
 	default:
 		return runtimeValue{}, fmt.Errorf("unsupported expression at %s:%d:%d", expression.expressionPos().file, expression.expressionPos().line, expression.expressionPos().column)
 	}
@@ -507,6 +529,59 @@ func (p *program) evalCatch(node *catchExpression, frame *runtimeFrame) (runtime
 	return runtimeValue{}, err
 }
 
+func (p *program) evalResult(node *resultExpression, frame *runtimeFrame) (runtimeValue, error) {
+	payload, err := p.evalExpression(node.value, frame)
+	if err != nil {
+		return runtimeValue{}, err
+	}
+	return runtimeValue{typ: node.resolved, result: &runtimeResult{ok: node.ok, payload: payload}}, nil
+}
+
+// evalPropagate evaluates its operand exactly once. An Err leaves the enclosing
+// function through the ordinary early-return signal carrying an Err Result, so
+// it never reaches a catch arm.
+func (p *program) evalPropagate(node *propagateExpression, frame *runtimeFrame) (runtimeValue, error) {
+	value, err := p.evalExpression(node.value, frame)
+	if err != nil {
+		return runtimeValue{}, err
+	}
+	if value.result == nil {
+		return runtimeValue{}, runtimeError(node.pos, "? requires a Result value, found %s", displayName(value.typ))
+	}
+	if value.result.ok {
+		return value.result.payload, nil
+	}
+	enclosing := p.resolveType(frame.function.namespace, frame.function.aliases, frame.function.result)
+	return runtimeValue{}, &returnSignal{value: runtimeValue{
+		typ:    enclosing,
+		result: &runtimeResult{payload: value.result.payload},
+	}}
+}
+
+func (p *program) evalMatch(node *matchExpression, frame *runtimeFrame) (runtimeValue, error) {
+	value, err := p.evalExpression(node.value, frame)
+	if err != nil {
+		return runtimeValue{}, err
+	}
+	if value.result == nil {
+		return runtimeValue{}, runtimeError(node.pos, "match requires a Result value, found %s", displayName(value.typ))
+	}
+	for _, arm := range node.arms {
+		if arm.pattern == matchPatternOk && !value.result.ok {
+			continue
+		}
+		if arm.pattern == matchPatternErr && value.result.ok {
+			continue
+		}
+		armFrame := frame.clone()
+		if arm.binding != "" {
+			armFrame.locals[arm.binding] = value.result.payload
+		}
+		return p.evalExpression(arm.value, armFrame)
+	}
+	return runtimeValue{}, runtimeError(node.pos, "match has no arm for %s", displayName(value.typ))
+}
+
 func (p *program) renderTemplate(template string, frame *runtimeFrame) (string, error) {
 	var output strings.Builder
 	for {
@@ -562,6 +637,12 @@ func runtimeEqual(left, right runtimeValue) bool {
 	if left.typ != right.typ {
 		return false
 	}
+	if left.result != nil || right.result != nil {
+		if left.result == nil || right.result == nil {
+			return false
+		}
+		return left.result.ok == right.result.ok && runtimeEqual(left.result.payload, right.result.payload)
+	}
 	if strings.HasSuffix(left.typ, "[]") || strings.HasPrefix(left.typ, "(") {
 		if len(left.elements) != len(right.elements) {
 			return false
@@ -613,8 +694,32 @@ func formatRuntimeValue(value runtimeValue) string {
 			}
 			return open + strings.Join(items, ", ") + close
 		}
+		if value.result != nil {
+			return value.result.label() + "(" + formatRuntimeValue(value.result.payload) + ")"
+		}
+		if value.iterable != nil {
+			return formatRuntimeIterable(value)
+		}
 		return value.typ
 	}
+}
+
+// formatRuntimeIterable renders a lazy sequence as its materialized elements,
+// so `run` matches what the Go backend prints for the same value.
+func formatRuntimeIterable(value runtimeValue) string {
+	length, err := runtimeIterableLength(value)
+	if err != nil {
+		return value.typ
+	}
+	items := make([]string, 0, length)
+	for index := range length {
+		values, err := runtimeIterableValues(value, index)
+		if err != nil {
+			return value.typ
+		}
+		items = append(items, formatRuntimeValue(packRuntimeValues(values)))
+	}
+	return "[" + strings.Join(items, ", ") + "]"
 }
 
 func runtimeError(pos position, format string, args ...any) error {

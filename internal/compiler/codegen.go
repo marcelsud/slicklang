@@ -134,6 +134,12 @@ func (g *goGenerator) emitRuntime() {
 	g.line(`return false`)
 	g.line(`}`)
 	g.line("")
+	g.line(`type slickResult[T, E any] struct { ok bool; value T; failure E }`)
+	g.line(`func (result slickResult[T, E]) String() string {`)
+	g.line(`if result.ok { return "Ok(" + slickFormat(result.value) + ")" }`)
+	g.line(`return "Err(" + slickFormat(result.failure) + ")"`)
+	g.line(`}`)
+	g.line("")
 	g.line(`type slickSeq interface { Len() int; Width() int; At(int, int) any }`)
 	g.line(`type slickSliceSeq[T any] struct { values []T }`)
 	g.line(`func (s slickSliceSeq[T]) Len() int { return len(s.values) }`)
@@ -173,9 +179,14 @@ func (g *goGenerator) emitRuntime() {
 	g.line(`return values`)
 	g.line(`}`)
 	g.line(`func slickEqual(left, right any) bool { return reflect.DeepEqual(left, right) }`)
+	// slickNamed lets slickFormat render a class value as its canonical Slick
+	// type name, matching the interpreter instead of dumping the Go struct or
+	// calling the generated Error method.
+	g.line(`type slickNamed interface { slickTypeName() string }`)
 	g.line(`func slickFormat(value any) string {`)
 	g.line(`if value == nil { return "" }`)
 	g.line(`if _, ok := value.(struct{}); ok { return "" }`)
+	g.line(`if named, ok := value.(slickNamed); ok { return named.slickTypeName() }`)
 	g.line(`reflection := reflect.ValueOf(value)`)
 	g.line(`if reflection.Kind() == reflect.Slice || reflection.Kind() == reflect.Array {`)
 	g.line(`items := make([]string, reflection.Len())`)
@@ -183,6 +194,11 @@ func (g *goGenerator) emitRuntime() {
 	g.line(`open, close := "[", "]"`)
 	g.line(`if _, ok := value.([]any); ok { open, close = "(", ")" }`)
 	g.line(`return open + strings.Join(items, ", ") + close`)
+	g.line(`}`)
+	g.line(`if sequence, ok := value.(slickSeq); ok {`)
+	g.line(`items := make([]string, sequence.Len())`)
+	g.line(`for index := range items { items[index] = slickFormat(slickItem(sequence, index)) }`)
+	g.line(`return "[" + strings.Join(items, ", ") + "]"`)
 	g.line(`}`)
 	g.line(`return fmt.Sprint(value)`)
 	g.line(`}`)
@@ -227,6 +243,13 @@ func (g *goGenerator) emitDeclarations() error {
 			g.line("slickMessage string")
 		}
 		g.line("}")
+		// The receiver matches goType's mapping for this class, so both the value
+		// form and the error pointer form satisfy slickNamed.
+		receiver := ""
+		if class.isError {
+			receiver = "*"
+		}
+		g.line("func (%s%s) slickTypeName() string { return %s }", receiver, goClassName(name), strconv.Quote(name))
 		if class.isError {
 			g.line("func (value *%s) Error() string {", goClassName(name))
 			g.line("if value == nil { return %s }", strconv.Quote(name))
@@ -348,6 +371,7 @@ func (g *goGenerator) emitStatement(body *strings.Builder, statement statementNo
 		callError := g.unique("error")
 		fmt.Fprintf(body, "%s, %s := %s\n", variable, callError, expression)
 		g.emitErrorReturn(body, callError, resultType)
+		fmt.Fprintf(body, "_ = %s\n", variable)
 		scope.locals[node.name] = goBinding{name: variable, typ: typ}
 	case *assignmentStatement:
 		binding, ok := scope.locals[node.name]
@@ -569,6 +593,18 @@ func (g *goGenerator) expression(expression expressionNode, scope *goScope) (str
 		if err := g.emitCatchExpression(&body, node, scope, typ); err != nil {
 			return "", err
 		}
+	case *resultExpression:
+		if err := g.emitResultExpression(&body, node, scope, typ); err != nil {
+			return "", err
+		}
+	case *propagateExpression:
+		if err := g.emitPropagateExpression(&body, node, scope, typ); err != nil {
+			return "", err
+		}
+	case *matchExpression:
+		if err := g.emitMatchExpression(&body, node, scope, typ); err != nil {
+			return "", err
+		}
 	default:
 		return "", fmt.Errorf("unsupported generated expression %T", expression)
 	}
@@ -711,6 +747,90 @@ func (g *goGenerator) emitCatchExpression(body *strings.Builder, node *catchExpr
 	return nil
 }
 
+func (g *goGenerator) emitResultExpression(body *strings.Builder, node *resultExpression, scope *goScope, typ string) error {
+	payload, err := g.evalExpression(body, node.value, scope, "payload", typ)
+	if err != nil {
+		return err
+	}
+	field := "value"
+	if !node.ok {
+		field = "failure"
+	}
+	fmt.Fprintf(body, "return %s{ok: %t, %s: %s}, nil\n", g.goType(typ), node.ok, field, payload)
+	return nil
+}
+
+// emitPropagateExpression evaluates the operand once and, on Err, leaves the
+// enclosing generated function through the early-return signal carrying an Err
+// Result value. Result failures never travel as a Go error.
+func (g *goGenerator) emitPropagateExpression(body *strings.Builder, node *propagateExpression, scope *goScope, typ string) error {
+	enclosing, err := g.declaredType(scope.function.namespace, scope.function.aliases, scope.function.result)
+	if err != nil {
+		return err
+	}
+	if _, _, ok := resultTypeArgs(enclosing); !ok {
+		return fmt.Errorf("generated ? outside a Result function %s", scope.function.qualified)
+	}
+	operand, err := g.evalExpression(body, node.value, scope, "propagated", typ)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(body, "if !%s.ok { return %s, &slickReturn{value: %s{failure: %s.failure}} }\n",
+		operand, g.zero(typ), g.goType(enclosing), operand)
+	fmt.Fprintf(body, "return %s.value, nil\n", operand)
+	return nil
+}
+
+// emitMatchExpression evaluates the scrutinee once and emits one tagged branch
+// per arm in source order.
+func (g *goGenerator) emitMatchExpression(body *strings.Builder, node *matchExpression, scope *goScope, typ string) error {
+	operand, err := g.expressionType(node.value, scope)
+	if err != nil {
+		return err
+	}
+	success, failure, ok := resultTypeArgs(operand)
+	if !ok {
+		return fmt.Errorf("generated match on non-Result type %s", operand)
+	}
+	scrutinee, err := g.evalExpression(body, node.value, scope, "matched", typ)
+	if err != nil {
+		return err
+	}
+	// The scrutinee is evaluated once regardless of whether any arm reads it; a
+	// lone catch-all arm never touches it.
+	fmt.Fprintf(body, "_ = %s\n", scrutinee)
+	for _, arm := range node.arms {
+		condition, field, binding := "", "value", success
+		switch arm.pattern {
+		case matchPatternOk:
+			condition = scrutinee + ".ok"
+		case matchPatternErr:
+			condition, field, binding = "!"+scrutinee+".ok", "failure", failure
+		}
+		armScope := scope.clone()
+		if condition != "" {
+			fmt.Fprintf(body, "if %s {\n", condition)
+		}
+		if arm.binding != "" {
+			variable := g.unique("bound")
+			fmt.Fprintf(body, "%s := %s.%s\n", variable, scrutinee, field)
+			fmt.Fprintf(body, "_ = %s\n", variable)
+			armScope.locals[arm.binding] = goBinding{name: variable, typ: binding}
+		}
+		armValue, err := g.expression(arm.value, armScope)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(body, "return %s\n", armValue)
+		if condition == "" {
+			return nil
+		}
+		fmt.Fprintf(body, "}\n")
+	}
+	fmt.Fprintf(body, "return %s, nil\n", g.zero(typ))
+	return nil
+}
+
 func (g *goGenerator) template(template string, scope *goScope) (string, error) {
 	var pieces []string
 	for {
@@ -787,6 +907,26 @@ func (g *goGenerator) resolveDeclaredType(namespace string, aliases map[string]a
 		}
 		return element + "[]", nil
 	}
+	// Generic arguments resolve exactly as canonicalTypeName resolves them, so a
+	// declared Iterable<Dog> or Result<Dog, E> names the same type in the
+	// checker and in generated Go.
+	if base, args, generic := genericType(name); generic {
+		switch {
+		case base == resultTypeName && len(args) == 2:
+		case base == "Iterable" && len(args) == 1:
+		default:
+			return "", fmt.Errorf("Go backend does not support type %s", name)
+		}
+		resolved := make([]string, len(args))
+		for index, arg := range args {
+			argument, err := g.resolveDeclaredType(namespace, aliases, arg)
+			if err != nil {
+				return "", err
+			}
+			resolved[index] = argument
+		}
+		return base + "<" + strings.Join(resolved, ",") + ">", nil
+	}
 	if isBuiltinType(name) || name == "Error" || strings.HasPrefix(name, "Iterable<") || strings.HasPrefix(name, "(") {
 		return name, nil
 	}
@@ -815,6 +955,9 @@ func (g *goGenerator) parameterTypes(namespace string, aliases map[string]aliasD
 func (g *goGenerator) goType(typ string) string {
 	if strings.HasSuffix(typ, "[]") {
 		return "[]" + g.goType(strings.TrimSuffix(typ, "[]"))
+	}
+	if success, failure, ok := resultTypeArgs(typ); ok {
+		return "slickResult[" + g.goType(success) + ", " + g.goType(failure) + "]"
 	}
 	if strings.HasPrefix(typ, "Iterable<") {
 		return "slickSeq"

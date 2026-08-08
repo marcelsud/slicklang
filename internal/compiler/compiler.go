@@ -322,6 +322,9 @@ func (p *parser) parseClass() {
 	if !ok {
 		return
 	}
+	if isReservedTypeName(name.text) {
+		p.error(name.pos, "class name %s is reserved by Result", name.text)
+	}
 	class := &classDecl{
 		name:            name.text,
 		qualified:       qualify(p.source.Namespace, name.text),
@@ -469,6 +472,9 @@ func (p *parser) parseInterface() {
 	if !ok {
 		return
 	}
+	if isReservedTypeName(name.text) {
+		p.error(name.pos, "interface name %s is reserved by Result", name.text)
+	}
 	if !p.accept("{") {
 		p.error(p.current().pos, "expected interface body")
 		return
@@ -543,6 +549,10 @@ func (p *parser) parseFunction() {
 	parts := strings.Split(ref.name, ".")
 	if len(parts) == 1 && isIterableBuiltin(ref.name) {
 		p.error(ref.pos, "function name %s is reserved by the iterable standard library", ref.name)
+		return
+	}
+	if len(parts) == 1 && isResultConstructor(ref.name) {
+		p.error(ref.pos, "function name %s is reserved by Result", ref.name)
 		return
 	}
 	if len(parts) == 1 {
@@ -873,7 +883,20 @@ func containsError(set map[string]struct{}, name string) bool {
 	return ok
 }
 
+// displayName shortens a canonical type for diagnostics, descending into array
+// elements and generic arguments so Result<root.User,root.Missing> reads as
+// Result<User, Missing> instead of losing its shape to the last dot.
 func displayName(name string) string {
+	if element := strings.TrimSuffix(name, "[]"); element != name {
+		return displayName(element) + "[]"
+	}
+	if base, args, generic := genericType(name); generic {
+		short := make([]string, len(args))
+		for index, arg := range args {
+			short[index] = displayName(arg)
+		}
+		return displayName(base) + "<" + strings.Join(short, ", ") + ">"
+	}
 	if index := strings.LastIndexByte(name, '.'); index >= 0 {
 		return name[index+1:]
 	}

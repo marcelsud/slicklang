@@ -182,7 +182,23 @@ func (p *program) classSatisfies(class *classDecl, iface *interfaceDecl) []strin
 }
 
 func (p *program) canonicalType(namespace string, aliases map[string]aliasDecl, ref typeRef) string {
-	name := ref.name
+	return p.canonicalTypeName(namespace, aliases, ref.name)
+}
+
+// canonicalTypeName resolves name to its fully qualified form, descending into
+// array elements and generic arguments so nested types canonicalize the same
+// way a bare type does.
+func (p *program) canonicalTypeName(namespace string, aliases map[string]aliasDecl, name string) string {
+	if element := strings.TrimSuffix(name, "[]"); element != name {
+		return p.canonicalTypeName(namespace, aliases, element) + "[]"
+	}
+	if base, args, generic := genericType(name); generic {
+		canonical := make([]string, len(args))
+		for index, arg := range args {
+			canonical[index] = p.canonicalTypeName(namespace, aliases, arg)
+		}
+		return base + "<" + strings.Join(canonical, ",") + ">"
+	}
 	if isBuiltinType(name) || strings.ContainsAny(name, "<>()[]?|,") {
 		return name
 	}

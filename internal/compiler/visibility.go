@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"strings"
 	"unicode"
 	"unicode/utf8"
 )
@@ -52,12 +53,44 @@ func (p *program) checkCallableTypeVisibility(namespace string, aliases map[stri
 }
 
 func (p *program) checkTypeVisibility(namespace string, aliases map[string]aliasDecl, ref typeRef) {
-	name := p.canonicalType(namespace, aliases, ref)
+	p.checkTypeName(ref.pos, namespace, p.canonicalType(namespace, aliases, ref))
+}
+
+// checkTypeName walks a canonical type and validates every component: the base
+// and arity of each generic application, and namespace access for each named
+// class or interface.
+func (p *program) checkTypeName(pos position, namespace, name string) {
+	if element := strings.TrimSuffix(name, "[]"); element != name {
+		p.checkTypeName(pos, namespace, element)
+		return
+	}
+	if base, args, generic := genericType(name); generic {
+		switch base {
+		case resultTypeName:
+			if len(args) != 2 {
+				p.add(pos, "SLK361", "Result takes 2 type arguments, found %d", len(args))
+			}
+		case "Iterable":
+			if len(args) != 1 {
+				p.add(pos, "SLK361", "Iterable takes 1 type argument, found %d", len(args))
+			}
+		default:
+			p.add(pos, "SLK361", "unknown generic type %s", base)
+		}
+		for _, arg := range args {
+			p.checkTypeName(pos, namespace, arg)
+		}
+		return
+	}
+	if strings.ContainsRune(name, '<') {
+		p.add(pos, "SLK361", "malformed generic type %s", name)
+		return
+	}
 	if class := p.classes[name]; class != nil {
-		p.requireAccess(ref.pos, namespace, class.namespace, class.name, "class")
+		p.requireAccess(pos, namespace, class.namespace, class.name, "class")
 		return
 	}
 	if iface := p.interfaces[name]; iface != nil {
-		p.requireAccess(ref.pos, namespace, iface.namespace, iface.name, "interface")
+		p.requireAccess(pos, namespace, iface.namespace, iface.name, "interface")
 	}
 }

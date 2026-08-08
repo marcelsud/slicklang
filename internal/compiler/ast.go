@@ -167,6 +167,68 @@ type catchExpression struct {
 
 func (n *catchExpression) expressionPos() position { return n.pos }
 
+// resultExpression is an Ok(...) or Err(...) constructor. resolved holds the
+// canonical Result type the checker took from the expected-type context; it is
+// the one piece of context that cannot be recovered from the node alone.
+type resultExpression struct {
+	ok       bool
+	value    expressionNode
+	resolved string
+	pos      position
+}
+
+func (n *resultExpression) expressionPos() position { return n.pos }
+
+func (n *resultExpression) label() string {
+	if n.ok {
+		return "Ok"
+	}
+	return "Err"
+}
+
+// propagateExpression is the postfix ? operator.
+type propagateExpression struct {
+	value expressionNode
+	pos   position
+}
+
+func (n *propagateExpression) expressionPos() position { return n.pos }
+
+type matchPattern int
+
+const (
+	matchPatternOk matchPattern = iota
+	matchPatternErr
+	matchPatternAny
+)
+
+func (pattern matchPattern) String() string {
+	switch pattern {
+	case matchPatternOk:
+		return "Ok"
+	case matchPatternErr:
+		return "Err"
+	default:
+		return "_"
+	}
+}
+
+type matchArm struct {
+	pattern matchPattern
+	binding string
+	value   expressionNode
+	pos     position
+}
+
+// matchExpression is a Result match.
+type matchExpression struct {
+	value expressionNode
+	arms  []matchArm
+	pos   position
+}
+
+func (n *matchExpression) expressionPos() position { return n.pos }
+
 type bodyParser struct {
 	program           *program
 	tokens            []token
@@ -289,9 +351,10 @@ func (p *bodyParser) parseForStatement(pos position) statementNode {
 		p.error(p.current().pos, "expected 'in' after loop bindings")
 		return nil
 	}
+	outerStop := p.stopObjectLiteral
 	p.stopObjectLiteral = true
 	iterable := p.parseExpression()
-	p.stopObjectLiteral = false
+	p.stopObjectLiteral = outerStop
 	if iterable == nil {
 		p.error(p.current().pos, "expected iterable expression")
 		return nil
@@ -376,6 +439,10 @@ func (p *bodyParser) parsePostfix() expressionNode {
 			expression = p.parseCatchExpression(expression)
 			continue
 		}
+		if p.accept("?") {
+			expression = &propagateExpression{value: expression, pos: expression.expressionPos()}
+			continue
+		}
 		break
 	}
 	return expression
@@ -388,6 +455,9 @@ func (p *bodyParser) parsePrimary() expressionNode {
 	tok := p.current()
 	if p.accept("if") {
 		return p.parseIf(tok.pos)
+	}
+	if p.accept("match") {
+		return p.parseMatch(tok.pos)
 	}
 	if p.accept("[") {
 		return p.parseArray(tok.pos)
@@ -437,6 +507,11 @@ func (p *bodyParser) parsePrimary() expressionNode {
 			return &literalExpression{value: false, pos: ref.pos}
 		case "null":
 			return &literalExpression{value: nil, pos: ref.pos}
+		case "Ok", "Err":
+			if p.current().text == "(" {
+				return p.parseResultConstructor(ref)
+			}
+			return &nameExpression{name: ref.name, pos: ref.pos}
 		default:
 			return &nameExpression{name: ref.name, pos: ref.pos}
 		}
@@ -587,6 +662,96 @@ func (p *bodyParser) parseCatchExpression(value expressionNode) expressionNode {
 		p.error(pos, "unterminated catch expression")
 	}
 	return &catchExpression{value: value, binding: binding, arms: arms, pos: pos}
+}
+
+func (p *bodyParser) parseResultConstructor(ref qualifiedRef) expressionNode {
+	p.accept("(")
+	args := p.parseArguments()
+	node := &resultExpression{ok: ref.name == "Ok", pos: ref.pos}
+	if len(args) != 1 {
+		p.program.add(ref.pos, "SLK359", "%s expects exactly 1 argument, found %d", ref.name, len(args))
+	}
+	if len(args) > 0 {
+		node.value = args[0]
+	}
+	return node
+}
+
+func (p *bodyParser) parseMatch(pos position) expressionNode {
+	outerStop := p.stopObjectLiteral
+	p.stopObjectLiteral = true
+	value := p.parseExpression()
+	p.stopObjectLiteral = outerStop
+	if value == nil {
+		p.error(pos, "expected match scrutinee")
+		return nil
+	}
+	if !p.accept("{") {
+		p.error(p.current().pos, "expected match arms")
+		return nil
+	}
+	node := &matchExpression{value: value, pos: pos}
+	for !p.atEnd() && p.current().text != "}" {
+		if p.accept(",") || p.accept(";") {
+			continue
+		}
+		arm, ok := p.parseMatchArm()
+		if !ok {
+			p.index++
+			continue
+		}
+		node.arms = append(node.arms, arm)
+	}
+	if !p.accept("}") {
+		p.error(pos, "unterminated match expression")
+	}
+	return node
+}
+
+func (p *bodyParser) parseMatchArm() (matchArm, bool) {
+	name, ok := p.expectIdent("match pattern")
+	if !ok {
+		return matchArm{}, false
+	}
+	arm := matchArm{pos: name.pos}
+	switch {
+	case name.text == "_":
+		arm.pattern = matchPatternAny
+	case isResultConstructor(name.text):
+		arm.pattern = matchPatternOk
+		if name.text == "Err" {
+			arm.pattern = matchPatternErr
+		}
+		if !p.accept("(") {
+			p.error(p.current().pos, "expected '(' after %s pattern", name.text)
+			return matchArm{}, false
+		}
+		binding, ok := p.expectIdent("match binding")
+		if !ok {
+			return matchArm{}, false
+		}
+		if binding.text != "_" {
+			arm.binding = binding.text
+		}
+		if !p.accept(")") {
+			p.error(p.current().pos, "expected ')' after match binding")
+			return matchArm{}, false
+		}
+	default:
+		p.program.add(name.pos, "SLK360", "match supports only Ok(...), Err(...), and _ patterns, found %s", name.text)
+		return matchArm{}, false
+	}
+	if !p.matchPair("=", ">") {
+		p.error(p.current().pos, "expected '=>' after match pattern")
+		return matchArm{}, false
+	}
+	value := p.parseExpression()
+	if value == nil {
+		p.error(arm.pos, "expected match arm value")
+		return matchArm{}, false
+	}
+	arm.value = value
+	return arm, true
 }
 
 func (p *bodyParser) current() token {

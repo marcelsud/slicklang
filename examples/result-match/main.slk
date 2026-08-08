@@ -1,0 +1,80 @@
+// Reading a Result with `match`
+// =============================
+//
+// `match` is the only way to open a Result, and it is exhaustive: the compiler
+// rejects a match that cannot handle both outcomes. There is no `unwrap`, so a
+// Result can never fail at runtime for want of a case.
+//
+// The available patterns are:
+//
+//   Ok(Name)    match a success and bind its payload to Name
+//   Err(Name)   match a failure and bind its payload to Name
+//   Ok(_)       match a success, ignore the payload
+//   Err(_)      match a failure, ignore the payload
+//   _           match either outcome
+//
+// Rules the compiler enforces:
+//
+//   * an Ok arm plus an Err arm is exhaustive; a `_` arm alone is exhaustive
+//   * handling only one side is an error (SLK356)
+//   * a repeated arm, or an arm shadowed by an earlier `_`, is an error (SLK357)
+//   * every reachable arm must produce one common type (SLK358)
+//   * the scrutinee is evaluated exactly once
+//
+// Prints: on is true; bad flag maybe; yes; no; false
+
+class ParseError implements Error {
+    Message: string
+}
+
+// Returning Err is ordinary value flow: no `throws`, no `throw`.
+function parse_flag(Text: string) -> Result<bool, ParseError> {
+    if (Text == "on") {
+        Ok(true)
+    } else {
+        if (Text == "off") {
+            Ok(false)
+        } else {
+            Err(ParseError { Message: "bad flag " + Text })
+        }
+    }
+}
+
+// Ok(Flag) / Err(Problem) bind the payload. Each binding is scoped to its own
+// arm and carries the payload's static type, so `Flag` is a bool and `Problem`
+// is a ParseError -- which is why `Problem.Message` type-checks here and would
+// not type-check in the Ok arm.
+function describe(Text: string) -> string {
+    match parse_flag(Text) {
+        Ok(Flag) => `${Text} is ${Flag}`
+        Err(Problem) => Problem.Message
+    }
+}
+
+// Ok(_) / Err(_) match a side without binding anything. Use them when only the
+// outcome matters, not the payload.
+function succeeded(Text: string) -> string {
+    match parse_flag(Text) {
+        Ok(_) => "yes"
+        Err(_) => "no"
+    }
+}
+
+// A single `_` arm is a catch-all and makes the match exhaustive by itself, so
+// this handles the failure case without naming it. Because `_` covers
+// everything, no arm may follow it.
+function flag_or_default(Text: string) -> bool {
+    match parse_flag(Text) {
+        Ok(Flag) => Flag
+        _ => false
+    }
+}
+
+function main() -> string {
+    let Enabled = describe("on")
+    let Rejected = describe("maybe")
+    let Yes = succeeded("off")
+    let No = succeeded("maybe")
+    let Fallback = flag_or_default("maybe")
+    `${Enabled}; ${Rejected}; ${Yes}; ${No}; ${Fallback}`
+}

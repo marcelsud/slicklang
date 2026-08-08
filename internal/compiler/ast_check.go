@@ -48,8 +48,8 @@ func (p *program) checkASTFunction(function *functionDecl) {
 	if function.receiverCanonical != "" {
 		scope.locals["self"] = function.receiverCanonical
 	}
-	info := p.checkASTBlock(function.ast, scope)
 	expected := p.resolveType(function.namespace, function.aliases, function.result)
+	info := p.checkASTBlock(function.ast, scope, expected)
 	if info.typ != typeNever && info.typ != typeUnknown && info.typ != expected {
 		p.add(function.pos, "SLK340", "%s returns %s, but its body produces %s", function.qualified, displayName(expected), displayName(info.typ))
 	}
@@ -64,31 +64,37 @@ func (p *program) checkASTFunction(function *functionDecl) {
 	}
 }
 
-func (p *program) checkASTBlock(block *blockNode, scope *astScope) expressionInfo {
+// checkASTBlock types every statement in block. expected is the type the block
+// as a whole must produce, so it reaches only the final statement.
+func (p *program) checkASTBlock(block *blockNode, scope *astScope, expected string) expressionInfo {
 	info := expressionInfo{typ: "null", effects: make(effectSet)}
-	for _, statement := range block.statements {
-		statementInfo := p.checkASTStatement(statement, scope)
+	for index, statement := range block.statements {
+		statementExpected := ""
+		if index == len(block.statements)-1 {
+			statementExpected = expected
+		}
+		statementInfo := p.checkASTStatement(statement, scope, statementExpected)
 		mergeEffects(info.effects, statementInfo.effects)
 		info.typ = statementInfo.typ
 	}
 	return info
 }
 
-func (p *program) checkASTStatement(statement statementNode, scope *astScope) expressionInfo {
+func (p *program) checkASTStatement(statement statementNode, scope *astScope, expected string) expressionInfo {
 	switch node := statement.(type) {
 	case *letStatement:
 		info := p.checkASTExpression(node.value, scope)
 		scope.locals[node.name] = info.typ
 		return expressionInfo{typ: "null", effects: info.effects}
 	case *assignmentStatement:
-		expected, exists := scope.locals[node.name]
+		declared, exists := scope.locals[node.name]
 		if !exists {
 			p.add(node.pos, "SLK341", "cannot assign unknown value %s", node.name)
 			return expressionInfo{typ: "null", effects: make(effectSet)}
 		}
-		info := p.checkASTExpression(node.value, scope)
-		if info.typ != typeUnknown && info.typ != expected {
-			p.add(node.pos, "SLK342", "cannot assign %s to %s of type %s", displayName(info.typ), node.name, displayName(expected))
+		info := p.checkASTExpressionExpecting(node.value, scope, declared)
+		if info.typ != typeUnknown && info.typ != declared {
+			p.add(node.pos, "SLK342", "cannot assign %s to %s of type %s", displayName(info.typ), node.name, displayName(declared))
 		}
 		return expressionInfo{typ: "null", effects: info.effects}
 	case *forStatement:
@@ -121,7 +127,7 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope) ex
 				loopScope.locals[binding] = bindingTypes[index]
 			}
 		}
-		body := p.checkASTBlock(node.body, loopScope)
+		body := p.checkASTBlock(node.body, loopScope, "")
 		mergeEffects(iterable.effects, body.effects)
 		return expressionInfo{typ: "null", effects: iterable.effects}
 	case *breakStatement:
@@ -147,21 +153,28 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope) ex
 		info.typ = typeNever
 		return info
 	case *returnStatement:
-		info := p.checkASTExpression(node.value, scope)
-		expected := p.resolveType(scope.function.namespace, scope.function.aliases, scope.function.result)
-		if info.typ != typeNever && info.typ != typeUnknown && info.typ != expected {
-			p.add(node.pos, "SLK340", "%s returns %s, expected %s", scope.function.qualified, displayName(info.typ), displayName(expected))
+		declared := p.resolveType(scope.function.namespace, scope.function.aliases, scope.function.result)
+		info := p.checkASTExpressionExpecting(node.value, scope, declared)
+		if info.typ != typeNever && info.typ != typeUnknown && info.typ != declared {
+			p.add(node.pos, "SLK340", "%s returns %s, expected %s", scope.function.qualified, displayName(info.typ), displayName(declared))
 		}
 		info.typ = typeNever
 		return info
 	case *expressionStatement:
-		return p.checkASTExpression(node.value, scope)
+		return p.checkASTExpressionExpecting(node.value, scope, expected)
 	default:
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	}
 }
 
 func (p *program) checkASTExpression(expression expressionNode, scope *astScope) expressionInfo {
+	return p.checkASTExpressionExpecting(expression, scope, "")
+}
+
+// checkASTExpressionExpecting types expression. expected is the type the context
+// already knows the expression must produce, or "" when the context knows
+// nothing. Only constructs that cannot be typed bottom-up read it.
+func (p *program) checkASTExpressionExpecting(expression expressionNode, scope *astScope, expected string) expressionInfo {
 	if expression == nil {
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	}
@@ -183,9 +196,15 @@ func (p *program) checkASTExpression(expression expressionNode, scope *astScope)
 	case *binaryExpression:
 		return p.checkBinaryExpression(node, scope)
 	case *ifExpression:
-		return p.checkIfExpression(node, scope)
+		return p.checkIfExpression(node, scope, expected)
 	case *catchExpression:
-		return p.checkCatchExpression(node, scope)
+		return p.checkCatchExpression(node, scope, expected)
+	case *resultExpression:
+		return p.checkResultExpression(node, scope, expected)
+	case *propagateExpression:
+		return p.checkPropagateExpression(node, scope)
+	case *matchExpression:
+		return p.checkMatchExpression(node, scope, expected)
 	default:
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	}
@@ -220,7 +239,7 @@ func (p *program) checkArrayExpression(node *arrayExpression, scope *astScope) e
 	info := expressionInfo{typ: typeUnknown + "[]", effects: make(effectSet)}
 	elementType := ""
 	for _, element := range node.elements {
-		elementInfo := p.checkASTExpression(element, scope)
+		elementInfo := p.checkASTExpressionExpecting(element, scope, elementType)
 		mergeEffects(info.effects, elementInfo.effects)
 		if elementType == "" {
 			elementType = elementInfo.typ
@@ -273,9 +292,9 @@ func (p *program) checkObjectExpression(node *objectExpression, scope *astScope)
 			continue
 		}
 		p.requireAccess(fieldValue.pos, scope.function.namespace, class.namespace, field.name, "field")
-		valueInfo := p.checkASTExpression(fieldValue.value, scope)
-		mergeEffects(info.effects, valueInfo.effects)
 		expected := p.resolveType(class.namespace, class.aliases, field.typ)
+		valueInfo := p.checkASTExpressionExpecting(fieldValue.value, scope, expected)
+		mergeEffects(info.effects, valueInfo.effects)
 		if valueInfo.typ != typeUnknown && valueInfo.typ != expected {
 			p.add(fieldValue.pos, "SLK342", "field %s.%s must be %s, found %s", class.name, field.name, displayName(expected), displayName(valueInfo.typ))
 		}
@@ -315,12 +334,13 @@ func (p *program) checkCallExpression(node *callExpression, scope *astScope) exp
 		p.add(node.pos, "SLK320", "%s expects %d arguments, found %d", target.name, len(target.params), len(node.args))
 	}
 	for index, argument := range node.args {
-		argumentInfo := p.checkASTExpression(argument, scope)
-		mergeEffects(info.effects, argumentInfo.effects)
 		if index >= len(target.params) {
+			mergeEffects(info.effects, p.checkASTExpression(argument, scope).effects)
 			continue
 		}
 		expected := p.resolveType(target.namespace, target.aliases, target.params[index].typ)
+		argumentInfo := p.checkASTExpressionExpecting(argument, scope, expected)
+		mergeEffects(info.effects, argumentInfo.effects)
 		p.checkAssignable(node.pos, argumentInfo.typ, expected, target.name, index+1)
 	}
 	for thrown := range target.throwSet {
@@ -443,19 +463,19 @@ func (p *program) checkBinaryExpression(node *binaryExpression, scope *astScope)
 	}
 }
 
-func (p *program) checkIfExpression(node *ifExpression, scope *astScope) expressionInfo {
+func (p *program) checkIfExpression(node *ifExpression, scope *astScope, expected string) expressionInfo {
 	condition := p.checkASTExpression(node.condition, scope)
 	if condition.typ != "bool" && condition.typ != typeUnknown {
 		p.add(node.condition.expressionPos(), "SLK342", "if condition must be bool, found %s", displayName(condition.typ))
 	}
-	thenInfo := p.checkASTBlock(node.thenBlock, scope.clone())
+	thenInfo := p.checkASTBlock(node.thenBlock, scope.clone(), expected)
 	info := expressionInfo{typ: "null", effects: make(effectSet)}
 	mergeEffects(info.effects, condition.effects)
 	mergeEffects(info.effects, thenInfo.effects)
 	if node.elseBlock == nil {
 		return info
 	}
-	elseInfo := p.checkASTBlock(node.elseBlock, scope.clone())
+	elseInfo := p.checkASTBlock(node.elseBlock, scope.clone(), expected)
 	mergeEffects(info.effects, elseInfo.effects)
 	switch {
 	case thenInfo.typ == typeNever:
@@ -471,8 +491,8 @@ func (p *program) checkIfExpression(node *ifExpression, scope *astScope) express
 	return info
 }
 
-func (p *program) checkCatchExpression(node *catchExpression, scope *astScope) expressionInfo {
-	valueInfo := p.checkASTExpression(node.value, scope)
+func (p *program) checkCatchExpression(node *catchExpression, scope *astScope, expected string) expressionInfo {
+	valueInfo := p.checkASTExpressionExpecting(node.value, scope, expected)
 	remaining := make(effectSet)
 	for name, origin := range valueInfo.effects {
 		remaining[name] = origin
@@ -500,7 +520,7 @@ func (p *program) checkCatchExpression(node *catchExpression, scope *astScope) e
 		if node.binding != "" {
 			armScope.locals[node.binding] = resolved
 		}
-		armInfo := p.checkASTExpression(arm.value, armScope)
+		armInfo := p.checkASTExpressionExpecting(arm.value, armScope, expected)
 		mergeEffects(result.effects, armInfo.effects)
 		if armInfo.typ != typeNever && result.typ != armInfo.typ {
 			p.add(arm.errorType.pos, "SLK342", "catch success and error paths must produce one type; found %s and %s", displayName(result.typ), displayName(armInfo.typ))
@@ -516,6 +536,121 @@ func (p *program) checkCatchExpression(node *catchExpression, scope *astScope) e
 		p.add(node.pos, "SLK202", "non-exhaustive catch for %s; missing %s", expressionLabel(node.value), strings.Join(missing, ", "))
 	}
 	return result
+}
+
+// checkResultExpression types Ok(value) and Err(error) against the Result type
+// the context expects. Once resolved the node keeps that type, so re-checking it
+// from a context that knows nothing stays deterministic.
+func (p *program) checkResultExpression(node *resultExpression, scope *astScope, expected string) expressionInfo {
+	if node.resolved != "" {
+		expected = node.resolved
+	}
+	success, failure, isResult := resultTypeArgs(expected)
+	if !isResult {
+		p.add(node.pos, "SLK351", "%s needs a known Result type here; give the enclosing return type, argument, or field a Result<T, E> type", node.label())
+		return expressionInfo{typ: typeUnknown, effects: p.checkASTExpression(node.value, scope).effects}
+	}
+	payload := success
+	if !node.ok {
+		payload = failure
+	}
+	info := p.checkASTExpressionExpecting(node.value, scope, payload)
+	if info.typ != typeUnknown && info.typ != typeNever && info.typ != payload {
+		p.add(node.pos, "SLK350", "%s payload must be %s, found %s", node.label(), displayName(payload), displayName(info.typ))
+	}
+	node.resolved = expected
+	return expressionInfo{typ: expected, effects: info.effects}
+}
+
+// checkPropagateExpression types postfix ?. It never contributes a throw
+// effect: an Err travels as an ordinary early return, not as a checked throw.
+func (p *program) checkPropagateExpression(node *propagateExpression, scope *astScope) expressionInfo {
+	info := p.checkASTExpression(node.value, scope)
+	declared := p.resolveType(scope.function.namespace, scope.function.aliases, scope.function.result)
+	_, enclosingFailure, returnsResult := resultTypeArgs(declared)
+	if !returnsResult {
+		p.add(node.pos, "SLK353", "? requires %s to return Result, found %s", scope.function.qualified, displayName(declared))
+		return expressionInfo{typ: typeUnknown, effects: info.effects}
+	}
+	success, failure, isResult := resultTypeArgs(info.typ)
+	if !isResult {
+		if info.typ != typeUnknown {
+			p.add(node.pos, "SLK352", "? requires a Result value, found %s", displayName(info.typ))
+		}
+		return expressionInfo{typ: typeUnknown, effects: info.effects}
+	}
+	if failure != enclosingFailure {
+		p.add(node.pos, "SLK354", "? cannot propagate %s from %s, which fails with %s", displayName(failure), scope.function.qualified, displayName(enclosingFailure))
+		return expressionInfo{typ: typeUnknown, effects: info.effects}
+	}
+	return expressionInfo{typ: success, effects: info.effects}
+}
+
+// checkMatchExpression types an exhaustive Result match: one arm is selected,
+// Ok and Err must both be reachable, and every reachable arm shares one type.
+func (p *program) checkMatchExpression(node *matchExpression, scope *astScope, expected string) expressionInfo {
+	valueInfo := p.checkASTExpression(node.value, scope)
+	info := expressionInfo{typ: typeUnknown, effects: make(effectSet)}
+	mergeEffects(info.effects, valueInfo.effects)
+	success, failure, isResult := resultTypeArgs(valueInfo.typ)
+	if !isResult {
+		if valueInfo.typ != typeUnknown {
+			p.add(node.pos, "SLK355", "match requires a Result value, found %s", displayName(valueInfo.typ))
+		}
+		return info
+	}
+	handled := make(map[matchPattern]position, len(node.arms))
+	armType := ""
+	for _, arm := range node.arms {
+		if previous, duplicate := handled[arm.pattern]; duplicate {
+			p.add(arm.pos, "SLK357", "duplicate %s arm; already handled at %s:%d:%d", arm.pattern, previous.file, previous.line, previous.column)
+			continue
+		}
+		if catchAll, exists := handled[matchPatternAny]; exists {
+			p.add(arm.pos, "SLK357", "unreachable %s arm; the _ arm at %s:%d:%d already matches", arm.pattern, catchAll.file, catchAll.line, catchAll.column)
+			continue
+		}
+		_, hasOk := handled[matchPatternOk]
+		_, hasErr := handled[matchPatternErr]
+		if arm.pattern == matchPatternAny && hasOk && hasErr {
+			p.add(arm.pos, "SLK357", "unreachable _ arm; Ok and Err are already handled")
+			continue
+		}
+		handled[arm.pattern] = arm.pos
+		armScope := scope.clone()
+		if arm.binding != "" {
+			binding := success
+			if arm.pattern == matchPatternErr {
+				binding = failure
+			}
+			armScope.locals[arm.binding] = binding
+		}
+		armInfo := p.checkASTExpressionExpecting(arm.value, armScope, expected)
+		mergeEffects(info.effects, armInfo.effects)
+		if armInfo.typ == typeNever || armInfo.typ == typeUnknown {
+			continue
+		}
+		if armType == "" {
+			armType = armInfo.typ
+			continue
+		}
+		if armInfo.typ != armType {
+			p.add(arm.pos, "SLK358", "match arms must produce one type; found %s and %s", displayName(armType), displayName(armInfo.typ))
+			armType = typeUnknown
+		}
+	}
+	if _, catchAll := handled[matchPatternAny]; !catchAll {
+		if _, ok := handled[matchPatternOk]; !ok {
+			p.add(node.pos, "SLK356", "match does not handle Ok; add an Ok(...) or _ arm")
+		}
+		if _, ok := handled[matchPatternErr]; !ok {
+			p.add(node.pos, "SLK356", "match does not handle Err; add an Err(...) or _ arm")
+		}
+	}
+	if armType != "" {
+		info.typ = armType
+	}
+	return info
 }
 
 func (scope *astScope) clone() *astScope {
@@ -559,8 +694,9 @@ func iterableElementType(iterableType string) (string, bool) {
 	if strings.HasSuffix(iterableType, "[]") {
 		return strings.TrimSuffix(iterableType, "[]"), true
 	}
-	if strings.HasPrefix(iterableType, "Iterable<") && strings.HasSuffix(iterableType, ">") {
-		return strings.TrimSuffix(strings.TrimPrefix(iterableType, "Iterable<"), ">"), true
+	base, args, generic := genericType(iterableType)
+	if generic && base == "Iterable" && len(args) == 1 {
+		return args[0], true
 	}
 	return "", false
 }
@@ -576,25 +712,7 @@ func tupleElementTypes(tupleType string) ([]string, bool) {
 	if !strings.HasPrefix(tupleType, "(") || !strings.HasSuffix(tupleType, ")") {
 		return nil, false
 	}
-	inner := strings.TrimSuffix(strings.TrimPrefix(tupleType, "("), ")")
-	var elements []string
-	start := 0
-	depth := 0
-	for index, char := range inner {
-		switch char {
-		case '(', '[', '<':
-			depth++
-		case ')', ']', '>':
-			depth--
-		case ',':
-			if depth == 0 {
-				elements = append(elements, inner[start:index])
-				start = index + 1
-			}
-		}
-	}
-	elements = append(elements, inner[start:])
-	return elements, true
+	return splitTypeList(tupleType[1 : len(tupleType)-1]), true
 }
 
 func expressionLabel(expression expressionNode) string {
@@ -605,6 +723,12 @@ func expressionLabel(expression expressionNode) string {
 		return expressionLabel(node.callee)
 	case *objectExpression:
 		return node.typeName
+	case *resultExpression:
+		return node.label()
+	case *propagateExpression:
+		return expressionLabel(node.value)
+	case *matchExpression:
+		return "match"
 	default:
 		return "expression"
 	}

@@ -1,0 +1,85 @@
+// Result and checked errors are separate mechanisms
+// =================================================
+//
+// Slick has two ways to report a failure, and they do not mix:
+//
+//   throws / throw / catch    an effect. The failure is part of the signature,
+//                             the compiler tracks it, and every caller must
+//                             either catch it or declare it in turn.
+//
+//   Result<T, E>              a value. Nothing appears in the signature; the
+//                             failure is in the return type, and callers read
+//                             it with `match` or forward it with `?`.
+//
+// The two never cross over:
+//
+//   * Result<T, E> does not add E to a function's `throws` set
+//   * an Err is a value, not a thrown error, so `catch` cannot intercept one
+//   * `throw` still requires an Error value, so a Result cannot be thrown
+//   * `?` returns an Err; it does not throw
+//
+// Rough guidance: reach for `throws` when a failure is exceptional and should
+// interrupt the caller by default, and for Result when a failure is an expected
+// outcome the caller should have to spell out.
+//
+// Prints: recovered from a thrown error; disk unavailable; disk unavailable
+
+class DiskError implements Error {
+    Message: string
+}
+
+// The effect version. `throws DiskError` is part of the signature.
+function read_thrown(Present: bool) -> string throws DiskError {
+    if (Present) {
+        "contents"
+    } else {
+        throw DiskError { Message: "disk unavailable" }
+    }
+}
+
+// Reading it back needs `catch`, and the catch must cover every declared error.
+// Drop the catch and load_thrown fails to compile unless it declares
+// `throws DiskError` itself (SLK201).
+function load_thrown(Present: bool) -> string {
+    read_thrown(Present) catch (error) {
+        DiskError => "recovered from a thrown error"
+    }
+}
+
+// The value version of the same failure. Note the signature: no `throws`,
+// because returning Err is not an effect.
+function read_result(Present: bool) -> Result<string, DiskError> {
+    if (Present) {
+        Ok("contents")
+    } else {
+        Err(DiskError { Message: "disk unavailable" })
+    }
+}
+
+// Reading it back needs `match`, and the match must be exhaustive. Nothing here
+// declares or catches anything.
+function load_result(Present: bool) -> string {
+    match read_result(Present) {
+        Ok(Text) => Text
+        Err(Problem) => Problem.Message
+    }
+}
+
+// Proof that the mechanisms do not overlap. read_result throws nothing, so this
+// catch has nothing to catch: the DiskError arm never runs, and the Err flows
+// out untouched as the value it always was.
+function catch_cannot_see_err(Present: bool) -> Result<string, DiskError> {
+    read_result(Present) catch (error) {
+        DiskError => Ok("this arm never runs")
+    }
+}
+
+function main() -> string {
+    let Thrown = load_thrown(false)
+    let Valued = load_result(false)
+    let Untouched = match catch_cannot_see_err(false) {
+        Ok(Text) => Text
+        Err(Problem) => Problem.Message
+    }
+    `${Thrown}; ${Valued}; ${Untouched}`
+}

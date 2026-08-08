@@ -10,20 +10,29 @@ import (
 	"slick/internal/compiler"
 )
 
+// exampleOutputs pins the observable output of every example project. The
+// result-* examples double as the Result documentation, so the output each one
+// documents is verified here instead of being left to rot.
+var exampleOutputs = map[string]string{
+	"hello":              "Ada: woof",
+	"range-loop":         "0:Ada;2:Grace;",
+	"checked-errors":     "Ada: woof",
+	"result":             "missing user",
+	"result-match":       "on is true; bad flag maybe; yes; no; false",
+	"result-propagation": "localhost:8080; empty host; 6; zero is not scorable",
+	"result-types":       "42; corrupt payload; no such record; [alpha, beta]; cannot divide by zero; 7",
+	"result-vs-throws":   "recovered from a thrown error; disk unavailable; disk unavailable",
+}
+
+func examplePath(project string) string {
+	return filepath.Join("..", "..", "examples", project)
+}
+
 func TestBuildPathProducesStandaloneExampleBinaries(t *testing.T) {
-	root := filepath.Join("..", "..", "examples")
-	tests := map[string]struct {
-		project string
-		output  string
-	}{
-		"hello":          {project: "hello", output: "Ada: woof\n"},
-		"range loop":     {project: "range-loop", output: "0:Ada;2:Grace;\n"},
-		"checked errors": {project: "checked-errors", output: "Ada: woof\n"},
-	}
-	for name, test := range tests {
-		t.Run(name, func(t *testing.T) {
+	for project, expected := range exampleOutputs {
+		t.Run(project, func(t *testing.T) {
 			binary := filepath.Join(t.TempDir(), "app")
-			diagnostics, err := compiler.BuildPath(filepath.Join(root, test.project), binary)
+			diagnostics, err := compiler.BuildPath(examplePath(project), binary)
 			if err != nil {
 				t.Fatalf("build native binary: %v", err)
 			}
@@ -32,8 +41,26 @@ func TestBuildPathProducesStandaloneExampleBinaries(t *testing.T) {
 			if err != nil {
 				t.Fatalf("run native binary: %v: %s", err, output)
 			}
-			if string(output) != test.output {
-				t.Fatalf("expected %q, found %q", test.output, output)
+			if string(output) != expected+"\n" {
+				t.Fatalf("expected %q, found %q", expected+"\n", output)
+			}
+		})
+	}
+}
+
+// TestInterpreterMatchesExampleOutput holds `slick run` to the same output the
+// native binary produces, so the two backends cannot drift apart on any
+// documented example.
+func TestInterpreterMatchesExampleOutput(t *testing.T) {
+	for project, expected := range exampleOutputs {
+		t.Run(project, func(t *testing.T) {
+			output, diagnostics, err := compiler.RunPath(examplePath(project))
+			if err != nil {
+				t.Fatalf("run example: %v", err)
+			}
+			assertNoDiagnostics(t, diagnostics)
+			if output != expected {
+				t.Fatalf("expected %q, found %q", expected, output)
 			}
 		})
 	}
