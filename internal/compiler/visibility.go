@@ -60,6 +60,9 @@ func (p *program) checkTypeVisibility(namespace string, aliases map[string]alias
 // and arity of each generic application, Map key restrictions, and namespace
 // access for each named class or interface.
 func (p *program) checkTypeName(pos position, namespace, name string) {
+	if pos.file != "" && strings.Contains(name, "std.io.") {
+		p.usesStdIO = true
+	}
 	parsed := parseTypeName(name)
 	switch parsed.kind {
 	case typeKindOptional, typeKindArray:

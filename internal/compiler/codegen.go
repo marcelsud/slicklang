@@ -122,6 +122,10 @@ func (p *program) generateGo() (string, error) {
 			}
 		}
 	}
+	if p.usesStdIO {
+		generator.imports["bytes"] = true
+		generator.imports["io"] = true
+	}
 	// Programs that use std.env need os; it is already imported unconditionally
 	// because the shared runtime prints through os.Stdout/Stderr.
 	generator.line("package main")
@@ -174,6 +178,9 @@ func (g *goGenerator) emitRuntime() {
 	g.line(`}`)
 	if g.program.usesUsing {
 		g.emitUsingRuntime()
+	}
+	if g.program.usesStdIO {
+		g.emitStdIORuntime()
 	}
 	g.line("")
 	g.line(`type slickResult[T, E any] struct { ok bool; value T; failure E }`)
@@ -342,6 +349,9 @@ func (g *goGenerator) emitUsingRuntime() {
 func (g *goGenerator) emitDeclarations() error {
 	interfaceNames := sortedKeys(g.program.interfaces)
 	for _, name := range interfaceNames {
+		if !g.program.usesStdIO && strings.HasPrefix(name, "std.io.") {
+			continue
+		}
 		iface := g.program.interfaces[name]
 		g.line("type %s interface {", goInterfaceName(name))
 		methodNames := sortedKeys(iface.methods)
@@ -362,6 +372,9 @@ func (g *goGenerator) emitDeclarations() error {
 	}
 	classNames := sortedKeys(g.program.classes)
 	for _, name := range classNames {
+		if !g.program.usesStdIO && strings.HasPrefix(name, "std.io.") {
+			continue
+		}
 		class := g.program.classes[name]
 		g.line("type %s struct {", goClassName(name))
 		fieldNames := sortedKeys(class.fields)
@@ -372,6 +385,9 @@ func (g *goGenerator) emitDeclarations() error {
 				return err
 			}
 			g.line("%s %s", goFieldName(field.name), g.goType(typ))
+		}
+		if class.nativeResource {
+			g.line("slickResource *slickIOResource")
 		}
 		if class.isError {
 			g.line("slickMessage string")
@@ -413,6 +429,9 @@ func (g *goGenerator) emitFunctions() error {
 	functionNames := sortedKeys(g.program.functions)
 	for _, name := range functionNames {
 		function := g.program.functions[name]
+		if !g.program.usesStdIO && strings.HasPrefix(name, "std.io.") {
+			continue
+		}
 		if function.native != "" {
 			if err := g.emitNativeFunction(function); err != nil {
 				return err
@@ -426,8 +445,17 @@ func (g *goGenerator) emitFunctions() error {
 	classNames := sortedKeys(g.program.classes)
 	for _, className := range classNames {
 		class := g.program.classes[className]
+		if !g.program.usesStdIO && strings.HasPrefix(className, "std.io.") {
+			continue
+		}
 		methodNames := sortedKeys(class.implementations)
 		for _, methodName := range methodNames {
+			if class.implementations[methodName].native != "" {
+				if err := g.emitNativeMethod(class.implementations[methodName], className); err != nil {
+					return err
+				}
+				continue
+			}
 			if err := g.emitFunction(class.implementations[methodName], className); err != nil {
 				return err
 			}
