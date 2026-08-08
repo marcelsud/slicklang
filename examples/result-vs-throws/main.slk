@@ -33,7 +33,9 @@ function read_thrown(Present: bool) -> string throws DiskError {
     if (Present) {
         "contents"
     } else {
-        throw DiskError { Message: "disk unavailable" }
+        throw DiskError {
+            Message: "disk unavailable"
+        }
     }
 }
 
@@ -41,7 +43,8 @@ function read_thrown(Present: bool) -> string throws DiskError {
 // Drop the catch and load_thrown fails to compile unless it declares
 // `throws DiskError` itself (SLK201).
 function load_thrown(Present: bool) -> string {
-    read_thrown(Present) catch (error) {
+    read_thrown(Present)
+    catch (error) {
         DiskError => "recovered from a thrown error"
     }
 }
@@ -52,7 +55,9 @@ function read_result(Present: bool) -> Result<string, DiskError> {
     if (Present) {
         Ok("contents")
     } else {
-        Err(DiskError { Message: "disk unavailable" })
+        Err(DiskError {
+            Message: "disk unavailable"
+        })
     }
 }
 
@@ -69,7 +74,8 @@ function load_result(Present: bool) -> string {
 // catch has nothing to catch: the DiskError arm never runs, and the Err flows
 // out untouched as the value it always was.
 function catch_cannot_see_err(Present: bool) -> Result<string, DiskError> {
-    read_result(Present) catch (error) {
+    read_result(Present)
+    catch (error) {
         DiskError => Ok("this arm never runs")
     }
 }

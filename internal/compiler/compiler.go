@@ -232,10 +232,19 @@ func compile(sources []Source) (*program, []Diagnostic) {
 }
 
 func parseSource(prog *program, source Source) {
+	tokens, diagnostics := scanTokens(source, false)
+	prog.diags = append(prog.diags, diagnostics...)
+	if len(diagnostics) > 0 {
+		return
+	}
+	parseSourceTokens(prog, source, tokens)
+}
+
+func parseSourceTokens(prog *program, source Source, tokens []token) {
 	p := parser{
 		prog:    prog,
 		source:  source,
-		tokens:  lex(source),
+		tokens:  tokens,
 		aliases: make(map[string]aliasDecl),
 	}
 	for !p.atEnd() {
@@ -256,11 +265,24 @@ func parseSource(prog *program, source Source) {
 	}
 }
 
-func lex(source Source) []token {
+func scanTokens(source Source, comments bool) ([]token, []Diagnostic) {
 	var s scanner.Scanner
 	s.Init(strings.NewReader(source.Text))
 	s.Filename = source.Name
 	s.Mode = scanner.GoTokens
+	if comments {
+		s.Mode &^= scanner.SkipComments
+	}
+	var diagnostics []Diagnostic
+	s.Error = func(scanner *scanner.Scanner, message string) {
+		diagnostics = append(diagnostics, Diagnostic{
+			File:    source.Name,
+			Line:    scanner.Position.Line,
+			Column:  scanner.Position.Column,
+			Code:    "SLK001",
+			Message: message,
+		})
+	}
 
 	var tokens []token
 	for kind := s.Scan(); kind != scanner.EOF; kind = s.Scan() {
@@ -290,7 +312,7 @@ func lex(source Source) []token {
 	if len(tokens) > 0 {
 		line = tokens[len(tokens)-1].pos.line
 	}
-	return append(tokens, token{kind: scanner.EOF, pos: position{file: source.Name, line: line, column: 1}})
+	return append(tokens, token{kind: scanner.EOF, pos: position{file: source.Name, line: line, column: 1}}), diagnostics
 }
 
 type parser struct {

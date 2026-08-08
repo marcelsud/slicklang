@@ -7,9 +7,10 @@ function speak(animal: Barker) -> string throws root.models.SomethingError {
 }
 
 function main() -> string {
-    let dog = root.models.Dog { Name: "Ada" }
-
-    speak(dog) catch (error) {
+    let dog = root.models.Dog {
+        Name: "Ada"
+    } speak(dog)
+    catch (error) {
         root.models.SomethingError => ""
     }
 }

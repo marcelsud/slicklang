@@ -94,7 +94,8 @@ func TestDescribeUsageErrorsStayOnStderr(t *testing.T) {
 	want := "describe requires a symbol\n" +
 		"usage: slick <check|run> [path]\n" +
 		"       slick build [path] -o <output>\n" +
-		"       slick describe [--json] [--budget <lines>] <symbol> [path]\n"
+		"       slick describe [--json] [--budget <lines>] <symbol> [path]\n" +
+		"       slick fmt [--check] [path]\n"
 	if stderr.String() != want {
 		t.Fatalf("usage stderr=%q, want %q", stderr.String(), want)
 	}

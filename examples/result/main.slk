@@ -33,9 +33,13 @@ class User {
 // payloads below are checked against User and LookupError respectively.
 function find_user(Found: bool) -> Result<User, LookupError> {
     if (Found) {
-        Ok(User { Name: "Ada" })
+        Ok(User {
+            Name: "Ada"
+        })
     } else {
-        Err(LookupError { Message: "missing user" })
+        Err(LookupError {
+            Message: "missing user"
+        })
     }
 }
 
