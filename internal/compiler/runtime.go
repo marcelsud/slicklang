@@ -299,7 +299,10 @@ func (p *program) evalExpression(expression expressionNode, frame *runtimeFrame)
 				elementType = joined
 			}
 		}
-		typ := typeUnknown + "[]"
+		typ := node.resolved
+		if typ == "" {
+			typ = typeUnknown + "[]"
+		}
 		if elementType != "" {
 			typ = elementType + "[]"
 			for index := range elements {

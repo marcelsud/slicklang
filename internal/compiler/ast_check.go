@@ -223,7 +223,7 @@ func (p *program) checkASTExpressionExpecting(expression expressionNode, scope *
 	case *literalExpression:
 		return expressionInfo{typ: literalType(node.value), effects: make(effectSet)}
 	case *arrayExpression:
-		return p.checkArrayExpression(node, scope)
+		return p.checkArrayExpression(node, scope, expected)
 	case *rangeExpression:
 		return p.checkRangeExpression(node, scope)
 	case *templateExpression:
@@ -282,8 +282,15 @@ func (p *program) checkNameExpression(node *nameExpression, scope *astScope) exp
 	return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 }
 
-func (p *program) checkArrayExpression(node *arrayExpression, scope *astScope) expressionInfo {
+func (p *program) checkArrayExpression(node *arrayExpression, scope *astScope, expected string) expressionInfo {
 	info := expressionInfo{typ: typeUnknown + "[]", effects: make(effectSet)}
+	if len(node.elements) == 0 {
+		if _, isArray := arrayElementType(expected); isArray {
+			info.typ = expected
+			node.resolved = expected
+		}
+		return info
+	}
 	elementType := ""
 	for _, element := range node.elements {
 		elementInfo := p.checkASTExpressionExpecting(element, scope, elementType)

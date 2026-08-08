@@ -1,0 +1,17 @@
+use std.path.Join as JoinPath
+
+function ExtensionOr(Path: string, Fallback: string) -> string {
+    let Extension = std.path.Extension(Path)
+    if (Extension == null) {
+        Fallback
+    } else {
+        Extension
+    }
+}
+
+function main() -> string {
+    let Report = JoinPath(["workspace", "report.txt"])
+    let Name = std.path.Base(Report)
+    let Extension = ExtensionOr(Report, "none")
+    `${Name}:${Extension}`
+}

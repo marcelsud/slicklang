@@ -93,6 +93,7 @@ func (n *literalExpression) expressionPos() position { return n.pos }
 
 type arrayExpression struct {
 	elements []expressionNode
+	resolved string
 	pos      position
 }
 

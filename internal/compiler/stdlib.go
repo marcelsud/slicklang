@@ -3,17 +3,24 @@ package compiler
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
 type nativeFunction string
 
 const (
-	nativeStdEnvGet     nativeFunction = "std.env.Get"
-	nativeStdEnvSet     nativeFunction = "std.env.Set"
-	nativeStdEnvUnset   nativeFunction = "std.env.Unset"
-	nativeStdJsonDecode nativeFunction = "std.json.Decode"
-	nativeStdJsonEncode nativeFunction = "std.json.Encode"
+	nativeStdEnvGet         nativeFunction = "std.env.Get"
+	nativeStdEnvSet         nativeFunction = "std.env.Set"
+	nativeStdEnvUnset       nativeFunction = "std.env.Unset"
+	nativeStdJsonDecode     nativeFunction = "std.json.Decode"
+	nativeStdJsonEncode     nativeFunction = "std.json.Encode"
+	nativeStdPathJoin       nativeFunction = "std.path.Join"
+	nativeStdPathClean      nativeFunction = "std.path.Clean"
+	nativeStdPathBase       nativeFunction = "std.path.Base"
+	nativeStdPathDirectory  nativeFunction = "std.path.Directory"
+	nativeStdPathExtension  nativeFunction = "std.path.Extension"
+	nativeStdPathIsAbsolute nativeFunction = "std.path.IsAbsolute"
 
 	stdEnvFailureName  = "std.env.Failure"
 	stdJsonFailureName = "std.json.Failure"
@@ -89,6 +96,54 @@ var standardLibraryRegistry = struct {
 			params:     []paramDecl{{name: "Value", typ: typeRef{name: "T"}}},
 			result:     typeRef{name: "Result<string,std.json.Failure>"},
 			native:     nativeStdJsonEncode,
+		},
+		{
+			canonical: string(nativeStdPathJoin),
+			namespace: "std.path",
+			name:      "Join",
+			params:    []paramDecl{{name: "Parts", typ: typeRef{name: "string[]"}}},
+			result:    typeRef{name: "string"},
+			native:    nativeStdPathJoin,
+		},
+		{
+			canonical: string(nativeStdPathClean),
+			namespace: "std.path",
+			name:      "Clean",
+			params:    []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
+			result:    typeRef{name: "string"},
+			native:    nativeStdPathClean,
+		},
+		{
+			canonical: string(nativeStdPathBase),
+			namespace: "std.path",
+			name:      "Base",
+			params:    []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
+			result:    typeRef{name: "string"},
+			native:    nativeStdPathBase,
+		},
+		{
+			canonical: string(nativeStdPathDirectory),
+			namespace: "std.path",
+			name:      "Directory",
+			params:    []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
+			result:    typeRef{name: "string"},
+			native:    nativeStdPathDirectory,
+		},
+		{
+			canonical: string(nativeStdPathExtension),
+			namespace: "std.path",
+			name:      "Extension",
+			params:    []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
+			result:    typeRef{name: "string?"},
+			native:    nativeStdPathExtension,
+		},
+		{
+			canonical: string(nativeStdPathIsAbsolute),
+			namespace: "std.path",
+			name:      "IsAbsolute",
+			params:    []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
+			result:    typeRef{name: "bool"},
+			native:    nativeStdPathIsAbsolute,
 		},
 	},
 	classes: []standardClassDecl{
@@ -185,6 +240,28 @@ func (p *program) callNativeFunction(function *functionDecl, frame *runtimeFrame
 			return runtimeValue{}, fmt.Errorf("std.json.Encode requires one type argument")
 		}
 		return p.runtimeJSONEncode(typeArgs[0], frame.locals["Value"]), nil
+	case nativeStdPathJoin:
+		values := frame.locals["Parts"].elements
+		parts := make([]string, len(values))
+		for index, value := range values {
+			parts[index] = value.scalar.(string)
+		}
+		return runtimeValue{typ: resultType, scalar: filepath.Join(parts...)}, nil
+	case nativeStdPathClean:
+		return runtimeValue{typ: resultType, scalar: filepath.Clean(frame.locals["Path"].scalar.(string))}, nil
+	case nativeStdPathBase:
+		return runtimeValue{typ: resultType, scalar: filepath.Base(frame.locals["Path"].scalar.(string))}, nil
+	case nativeStdPathDirectory:
+		return runtimeValue{typ: resultType, scalar: filepath.Dir(frame.locals["Path"].scalar.(string))}, nil
+	case nativeStdPathExtension:
+		extension := filepath.Ext(frame.locals["Path"].scalar.(string))
+		optional := &runtimeOptional{present: extension != ""}
+		if optional.present {
+			optional.value = runtimeValue{typ: "string", scalar: extension}
+		}
+		return runtimeValue{typ: resultType, optional: optional}, nil
+	case nativeStdPathIsAbsolute:
+		return runtimeValue{typ: resultType, scalar: filepath.IsAbs(frame.locals["Path"].scalar.(string))}, nil
 	default:
 		return runtimeValue{}, fmt.Errorf("unknown native Slick function %s", function.native)
 	}
@@ -242,6 +319,20 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 		g.emitNativeEnvMutation(resultType, "Set", arguments[0], fmt.Sprintf("os.Setenv(%s, %s)", arguments[0], arguments[1]))
 	case nativeStdEnvUnset:
 		g.emitNativeEnvMutation(resultType, "Unset", arguments[0], fmt.Sprintf("os.Unsetenv(%s)", arguments[0]))
+	case nativeStdPathJoin:
+		g.line("return filepath.Join(%s...), nil", arguments[0])
+	case nativeStdPathClean:
+		g.line("return filepath.Clean(%s), nil", arguments[0])
+	case nativeStdPathBase:
+		g.line("return filepath.Base(%s), nil", arguments[0])
+	case nativeStdPathDirectory:
+		g.line("return filepath.Dir(%s), nil", arguments[0])
+	case nativeStdPathExtension:
+		g.line("value := filepath.Ext(%s)", arguments[0])
+		g.line("if value == \"\" { return slickNone[string](), nil }")
+		g.line("return slickSome(value), nil")
+	case nativeStdPathIsAbsolute:
+		g.line("return filepath.IsAbs(%s), nil", arguments[0])
 	default:
 		return fmt.Errorf("unknown native Slick function %s", function.native)
 	}
