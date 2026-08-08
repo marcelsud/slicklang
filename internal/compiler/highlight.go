@@ -66,7 +66,23 @@ func Highlight(source string) []HighlightToken {
 		consumed = end
 	}
 	emit(ClassPlain, source[consumed:])
-	return tokens
+	return mergeHighlightedOperators(tokens)
+}
+
+func mergeHighlightedOperators(tokens []HighlightToken) []HighlightToken {
+	merged := tokens[:0]
+	for _, token := range tokens {
+		if len(merged) > 0 && merged[len(merged)-1].Class == ClassPunct && token.Class == ClassPunct {
+			pair := merged[len(merged)-1].Text + token.Text
+			switch pair {
+			case "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "..":
+				merged[len(merged)-1].Text = pair
+				continue
+			}
+		}
+		merged = append(merged, token)
+	}
+	return merged
 }
 
 func classifyToken(kind rune, text string) TokenClass {

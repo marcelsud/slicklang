@@ -776,18 +776,32 @@ func (g *goGenerator) expression(expression expressionNode, scope *goScope) (str
 		if err := g.emitCallExpression(&body, node, scope, typ); err != nil {
 			return "", err
 		}
+	case *unaryExpression:
+		value, err := g.evalExpression(&body, node.value, scope, "unary", typ)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&body, "return %s%s, nil\n", node.op, value)
+
 	case *binaryExpression:
 		left, err := g.evalExpression(&body, node.left, scope, "left", typ)
 		if err != nil {
 			return "", err
+		}
+		if node.op == "&&" {
+			fmt.Fprintf(&body, "if !%s { return false, nil }\n", left)
+		} else if node.op == "||" {
+			fmt.Fprintf(&body, "if %s { return true, nil }\n", left)
 		}
 		right, err := g.evalExpression(&body, node.right, scope, "right", typ)
 		if err != nil {
 			return "", err
 		}
 		switch node.op {
-		case "+":
-			fmt.Fprintf(&body, "return %s + %s, nil\n", left, right)
+		case "+", "-", "*", "<", "<=", ">", ">=":
+			fmt.Fprintf(&body, "return %s %s %s, nil\n", left, node.op, right)
+		case "&&", "||":
+			fmt.Fprintf(&body, "return %s, nil\n", right)
 		default:
 			// Both sides are lifted to their join first, so an optional and a
 			// null literal are compared as the same tagged Go type instead of

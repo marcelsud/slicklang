@@ -69,16 +69,19 @@ type sourcePoint struct {
 }
 
 type formatToken struct {
-	kind  rune
-	text  string
-	pos   position
-	unary bool
+	kind     rune
+	text     string
+	pos      position
+	unary    bool
+	operator bool
 }
 
 type sourceFormatter struct {
 	source           *formatSource
 	tokens           []formatToken
 	breakBefore      map[sourcePoint]struct{}
+	unaryAt          map[sourcePoint]struct{}
+	operatorAt       map[sourcePoint]struct{}
 	out              strings.Builder
 	indent           int
 	braceDepth       int
@@ -98,9 +101,16 @@ func newSourceFormatter(source *formatSource) *sourceFormatter {
 		source:      source,
 		tokens:      mergeFormatTokens(source.tokens),
 		breakBefore: make(map[sourcePoint]struct{}),
+		unaryAt:     make(map[sourcePoint]struct{}),
+		operatorAt:  make(map[sourcePoint]struct{}),
 		lineStart:   true,
 	}
 	formatter.collectBreaks()
+	for index := range formatter.tokens {
+		point := sourcePoint{line: formatter.tokens[index].pos.line, column: formatter.tokens[index].pos.column}
+		_, formatter.tokens[index].unary = formatter.unaryAt[point]
+		_, formatter.tokens[index].operator = formatter.operatorAt[point]
+	}
 	return formatter
 }
 
@@ -115,35 +125,14 @@ func mergeFormatTokens(tokens []token) []formatToken {
 		if index+1 < len(tokens) {
 			pair := text + tokens[index+1].text
 			switch pair {
-			case "->", "=>", "==", "!=", "..":
+			case "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "..":
 				text = pair
 				index++
 			}
 		}
 		merged = append(merged, formatToken{kind: current.kind, text: text, pos: current.pos})
 	}
-	for index := range merged {
-		if merged[index].text != "-" || index+1 >= len(merged) || !isNumber(merged[index+1].kind) {
-			continue
-		}
-		if index == 0 || startsValueAfter(merged[index-1].text) {
-			merged[index].unary = true
-		}
-	}
 	return merged
-}
-
-func isNumber(kind rune) bool {
-	return kind == scanner.Int || kind == scanner.Float
-}
-
-func startsValueAfter(text string) bool {
-	switch text {
-	case "(", "[", "{", ",", ":", "=", "=>", "return", "throw", "in", "using", "+":
-		return true
-	default:
-		return false
-	}
 }
 
 func (f *sourceFormatter) collectBreaks() {
@@ -216,9 +205,13 @@ func (f *sourceFormatter) collectExpression(expression expressionNode) {
 		for _, argument := range node.args {
 			f.collectExpression(argument)
 		}
+	case *unaryExpression:
+		f.unaryAt[sourcePoint{line: node.pos.line, column: node.pos.column}] = struct{}{}
+		f.collectExpression(node.value)
 	case *binaryExpression:
 		f.collectExpression(node.left)
 		f.collectExpression(node.right)
+		f.operatorAt[sourcePoint{line: node.opPos.line, column: node.opPos.column}] = struct{}{}
 	case *ifExpression:
 		f.collectExpression(node.condition)
 		f.collectBlock(node.thenBlock)
@@ -306,9 +299,14 @@ func (f *sourceFormatter) writeCode(token formatToken) {
 			f.newline()
 		}
 		f.writeText("}")
-	case "(", "[", "<":
+	case "(", "[":
 		f.writeToken(token)
 		f.delimiters = append(f.delimiters, token.text)
+	case "<":
+		f.writeToken(token)
+		if !token.operator {
+			f.delimiters = append(f.delimiters, token.text)
+		}
 	case ")":
 		f.popDelimiter("(")
 		f.writeToken(token)
@@ -316,7 +314,9 @@ func (f *sourceFormatter) writeCode(token formatToken) {
 		f.popDelimiter("[")
 		f.writeToken(token)
 	case ">":
-		f.popDelimiter("<")
+		if !token.operator {
+			f.popDelimiter("<")
+		}
 		f.writeToken(token)
 	default:
 		f.writeToken(token)
@@ -350,17 +350,19 @@ func (f *sourceFormatter) needsSpace(current formatToken) bool {
 	}
 	previous := f.previous.text
 	if current.unary {
-		return !startsValueAfter(previous)
+		return !f.previous.unary && previous != "(" && previous != "["
 	}
 	if f.previous.unary {
 		return false
+	}
+	if current.operator || f.previous.operator {
+		return true
 	}
 	switch current.text {
 	case ")", "]", ">", ",", ":", ".", "?":
 		return false
 	case "(":
-		return previous == "if" || previous == "catch" || previous == "match" ||
-			previous == "return" || previous == "throw"
+		return previous != "(" && previous != "[" && previous != "<" && !isSuffixTarget(*f.previous)
 	case "[":
 		return previous != "(" && previous != "[" && previous != "<" && !isSuffixTarget(*f.previous)
 	case "<":
@@ -376,7 +378,7 @@ func (f *sourceFormatter) needsSpace(current formatToken) bool {
 func isSuffixTarget(token formatToken) bool {
 	if token.kind == scanner.Ident {
 		switch token.text {
-		case "return", "throw", "in", "let", "if", "else", "match", "for", "using":
+		case "return", "throw", "in", "let", "if", "else", "catch", "match", "for", "using":
 			return false
 		default:
 			return true
