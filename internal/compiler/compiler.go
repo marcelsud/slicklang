@@ -139,6 +139,12 @@ func CheckPath(path string) ([]Diagnostic, error) {
 	return Check(sources), nil
 }
 
+// LoadSources reads the .slk file at path, or every .slk file under it when
+// path is a directory, in stable name order.
+func LoadSources(path string) ([]Source, error) {
+	return loadSources(path)
+}
+
 func loadSources(path string) ([]Source, error) {
 	info, err := os.Stat(path)
 	if err != nil {
