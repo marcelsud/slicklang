@@ -1,5 +1,5 @@
-// An alias shortens a public absolute name without changing its ownership.
-use root.models.NewUser as NewUser
+// An exact-name import shortens a public absolute name without changing its ownership.
+use root.models.NewUser
 
 function main() -> string {
     let User = NewUser("Ada")
