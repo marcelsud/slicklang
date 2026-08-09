@@ -1,7 +1,16 @@
-// An exact-name import shortens a public absolute name without changing its ownership.
+// Exact-name imports expose only the public surface of each namespace.
+use root.bank.adapters.NewFixedAccountSource
+use root.bank.application.Deposit
+use root.bank.domain.OpenAccount
 use root.models.NewUser
 
-function main() -> string {
+function main() -> string throws root.bank.domain.InvalidAmount {
     let User = NewUser("Ada")
-    User.Describe()
+    let Account = OpenAccount("account-123", "Ada", 1000)
+    let Source = NewFixedAccountSource(Account)
+    let Updated = Deposit(Source, 500)
+    let UserDescription = User.Describe()
+    let Owner = Updated.Owner()
+    let Balance = Updated.Balance()
+    `${UserDescription}; ${Owner}: ${Balance} cents`
 }

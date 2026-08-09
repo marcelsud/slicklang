@@ -1,0 +1,12 @@
+use root.bank.domain.Account
+use root.bank.domain.InvalidAmount
+
+// The application owns the port required by its use case.
+interface AccountSource {
+    function Load() -> Account
+}
+
+function Deposit(source: AccountSource, amount: int) -> Account throws InvalidAmount {
+    let account = source.Load()
+    account.Deposit(amount)
+}
