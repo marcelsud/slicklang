@@ -15,18 +15,20 @@ function FetchPair(LeftURL: string, RightURL: string) -> Result<string, std.http
 }
 
 function main() -> string {
-    let LeftURL = std.env.Get("SLICK_ASYNC_LEFT_URL")
-    let RightURL = std.env.Get("SLICK_ASYNC_RIGHT_URL")
-    if (LeftURL == null) {
-        "set SLICK_ASYNC_LEFT_URL and SLICK_ASYNC_RIGHT_URL"
+    let MaybeLeftURL = std.env.Get("SLICK_ASYNC_LEFT_URL")
+    let LeftURL = if (MaybeLeftURL == null) {
+        return "set SLICK_ASYNC_LEFT_URL and SLICK_ASYNC_RIGHT_URL"
     } else {
-        if (RightURL == null) {
-            "set SLICK_ASYNC_LEFT_URL and SLICK_ASYNC_RIGHT_URL"
-        } else {
-            match FetchPair(LeftURL, RightURL) {
-                Ok(Output) => Output
-                Err(Failure) => `${Failure.Kind}: ${Failure.Message}`
-            }
-        }
+        MaybeLeftURL
+    }
+    let MaybeRightURL = std.env.Get("SLICK_ASYNC_RIGHT_URL")
+    let RightURL = if (MaybeRightURL == null) {
+        return "set SLICK_ASYNC_LEFT_URL and SLICK_ASYNC_RIGHT_URL"
+    } else {
+        MaybeRightURL
+    }
+    match FetchPair(LeftURL, RightURL) {
+        Ok(Output) => Output
+        Err(Failure) => `${Failure.Kind}: ${Failure.Message}`
     }
 }
