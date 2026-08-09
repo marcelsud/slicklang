@@ -1,0 +1,22 @@
+function Run(URL: string) -> Result<string, std.http.Failure> {
+    let Response = std.http.Fetch(std.http.Request {
+        Method: "GET"
+        URL: URL
+    })?
+
+    let Length = std.bytes.Length(Response.Body)
+    Ok(`${Response.Status}:${Length}`)
+}
+
+function main() -> string {
+    let URL = std.env.Get("SLICK_HTTP_EXAMPLE_URL")
+
+    if (URL == null) {
+        "set SLICK_HTTP_EXAMPLE_URL"
+    } else {
+        match Run(URL) {
+            Ok(Output) => Output
+            Err(Failure) => `${Failure.Kind}: ${Failure.Message}`
+        }
+    }
+}

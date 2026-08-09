@@ -154,7 +154,7 @@ Documentation:
 Provides compiler-owned portable standard-library components.
 
 Children:
-  … 8 more entries (re-run with a higher ` + "`--budget`" + `; use ` + "`--budget 15`" + ` for full output)
+  … 9 more entries (re-run with a higher ` + "`--budget`" + `; use ` + "`--budget 16`" + ` for full output)
 `
 	if stdout.String() != want {
 		t.Fatalf("budgeted human output:\n%s\nwant:\n%s", stdout.String(), want)
@@ -172,12 +172,12 @@ func TestDescribeJSONBudgetContract(t *testing.T) {
   "budget": {
     "unit": "lines",
     "limit": 39,
-    "required": 70,
+    "required": 76,
     "truncated": true,
     "omitted": [
       {
         "section": "children",
-        "count": 8
+        "count": 9
       }
     ]
   },
