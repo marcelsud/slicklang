@@ -158,7 +158,15 @@ func (f *sourceFormatter) collectBlock(block *blockNode) {
 		return
 	}
 	for _, statement := range block.statements {
-		f.addBreak(statement.statementPos())
+		compactElseIf := false
+		if expression, ok := statement.(*expressionStatement); ok {
+			if conditional, ok := expression.value.(*ifExpression); ok {
+				compactElseIf = conditional.compact
+			}
+		}
+		if !compactElseIf {
+			f.addBreak(statement.statementPos())
+		}
 		switch node := statement.(type) {
 		case *letStatement:
 			f.collectExpression(node.value)

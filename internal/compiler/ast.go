@@ -192,7 +192,10 @@ type ifExpression struct {
 	condition expressionNode
 	thenBlock *blockNode
 	elseBlock *blockNode
-	pos       position
+	// compact is true only when this node came from source-level "else if".
+	// Execution still uses the ordinary nested-if representation.
+	compact bool
+	pos     position
 }
 
 func (n *ifExpression) expressionPos() position { return n.pos }
@@ -752,26 +755,81 @@ func (p *bodyParser) usingInitializerIsBareName() bool {
 func (p *bodyParser) parseIf(pos position) expressionNode {
 	if !p.accept("(") {
 		p.error(p.current().pos, "expected '(' after if")
-		return nil
+		p.skipMalformedIfBranch()
+		return &invalidExpression{pos: pos}
 	}
 	condition := p.parseExpression()
+	if condition == nil {
+		p.error(p.current().pos, "expected if condition")
+		condition = &invalidExpression{pos: p.current().pos}
+	}
 	if !p.accept(")") {
 		p.error(p.current().pos, "expected ')' after if condition")
 	}
 	if !p.accept("{") {
 		p.error(p.current().pos, "expected block after if condition")
-		return nil
+		p.skipMalformedIfBranch()
+		return &invalidExpression{pos: pos}
 	}
 	thenBlock := p.parseBlock(true, pos)
 	var elseBlock *blockNode
 	if p.accept("else") {
-		if !p.accept("{") {
-			p.error(p.current().pos, "expected block after else")
-		} else {
+		switch {
+		case p.accept("{"):
 			elseBlock = p.parseBlock(true, pos)
+		case p.accept("if"):
+			nestedPos := p.previous().pos
+			nested := p.parseIf(nestedPos)
+			if conditional, ok := nested.(*ifExpression); ok {
+				conditional.compact = true
+			}
+			elseBlock = &blockNode{
+				statements: []statementNode{&expressionStatement{value: nested, pos: nestedPos}},
+				pos:        nestedPos,
+			}
+		default:
+			p.error(p.current().pos, "expected 'if' or block after else")
+			p.skipMalformedIfBranch()
+			return &invalidExpression{pos: pos}
 		}
 	}
 	return &ifExpression{condition: condition, thenBlock: thenBlock, elseBlock: elseBlock, pos: pos}
+}
+
+// skipMalformedIfBranch consumes the malformed branch and any following
+// else-if tail so the enclosing block reports the syntax error only once.
+func (p *bodyParser) skipMalformedIfBranch() {
+	for {
+		for !p.atEnd() && p.current().text != "{" && p.current().text != "}" && p.current().text != "else" {
+			p.index++
+		}
+		if p.accept("{") {
+			p.skipBalancedBlock()
+		}
+		if !p.accept("else") {
+			return
+		}
+		if p.accept("{") {
+			p.skipBalancedBlock()
+			return
+		}
+		if !p.accept("if") {
+			return
+		}
+	}
+}
+
+func (p *bodyParser) skipBalancedBlock() {
+	depth := 1
+	for !p.atEnd() && depth > 0 {
+		switch p.current().text {
+		case "{":
+			depth++
+		case "}":
+			depth--
+		}
+		p.index++
+	}
 }
 
 func (p *bodyParser) parseArray(pos position) expressionNode {
