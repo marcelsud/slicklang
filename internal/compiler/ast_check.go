@@ -501,6 +501,15 @@ func (p *program) checkNameExpression(node *nameExpression, scope *astScope) exp
 			p.requireAccess(node.pos, scope.function.namespace, class.namespace, field.name, "field")
 			return expressionInfo{typ: p.resolveType(class.namespace, class.aliases, field.typ), effects: make(effectSet)}
 		}
+		if union := p.unions[receiver]; union != nil {
+			p.add(node.pos, diagnosticCodeUnionVariant, "%s is union %s; match it to read the payload of one variant", parts[0], displayName(receiver))
+			return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
+		}
+	}
+	if _, shadowed := scope.lookup(parts[0]); !shadowed {
+		if union, variant, named := p.resolveVariant(scope.function.namespace, scope.function.aliases, node.name); named {
+			return p.checkVariantValue(node, union, variant, scope)
+		}
 	}
 	p.add(node.pos, diagnosticCodeUnknownValue, "unknown value %s", node.name)
 	return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
@@ -810,6 +819,11 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 			p.add(node.pos, diagnosticCodeTypeArguments, "%s does not take type arguments", name.name)
 		}
 		return info
+	}
+	if _, shadowed := scope.lookup(parts[0]); !shadowed {
+		if union, variant, named := p.resolveVariant(scope.function.namespace, scope.function.aliases, name.name); named {
+			return p.checkVariantConstruction(node, name, union, variant, scope)
+		}
 	}
 	if className, isError := p.resolveErrorIn(scope.function.namespace, scope.function.aliases, name.name); isError && p.classes[className] != nil {
 		class := p.classes[className]
@@ -1317,16 +1331,21 @@ func (p *program) checkPropagateExpression(node *propagateExpression, scope *ast
 	return expressionInfo{typ: success, effects: info.effects}
 }
 
-// checkMatchExpression types an exhaustive Result match: one arm is selected,
-// Ok and Err must both be reachable, and every reachable arm shares one type.
+// checkMatchExpression types an exhaustive match. A Result scrutinee must
+// reach Ok and Err; a union scrutinee must reach every declared variant. Either
+// way one arm is selected and every reachable arm shares one type. An optional
+// is neither: null is not an implicit variant.
 func (p *program) checkMatchExpression(node *matchExpression, scope *astScope, expected string) expressionInfo {
 	valueInfo := p.checkASTExpression(node.value, scope)
 	info := expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	mergeEffects(info.effects, valueInfo.effects)
+	if union := p.unions[valueInfo.typ]; union != nil {
+		return p.checkUnionMatch(node, union, valueInfo.effects, scope, expected)
+	}
 	success, failure, isResult := resultTypeArgs(valueInfo.typ)
 	if !isResult {
 		if valueInfo.typ != typeUnknown {
-			p.add(node.pos, diagnosticCodeMatchValue, "match requires a Result value, found %s", displayName(valueInfo.typ))
+			p.add(node.pos, diagnosticCodeMatchValue, "match requires a Result or union value, found %s", displayName(valueInfo.typ))
 		}
 		return info
 	}
@@ -1334,6 +1353,10 @@ func (p *program) checkMatchExpression(node *matchExpression, scope *astScope, e
 	armType := ""
 	var paths []pendingPath
 	for _, arm := range node.arms {
+		if arm.pattern == matchPatternVariant {
+			p.add(arm.pos, diagnosticCodeUnionVariant, "%s is a union variant pattern, but the matched value is %s", arm.variant, displayName(valueInfo.typ))
+			continue
+		}
 		if previous, duplicate := handled[arm.pattern]; duplicate {
 			p.add(arm.pos, diagnosticCodeMatchArm, "duplicate %s arm; already handled at %s:%d:%d", arm.pattern, previous.file, previous.line, previous.column)
 			continue
@@ -1641,6 +1664,21 @@ func (p *program) taskSafeType(name string, visiting map[string]bool) bool {
 		}
 		if p.interfaces[name] != nil {
 			return false
+		}
+		if union := p.unions[name]; union != nil {
+			if visiting[name] {
+				return true
+			}
+			visiting[name] = true
+			defer delete(visiting, name)
+			for _, variantName := range union.order {
+				for _, field := range union.variants[variantName].fields {
+					if !p.taskSafeType(p.resolveType(union.namespace, union.aliases, field.typ), visiting) {
+						return false
+					}
+				}
+			}
+			return true
 		}
 		class := p.classes[name]
 		if class == nil || class.nativeResource != "" {

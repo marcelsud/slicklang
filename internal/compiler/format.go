@@ -40,6 +40,7 @@ func parseFormatSource(source Source) (*formatSource, []Diagnostic) {
 	prog := &program{
 		classes:    make(map[string]*classDecl),
 		interfaces: make(map[string]*interfaceDecl),
+		unions:     make(map[string]*unionDecl),
 		functions:  make(map[string]*functionDecl),
 	}
 	parsed := &formatSource{source: source, prog: prog, tokens: tokens}
@@ -183,6 +184,11 @@ func (f *sourceFormatter) collectBreaks() {
 	for _, class := range f.source.prog.classes {
 		for _, field := range class.fields {
 			f.addBreak(field.pos)
+		}
+	}
+	for _, union := range f.source.prog.unions {
+		for _, name := range union.order {
+			f.addBreak(union.variants[name].pos)
 		}
 	}
 	for _, function := range f.source.prog.functions {
@@ -512,7 +518,7 @@ func (f *sourceFormatter) startTopDeclaration(kind string) {
 
 func isTopDeclaration(text string) bool {
 	switch text {
-	case "use", "class", "interface", "function":
+	case "use", "class", "interface", "union", "function":
 		return true
 	default:
 		return false

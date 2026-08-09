@@ -29,6 +29,7 @@ var exampleOutputs = map[string]string{
 	"result-types":       "42; corrupt payload; no such record; [alpha, beta]; cannot divide by zero; 7",
 	"result-vs-throws":   "recovered from a thrown error; disk unavailable; disk unavailable",
 	"std-env":            "missing;Ada;missing",
+	"tagged-union":       "(6 + (3 * 7)) = 27; missing node",
 	"std-fs-directory":   "a.txt:false,b.txt:false,c:true,\u00e9.txt:false; removed=true",
 	"std-io":             "hello:5;closed",
 	"using":              "value;ABC",

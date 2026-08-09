@@ -43,6 +43,13 @@ func (p *program) checkVisibility() {
 			p.checkCallableTypeVisibility(method.namespace, method.aliases, method.params, method.result)
 		}
 	}
+	for _, union := range p.unions {
+		for _, variantName := range union.order {
+			for _, field := range union.variants[variantName].fields {
+				p.checkTypeVisibility(union.namespace, union.aliases, field.typ)
+			}
+		}
+	}
 }
 
 func (p *program) checkCallableTypeVisibility(namespace string, aliases map[string]aliasDecl, params []paramDecl, result typeRef) {
@@ -114,6 +121,10 @@ func (p *program) checkTypeName(pos position, namespace, name string) {
 	}
 	if iface := p.interfaces[name]; iface != nil {
 		p.requireAccess(pos, namespace, iface.namespace, iface.name, "interface")
+		return
+	}
+	if union := p.unions[name]; union != nil {
+		p.requireAccess(pos, namespace, union.namespace, union.name, "union")
 	}
 }
 

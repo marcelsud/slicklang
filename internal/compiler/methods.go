@@ -221,7 +221,7 @@ func (p *program) canonicalTypeName(namespace string, aliases map[string]aliasDe
 		return alias.target
 	}
 	qualified := qualify(namespace, name)
-	if p.classes[qualified] != nil || p.interfaces[qualified] != nil {
+	if p.classes[qualified] != nil || p.interfaces[qualified] != nil || p.unions[qualified] != nil {
 		return qualified
 	}
 	return name
