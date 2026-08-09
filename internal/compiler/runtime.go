@@ -1086,6 +1086,9 @@ func (p *program) evalFor(node *forStatement, frame *runtimeFrame) (runtimeValue
 			return runtimeValue{}, err
 		}
 		values, err := runtimeIterableValues(iterable, index)
+		if err != nil {
+			return runtimeValue{}, runtimeError(node.pos, "%v", err)
+		}
 		if len(node.bindings) == 1 {
 			values = []runtimeValue{packRuntimeValues(values)}
 		} else if len(values) == 1 && len(values[0].elements) == len(node.bindings) {
