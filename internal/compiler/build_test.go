@@ -31,6 +31,7 @@ var exampleOutputs = map[string]string{
 	"std-env":            "missing;Ada;missing",
 	"std-io":             "hello:5;closed",
 	"using":              "value;ABC",
+	"visibility":         "Ada:[private]; Ada: 1500 cents",
 }
 
 func examplePath(project string) string {
