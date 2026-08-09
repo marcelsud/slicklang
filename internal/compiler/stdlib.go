@@ -18,6 +18,12 @@ const (
 	nativeStdBytesLength          nativeFunction = "std.bytes.Length"
 	nativeStdBytesAt              nativeFunction = "std.bytes.At"
 	nativeStdBytesConcat          nativeFunction = "std.bytes.Concat"
+	nativeStdBufferNew            nativeFunction = "std.buffer.New"
+	nativeStdBufferPush           nativeFunction = "std.buffer.Push"
+	nativeStdBufferGet            nativeFunction = "std.buffer.Get"
+	nativeStdBufferSet            nativeFunction = "std.buffer.Set"
+	nativeStdBufferLength         nativeFunction = "std.buffer.Length"
+	nativeStdBufferFreeze         nativeFunction = "std.buffer.Freeze"
 	nativeStdConvertParseInt      nativeFunction = "std.convert.ParseInt"
 	nativeStdConvertParseFloat    nativeFunction = "std.convert.ParseFloat"
 	nativeStdConvertIntToString   nativeFunction = "std.convert.IntToString"
@@ -56,17 +62,28 @@ const (
 	nativeStdIOWriterBytes        nativeFunction = "std.io.BytesWriter.Bytes"
 	nativeStdIOWriterClose        nativeFunction = "std.io.BytesWriter.Close"
 
-	stdBytesUtf8FailureName = "std.bytes.Utf8Failure"
-	stdConvertFailureName   = "std.convert.Failure"
-	stdEnvFailureName       = "std.env.Failure"
-	stdFSFailureName        = "std.fs.Failure"
-	stdJsonFailureName      = "std.json.Failure"
-	stdIOFailureName        = "std.io.Failure"
-	stdIOReaderName         = "std.io.Reader"
-	stdIOWriterName         = "std.io.Writer"
-	stdIOBytesReaderName    = "std.io.bytesReader"
-	stdIOBytesWriterName    = "std.io.BytesWriter"
+	stdBytesUtf8FailureName         = "std.bytes.Utf8Failure"
+	stdCollectionsBoundsFailureName = "std.collections.BoundsFailure"
+	stdConvertFailureName           = "std.convert.Failure"
+	stdEnvFailureName               = "std.env.Failure"
+	stdFSFailureName                = "std.fs.Failure"
+	stdJsonFailureName              = "std.json.Failure"
+	stdIOFailureName                = "std.io.Failure"
+	stdIOReaderName                 = "std.io.Reader"
+	stdIOWriterName                 = "std.io.Writer"
+	stdIOBytesReaderName            = "std.io.bytesReader"
+	stdIOBytesWriterName            = "std.io.BytesWriter"
 )
+
+func isNativeStdBuffer(native nativeFunction) bool {
+	switch native {
+	case nativeStdBufferNew, nativeStdBufferPush, nativeStdBufferGet,
+		nativeStdBufferSet, nativeStdBufferLength, nativeStdBufferFreeze:
+		return true
+	default:
+		return false
+	}
+}
 
 type standardNamespaceDecl struct {
 	canonical     string
@@ -130,6 +147,8 @@ var standardLibraryRegistry = struct {
 	namespaces: []standardNamespaceDecl{
 		{canonical: "std", documentation: "Provides compiler-owned portable standard-library components."},
 		{canonical: "std.bytes", documentation: "Converts and inspects immutable binary byte values."},
+		{canonical: "std.buffer", documentation: "Builds mutable sequences that freeze into immutable array snapshots."},
+		{canonical: "std.collections", documentation: "Defines failures shared by compiler-owned collection operations."},
 		{canonical: "std.convert", documentation: "Converts primitive values with explicit parse failures."},
 		{canonical: "std.env", documentation: "Reads and updates the process environment without exposing values in failures."},
 		{canonical: "std.fs", documentation: "Performs bounded whole-file and directory operations on platform paths."},
@@ -187,6 +206,75 @@ var standardLibraryRegistry = struct {
 			params:        []paramDecl{{name: "Values", typ: typeRef{name: "bytes[]"}}},
 			result:        typeRef{name: "bytes"},
 			native:        nativeStdBytesConcat,
+		},
+		{
+			canonical:     string(nativeStdBufferNew),
+			namespace:     "std.buffer",
+			name:          "New",
+			documentation: "Creates an empty growable buffer for T values.",
+			typeParams:    []string{"T"},
+			result:        typeRef{name: "Buffer<T>"},
+			native:        nativeStdBufferNew,
+		},
+		{
+			canonical:     string(nativeStdBufferPush),
+			namespace:     "std.buffer",
+			name:          "Push",
+			documentation: "Appends Value to Buffer.",
+			typeParams:    []string{"T"},
+			params: []paramDecl{
+				{name: "Buffer", typ: typeRef{name: "Buffer<T>"}},
+				{name: "Value", typ: typeRef{name: "T"}},
+			},
+			result: typeRef{name: "null"},
+			native: nativeStdBufferPush,
+		},
+		{
+			canonical:     string(nativeStdBufferGet),
+			namespace:     "std.buffer",
+			name:          "Get",
+			documentation: "Returns the value at Index, or null when Index is outside Buffer.",
+			typeParams:    []string{"T"},
+			params: []paramDecl{
+				{name: "Buffer", typ: typeRef{name: "Buffer<T>"}},
+				{name: "Index", typ: typeRef{name: "int"}},
+			},
+			result: typeRef{name: "T?"},
+			native: nativeStdBufferGet,
+		},
+		{
+			canonical:     string(nativeStdBufferSet),
+			namespace:     "std.buffer",
+			name:          "Set",
+			documentation: "Replaces the value at Index or returns BoundsFailure without growing Buffer.",
+			typeParams:    []string{"T"},
+			params: []paramDecl{
+				{name: "Buffer", typ: typeRef{name: "Buffer<T>"}},
+				{name: "Index", typ: typeRef{name: "int"}},
+				{name: "Value", typ: typeRef{name: "T"}},
+			},
+			result: typeRef{name: "Result<null," + stdCollectionsBoundsFailureName + ">"},
+			native: nativeStdBufferSet,
+		},
+		{
+			canonical:     string(nativeStdBufferLength),
+			namespace:     "std.buffer",
+			name:          "Length",
+			documentation: "Returns the number of values in Buffer.",
+			typeParams:    []string{"T"},
+			params:        []paramDecl{{name: "Buffer", typ: typeRef{name: "Buffer<T>"}}},
+			result:        typeRef{name: "int"},
+			native:        nativeStdBufferLength,
+		},
+		{
+			canonical:     string(nativeStdBufferFreeze),
+			namespace:     "std.buffer",
+			name:          "Freeze",
+			documentation: "Copies Buffer into an immutable array snapshot.",
+			typeParams:    []string{"T"},
+			params:        []paramDecl{{name: "Buffer", typ: typeRef{name: "Buffer<T>"}}},
+			result:        typeRef{name: "T[]"},
+			native:        nativeStdBufferFreeze,
 		},
 		{
 			canonical:     string(nativeStdConvertParseInt),
@@ -544,6 +632,13 @@ var standardLibraryRegistry = struct {
 		},
 	},
 	classes: []standardClassDecl{
+		{
+			canonical:     stdCollectionsBoundsFailureName,
+			namespace:     "std.collections",
+			name:          "BoundsFailure",
+			documentation: "Reports an invalid half-open collection range or indexed write.",
+			isError:       true,
+		},
 		{
 			canonical:     stdBytesUtf8FailureName,
 			namespace:     "std.bytes",
@@ -908,6 +1003,35 @@ func (p *program) callNativeFunction(function *functionDecl, frame *runtimeFrame
 	}
 	resultType := p.resolveType(function.namespace, function.aliases, function.result)
 	switch function.native {
+	case nativeStdBufferNew:
+		elementType := typeArgs[0]
+		return runtimeValue{
+			typ:    bufferType(elementType),
+			buffer: &runtimeBuffer{elementType: elementType},
+		}, nil
+	case nativeStdBufferPush:
+		buffer := frame.locals["Buffer"].buffer
+		buffer.values = append(buffer.values, frame.locals["Value"])
+		return nullRuntimeValue(), nil
+	case nativeStdBufferGet:
+		buffer := frame.locals["Buffer"].buffer
+		index := frame.locals["Index"].scalar.(int64)
+		return runtimeIndexedValue(buffer.elementType, buffer.values, index), nil
+	case nativeStdBufferSet:
+		buffer := frame.locals["Buffer"].buffer
+		index := frame.locals["Index"].scalar.(int64)
+		if index < 0 || index >= int64(len(buffer.values)) {
+			return runtimeResultValue(resultType, false, runtimeValue{typ: stdCollectionsBoundsFailureName}), nil
+		}
+		buffer.values[index] = frame.locals["Value"]
+		return runtimeResultValue(resultType, true, nullRuntimeValue()), nil
+	case nativeStdBufferLength:
+		buffer := frame.locals["Buffer"].buffer
+		return runtimeValue{typ: "int", scalar: int64(len(buffer.values))}, nil
+	case nativeStdBufferFreeze:
+		buffer := frame.locals["Buffer"].buffer
+		values := append([]runtimeValue(nil), buffer.values...)
+		return runtimeValue{typ: buffer.elementType + "[]", elements: values}, nil
 	case nativeStdBytesFromUtf8:
 		text := frame.locals["Text"].scalar.(string)
 		return runtimeValue{typ: "bytes", scalar: []byte(text)}, nil
@@ -1171,8 +1295,8 @@ func runtimeFSFailure(resultType, operation, path string, err error) runtimeValu
 }
 
 func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
-	if function.native == nativeStdJsonDecode || function.native == nativeStdJsonEncode {
-		// Concrete codecs are emitted per call site type argument.
+	if function.native == nativeStdJsonDecode || function.native == nativeStdJsonEncode || isNativeStdBuffer(function.native) {
+		// Generic operations are emitted per call site type argument.
 		return nil
 	}
 	resultType, err := g.declaredType(function.namespace, function.aliases, function.result)
