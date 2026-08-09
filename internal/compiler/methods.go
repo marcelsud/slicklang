@@ -198,6 +198,12 @@ func (p *program) canonicalTypeName(namespace string, aliases map[string]aliasDe
 		return optionalOf(p.canonicalTypeName(namespace, aliases, parsed.base))
 	case typeKindArray:
 		return p.canonicalTypeName(namespace, aliases, parsed.base) + "[]"
+	case typeKindTuple:
+		elements := make([]string, len(parsed.args))
+		for index, element := range parsed.args {
+			elements[index] = p.canonicalTypeName(namespace, aliases, element)
+		}
+		return "(" + strings.Join(elements, ",") + ")"
 	case typeKindGeneric:
 		canonical := make([]string, len(parsed.args))
 		for index, arg := range parsed.args {

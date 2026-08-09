@@ -5,5 +5,10 @@ function main() -> string {
     let Parts = std.text.Split(Trimmed, ",")
     let Joined = Join(Parts, " | ")
     let Cut = std.text.Cut(Joined, " | ")
-    `${Joined};${Cut}`
+    if (Cut == null) {
+        `${Joined};missing`
+    } else {
+        let (Before, After) = Cut
+        `${Joined};(${Before},${After})`
+    }
 }

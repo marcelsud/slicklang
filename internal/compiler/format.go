@@ -236,6 +236,10 @@ func (f *sourceFormatter) collectExpression(expression expressionNode) {
 		return
 	}
 	switch node := expression.(type) {
+	case *tupleExpression:
+		for _, element := range node.elements {
+			f.collectExpression(element)
+		}
 	case *arrayExpression:
 		for _, element := range node.elements {
 			f.collectExpression(element)

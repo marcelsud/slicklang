@@ -20,17 +20,25 @@ type expressionNode interface {
 	expressionPos() position
 }
 
-// letStatement introduces a local. resolved is the storage type the checker
-// inferred for it, which the interpreter needs in order to promote a value
-// into an optional; it cannot be recovered from the node alone.
+// letStatement introduces one or more locals. resolved is the storage type the
+// checker inferred for the value, which the interpreter needs in order to
+// promote a value into an optional; it cannot be recovered from the node alone.
 type letStatement struct {
-	name     string
+	names    []string
 	value    expressionNode
 	resolved string
 	pos      position
 }
 
 func (n *letStatement) statementPos() position { return n.pos }
+
+type tupleExpression struct {
+	elements []expressionNode
+	resolved string
+	pos      position
+}
+
+func (n *tupleExpression) expressionPos() position { return n.pos }
 
 type asyncLetStatement struct {
 	name string
@@ -405,9 +413,38 @@ func (p *bodyParser) parseStatement() statementNode {
 	}
 	if p.accept("let") {
 		pos := p.previous().pos
-		name, ok := p.expectIdent("binding name")
-		if !ok {
-			return nil
+		var names []string
+		if p.accept("(") {
+			for {
+				name, ok := p.expectIdent("destructuring binding")
+				if !ok {
+					return nil
+				}
+				names = append(names, name.text)
+				if !p.accept(",") {
+					break
+				}
+				if p.current().text == ")" {
+					p.error(p.current().pos, "let destructuring does not allow a trailing comma")
+					p.index++
+					return nil
+				}
+			}
+			if len(names) < 2 {
+				p.error(pos, "let destructuring requires at least two bindings")
+				if p.accept(")") {
+					return nil
+				}
+			} else if !p.accept(")") {
+				p.error(p.current().pos, "expected ')' after destructuring bindings")
+				return nil
+			}
+		} else {
+			name, ok := p.expectIdent("binding name")
+			if !ok {
+				return nil
+			}
+			names = []string{name.text}
 		}
 		if !p.accept("=") {
 			p.error(p.current().pos, "expected '=' after binding name")
@@ -418,7 +455,7 @@ func (p *bodyParser) parseStatement() statementNode {
 			p.error(p.current().pos, "expected binding value")
 			return nil
 		}
-		return &letStatement{name: name.text, value: value, pos: pos}
+		return &letStatement{names: names, value: value, pos: pos}
 	}
 	if p.accept("throw") {
 		pos := p.previous().pos
@@ -700,11 +737,42 @@ func (p *bodyParser) parsePrimary() expressionNode {
 		return p.parseArray(tok.pos)
 	}
 	if p.accept("(") {
-		expression := p.parseExpression()
-		if !p.accept(")") {
-			p.error(tok.pos, "unterminated parenthesized expression")
+		first := p.parseExpression()
+		if first == nil {
+			p.error(tok.pos, "expected expression after '('")
+			if p.accept(")") {
+				return &invalidExpression{pos: tok.pos}
+			}
+			return nil
 		}
-		return expression
+		if !p.accept(",") {
+			if !p.accept(")") {
+				p.error(tok.pos, "unterminated parenthesized expression")
+			}
+			return first
+		}
+		elements := []expressionNode{first}
+		for {
+			if p.current().text == ")" {
+				p.error(p.current().pos, "tuple expression requires at least two elements and does not allow a trailing comma")
+				p.index++
+				return &invalidExpression{pos: tok.pos}
+			}
+			element := p.parseExpression()
+			if element == nil {
+				p.error(p.current().pos, "expected tuple element")
+				return &invalidExpression{pos: tok.pos}
+			}
+			elements = append(elements, element)
+			if !p.accept(",") {
+				break
+			}
+		}
+		if !p.accept(")") {
+			p.error(tok.pos, "unterminated tuple expression")
+			return &invalidExpression{pos: tok.pos}
+		}
+		return &tupleExpression{elements: elements, pos: tok.pos}
 	}
 	switch tok.kind {
 	case scanner.String:
