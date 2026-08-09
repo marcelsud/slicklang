@@ -277,13 +277,6 @@ func performHTTPRequestContext(parent context.Context, request httpRequestData) 
 	}, nil
 }
 
-func runtimeHTTPOptional(value runtimeValue) (runtimeValue, bool) {
-	if value.optional == nil || !value.optional.present {
-		return runtimeValue{}, false
-	}
-	return value.optional.value, true
-}
-
 func runtimeHTTPRequest(value runtimeValue) httpRequestData {
 	request := httpRequestData{
 		method:           value.fields["Method"].scalar.(string),
@@ -291,7 +284,7 @@ func runtimeHTTPRequest(value runtimeValue) httpRequestData {
 		timeoutMillis:    defaultHTTPTimeoutMilliseconds,
 		maxResponseBytes: defaultHTTPMaxResponseBytes,
 	}
-	if headers, present := runtimeHTTPOptional(value.fields["Headers"]); present {
+	if headers, present := runtimePresentValue(value.fields["Headers"]); present {
 		request.headers = make([]httpHeaderData, len(headers.mapping.entries))
 		for index, entry := range headers.mapping.entries {
 			values := make([]string, len(entry.value.elements))
@@ -301,17 +294,17 @@ func runtimeHTTPRequest(value runtimeValue) httpRequestData {
 			request.headers[index] = httpHeaderData{name: entry.key.scalar.(string), values: values}
 		}
 	}
-	if body, present := runtimeHTTPOptional(value.fields["Body"]); present {
+	if body, present := runtimePresentValue(value.fields["Body"]); present {
 		request.bodyPresent = true
 		request.body = body.scalar.([]byte)
 	}
-	if timeout, present := runtimeHTTPOptional(value.fields["TimeoutMilliseconds"]); present {
+	if timeout, present := runtimePresentValue(value.fields["TimeoutMilliseconds"]); present {
 		request.timeoutMillis = timeout.scalar.(int64)
 	}
-	if limit, present := runtimeHTTPOptional(value.fields["MaxResponseBytes"]); present {
+	if limit, present := runtimePresentValue(value.fields["MaxResponseBytes"]); present {
 		request.maxResponseBytes = limit.scalar.(int64)
 	}
-	if redirects, present := runtimeHTTPOptional(value.fields["FollowRedirects"]); present {
+	if redirects, present := runtimePresentValue(value.fields["FollowRedirects"]); present {
 		request.followRedirects = redirects.scalar.(bool)
 	}
 	return request

@@ -179,6 +179,7 @@ var standardLibraryRegistry = struct {
 		{canonical: "std.json", documentation: "Encodes and decodes supported Slick values as JSON."},
 		{canonical: "std.http", documentation: "Performs synchronous fully buffered HTTP requests with typed failures."},
 		{canonical: "std.path", documentation: "Manipulates platform-dependent filesystem path strings without accessing the filesystem."},
+		{canonical: "std.process", documentation: "Runs child programs directly without a shell and describes command-line results."},
 		{canonical: "std.text", documentation: "Provides deterministic Unicode-aware and substring text operations."},
 		{canonical: "std.io", documentation: "Provides bounded resource-safe byte readers, writers, and transfer helpers."},
 		{canonical: "std.utf8", documentation: "Decodes Unicode scalar values from immutable UTF-8 bytes."},
@@ -431,6 +432,20 @@ var standardLibraryRegistry = struct {
 			},
 			result: typeRef{name: "Result<int,std.math.ArithmeticFailure>"},
 			native: nativeStdMathRemainder,
+		},
+		{
+			canonical:     string(nativeStdProcessRun),
+			namespace:     "std.process",
+			name:          "Run",
+			documentation: "Runs Program directly with Arguments, never through a shell, and captures at most MaxOutputBytes of combined output.",
+			params: []paramDecl{
+				{name: "Program", typ: typeRef{name: "string"}},
+				{name: "Arguments", typ: typeRef{name: "string[]"}},
+				{name: "WorkingDirectory", typ: typeRef{name: "string?"}},
+				{name: "MaxOutputBytes", typ: typeRef{name: "int"}},
+			},
+			result: typeRef{name: "Result<std.process.Completed,std.process.Failure>"},
+			native: nativeStdProcessRun,
 		},
 		{
 			canonical:     string(nativeStdEnvGet),
@@ -866,6 +881,40 @@ var standardLibraryRegistry = struct {
 			},
 		},
 		{
+			canonical:     stdProcessStatusName,
+			namespace:     "std.process",
+			name:          "Status",
+			documentation: "Describes the explicit result of a command-line main: output bytes, error bytes, and the process exit code.",
+			fields: []standardFieldDecl{
+				{name: "ExitCode", typ: typeRef{name: "int"}, documentation: "Provides the process exit code, which must be 0 through 255."},
+				{name: "Output", typ: typeRef{name: "bytes"}, documentation: "Provides the exact bytes written to standard output without added formatting."},
+				{name: "ErrorOutput", typ: typeRef{name: "bytes"}, documentation: "Provides the exact bytes written to standard error without added formatting."},
+			},
+		},
+		{
+			canonical:     stdProcessCompletedName,
+			namespace:     "std.process",
+			name:          "Completed",
+			documentation: "Contains the complete captured result of a child process that ran and reported an exit code.",
+			fields: []standardFieldDecl{
+				{name: "ExitCode", typ: typeRef{name: "int"}, documentation: "Provides the exit code the child process reported, which may be nonzero."},
+				{name: "Output", typ: typeRef{name: "bytes"}, documentation: "Provides the immutable bytes the child wrote to standard output."},
+				{name: "ErrorOutput", typ: typeRef{name: "bytes"}, documentation: "Provides the immutable bytes the child wrote to standard error."},
+			},
+		},
+		{
+			canonical:     stdProcessFailureName,
+			namespace:     "std.process",
+			name:          "Failure",
+			documentation: "Describes a child process that never produced an exit code.",
+			isError:       true,
+			fields: []standardFieldDecl{
+				{name: "Operation", typ: typeRef{name: "string"}, documentation: "Names the failing step: Spawn, WorkingDirectory, Wait, Signal, or OutputLimit."},
+				{name: "Program", typ: typeRef{name: "string"}, documentation: "Identifies the program that was asked to run."},
+				{name: "Message", typ: typeRef{name: "string"}, documentation: "Explains the failure without exposing environment values or captured output."},
+			},
+		},
+		{
 			canonical:     stdEnvFailureName,
 			namespace:     "std.env",
 			name:          "Failure",
@@ -1239,6 +1288,9 @@ func (p *program) callNativeFunction(function *functionDecl, frame *runtimeFrame
 	if value, err, ok := p.callNativeStdFS(function, frame); ok {
 		return value, err
 	}
+	if value, err, ok := p.callNativeStdProcess(function, frame); ok {
+		return value, err
+	}
 	resultType := p.resolveType(function.namespace, function.aliases, function.result)
 	switch function.native {
 	case nativeStdBufferNew:
@@ -1581,6 +1633,16 @@ func runtimeEnvMutationResult(resultType, operation, name string, err error) run
 		result: &runtimeResult{payload: failure},
 	}
 }
+
+// runtimePresentValue unwraps an optional runtime value, reporting whether a
+// payload is present.
+func runtimePresentValue(value runtimeValue) (runtimeValue, bool) {
+	if value.optional == nil || !value.optional.present {
+		return runtimeValue{}, false
+	}
+	return value.optional.value, true
+}
+
 func runtimeResultValue(resultType string, ok bool, payload runtimeValue) runtimeValue {
 	return runtimeValue{typ: resultType, result: &runtimeResult{ok: ok, payload: payload}}
 }
@@ -1943,6 +2005,8 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 		} else {
 			g.line("return slickHTTPFetch(%s)", arguments[0])
 		}
+	case nativeStdProcessRun:
+		g.line("return slickProcessRun(%s, %s, %s, %s)", arguments[0], arguments[1], arguments[2], arguments[3])
 	case nativeStdHTTPHeaderValues:
 		g.line("return slickHTTPHeaderValues(%s, %s), nil", arguments[0], arguments[1])
 	case nativeStdHTTPStatusText:

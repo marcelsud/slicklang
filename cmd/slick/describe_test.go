@@ -99,7 +99,7 @@ func TestDescribeUsageErrorsStayOnStderr(t *testing.T) {
 		t.Fatalf("status=%d stdout=%q", status, stdout.String())
 	}
 	want := "describe requires a symbol or diagnostic code\n" +
-		"usage: slick <check|run> [path]\n" +
+		"usage: slick check [path]\n       slick run [path] [arguments...]\n" +
 		"       slick build [path] -o <output>\n" +
 		"       slick describe [--json] [--budget <lines>] <symbol|diagnostic-code> [path]\n" +
 		"       slick fmt [--check] [path]\n"
@@ -154,7 +154,7 @@ Documentation:
 Provides compiler-owned portable standard-library components.
 
 Children:
-  … 14 more entries (re-run with a higher ` + "`--budget`" + `; use ` + "`--budget 21`" + ` for full output)
+  … 15 more entries (re-run with a higher ` + "`--budget`" + `; use ` + "`--budget 22`" + ` for full output)
 `
 	if stdout.String() != want {
 		t.Fatalf("budgeted human output:\n%s\nwant:\n%s", stdout.String(), want)
@@ -172,12 +172,12 @@ func TestDescribeJSONBudgetContract(t *testing.T) {
   "budget": {
     "unit": "lines",
     "limit": 39,
-    "required": 106,
+    "required": 112,
     "truncated": true,
     "omitted": [
       {
         "section": "children",
-        "count": 14
+        "count": 15
       }
     ]
   },

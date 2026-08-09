@@ -1,0 +1,41 @@
+// Command-line tools and child processes.
+// =======================================
+//
+// A main that accepts string[] receives the process arguments without the
+// executable name, and returning std.process.Status writes those exact bytes to
+// stdout and stderr before the process ends with ExitCode.
+//
+// std.process.Run executes a program directly with the argument vector it is
+// given: there is no shell, so metacharacters stay ordinary text. A child that
+// exits nonzero still ran, so it is Ok; only a process that never reported a
+// status is Err. Capture is bounded by MaxOutputBytes across both streams.
+function Fail(Message: string) -> std.process.Status {
+    std.process.Status {
+        ExitCode: 2
+        Output: std.bytes.FromUtf8("")
+        ErrorOutput: std.bytes.FromUtf8(Message)
+    }
+}
+
+function Forward(Program: string, Arguments: string[]) -> std.process.Status {
+    match std.process.Run(Program, Arguments, null, 65536) {
+        Ok(Done) => std.process.Status {
+            ExitCode: Done.ExitCode
+            Output: Done.Output
+            ErrorOutput: Done.ErrorOutput
+        }
+        Err(Failure) => Fail(Failure.Operation + ": " + Failure.Program + ": " + Failure.Message)
+    }
+}
+
+function main(Arguments: string[]) -> std.process.Status {
+    let Program = Arguments.Get(0)
+    if (Program == null) {
+        Fail("usage: std-process <program> [arguments...]")
+    } else {
+        match Arguments.Slice(1, Arguments.Length()) {
+            Ok(Rest) => Forward(Program, Rest)
+            Err(Failure) => Fail("usage: std-process <program> [arguments...]")
+        }
+    }
+}
