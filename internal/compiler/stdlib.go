@@ -36,6 +36,8 @@ const (
 	nativeStdConvertParseFloat    nativeFunction = "std.convert.ParseFloat"
 	nativeStdConvertIntToString   nativeFunction = "std.convert.IntToString"
 	nativeStdConvertFloatToString nativeFunction = "std.convert.FloatToString"
+	nativeStdMathDivide           nativeFunction = "std.math.Divide"
+	nativeStdMathRemainder        nativeFunction = "std.math.Remainder"
 	nativeStdEnvGet               nativeFunction = "std.env.Get"
 	nativeStdEnvSet               nativeFunction = "std.env.Set"
 	nativeStdEnvUnset             nativeFunction = "std.env.Unset"
@@ -74,6 +76,7 @@ const (
 	stdBytesUtf8FailureName         = "std.bytes.Utf8Failure"
 	stdCollectionsBoundsFailureName = "std.collections.BoundsFailure"
 	stdConvertFailureName           = "std.convert.Failure"
+	stdMathArithmeticFailureName    = "std.math.ArithmeticFailure"
 	stdEnvFailureName               = "std.env.Failure"
 	stdFSFailureName                = "std.fs.Failure"
 	stdJsonFailureName              = "std.json.Failure"
@@ -163,6 +166,7 @@ var standardLibraryRegistry = struct {
 		{canonical: "std.buffer", documentation: "Builds mutable sequences that freeze into immutable array snapshots."},
 		{canonical: "std.collections", documentation: "Defines failures shared by compiler-owned collection operations."},
 		{canonical: "std.convert", documentation: "Converts primitive values with explicit parse failures."},
+		{canonical: "std.math", documentation: "Provides checked integer arithmetic that returns typed Result failures."},
 		{canonical: "std.env", documentation: "Reads and updates the process environment without exposing values in failures."},
 		{canonical: "std.fs", documentation: "Performs bounded whole-file and directory operations on platform paths."},
 		{canonical: "std.json", documentation: "Encodes and decodes supported Slick values as JSON."},
@@ -396,6 +400,30 @@ var standardLibraryRegistry = struct {
 			params:        []paramDecl{{name: "Value", typ: typeRef{name: "float"}}},
 			result:        typeRef{name: "string"},
 			native:        nativeStdConvertFloatToString,
+		},
+		{
+			canonical:     string(nativeStdMathDivide),
+			namespace:     "std.math",
+			name:          "Divide",
+			documentation: "Returns Dividend / Divisor truncated toward zero, or ArithmeticFailure for a zero divisor or the non-representable minimum-int / -1 case.",
+			params: []paramDecl{
+				{name: "Dividend", typ: typeRef{name: "int"}},
+				{name: "Divisor", typ: typeRef{name: "int"}},
+			},
+			result: typeRef{name: "Result<int,std.math.ArithmeticFailure>"},
+			native: nativeStdMathDivide,
+		},
+		{
+			canonical:     string(nativeStdMathRemainder),
+			namespace:     "std.math",
+			name:          "Remainder",
+			documentation: "Returns the remainder of Dividend / Divisor with the dividend's sign, or ArithmeticFailure when Divisor is zero.",
+			params: []paramDecl{
+				{name: "Dividend", typ: typeRef{name: "int"}},
+				{name: "Divisor", typ: typeRef{name: "int"}},
+			},
+			result: typeRef{name: "Result<int,std.math.ArithmeticFailure>"},
+			native: nativeStdMathRemainder,
 		},
 		{
 			canonical:     string(nativeStdEnvGet),
@@ -798,6 +826,18 @@ var standardLibraryRegistry = struct {
 			fields: []standardFieldDecl{
 				{name: "Target", typ: typeRef{name: "string"}, documentation: "Names the requested destination type."},
 				{name: "Message", typ: typeRef{name: "string"}, documentation: "Explains why conversion failed without exposing unrelated data."},
+			},
+		},
+		{
+			canonical:     stdMathArithmeticFailureName,
+			namespace:     "std.math",
+			name:          "ArithmeticFailure",
+			documentation: "Describes a failed checked integer division or remainder operation.",
+			isError:       true,
+			fields: []standardFieldDecl{
+				{name: "Operation", typ: typeRef{name: "string"}, documentation: "Names the failing operation: Divide or Remainder."},
+				{name: "Kind", typ: typeRef{name: "string"}, documentation: "Names the failure kind: DivisionByZero or Overflow."},
+				{name: "Message", typ: typeRef{name: "string"}, documentation: "Explains the arithmetic failure."},
 			},
 		},
 		{
@@ -1320,6 +1360,18 @@ func (p *program) callNativeFunction(function *functionDecl, frame *runtimeFrame
 			return runtimeValue{}, fmt.Errorf("std.convert.FloatToString cannot format non-finite float")
 		}
 		return runtimeValue{typ: "string", scalar: strconv.FormatFloat(value, 'g', -1, 64)}, nil
+	case nativeStdMathDivide:
+		return runtimeMathDivide(
+			resultType,
+			frame.locals["Dividend"].scalar.(int64),
+			frame.locals["Divisor"].scalar.(int64),
+		), nil
+	case nativeStdMathRemainder:
+		return runtimeMathRemainder(
+			resultType,
+			frame.locals["Dividend"].scalar.(int64),
+			frame.locals["Divisor"].scalar.(int64),
+		), nil
 	case nativeStdEnvGet:
 		name := frame.locals["Name"].scalar.(string)
 		value, present := os.LookupEnv(name)
@@ -1484,6 +1536,42 @@ func runtimeConvertFailure(resultType, target, message string) runtimeValue {
 		},
 	}
 	return runtimeResultValue(resultType, false, failure)
+}
+
+func runtimeMathArithmeticFailure(resultType, operation, kind, message string) runtimeValue {
+	failure := runtimeValue{
+		typ: stdMathArithmeticFailureName,
+		fields: map[string]runtimeValue{
+			"Operation": {typ: "string", scalar: operation},
+			"Kind":      {typ: "string", scalar: kind},
+			"Message":   {typ: "string", scalar: message},
+		},
+	}
+	return runtimeResultValue(resultType, false, failure)
+}
+
+// runtimeMathDivide implements truncation-toward-zero integer division with
+// explicit checks so host integer division never panics on zero or min/-1.
+func runtimeMathDivide(resultType string, dividend, divisor int64) runtimeValue {
+	if divisor == 0 {
+		return runtimeMathArithmeticFailure(resultType, "Divide", "DivisionByZero", "division by zero")
+	}
+	if dividend == math.MinInt64 && divisor == -1 {
+		return runtimeMathArithmeticFailure(resultType, "Divide", "Overflow", "integer division overflow")
+	}
+	return runtimeResultValue(resultType, true, runtimeValue{typ: "int", scalar: dividend / divisor})
+}
+
+// runtimeMathRemainder implements remainder with the dividend's sign. The
+// representable minimum-int % -1 case returns 0 without host evaluation.
+func runtimeMathRemainder(resultType string, dividend, divisor int64) runtimeValue {
+	if divisor == 0 {
+		return runtimeMathArithmeticFailure(resultType, "Remainder", "DivisionByZero", "division by zero")
+	}
+	if dividend == math.MinInt64 && divisor == -1 {
+		return runtimeResultValue(resultType, true, runtimeValue{typ: "int", scalar: int64(0)})
+	}
+	return runtimeResultValue(resultType, true, runtimeValue{typ: "int", scalar: dividend % divisor})
 }
 
 func parseIntFailureMessage(err error) string {
@@ -1668,6 +1756,43 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 	case nativeStdConvertFloatToString:
 		g.line("if math.IsInf(%s, 0) || math.IsNaN(%s) { return \"\", errors.New(%q) }", arguments[0], arguments[0], "std.convert.FloatToString cannot format non-finite float")
 		g.line("return strconv.FormatFloat(%s, 'g', -1, 64), nil", arguments[0])
+	case nativeStdMathDivide:
+		result := g.goType(resultType)
+		failure := goClassName(stdMathArithmeticFailureName)
+		g.line("if %s == 0 {", arguments[1])
+		g.line("return %s{failure: &%s{%s: %q, %s: %q, %s: %q}}, nil",
+			result, failure,
+			goFieldName("Operation"), "Divide",
+			goFieldName("Kind"), "DivisionByZero",
+			goFieldName("Message"), "division by zero",
+		)
+		g.line("}")
+		g.line("if %s == math.MinInt64 && %s == -1 {", arguments[0], arguments[1])
+		g.line("return %s{failure: &%s{%s: %q, %s: %q, %s: %q}}, nil",
+			result, failure,
+			goFieldName("Operation"), "Divide",
+			goFieldName("Kind"), "Overflow",
+			goFieldName("Message"), "integer division overflow",
+		)
+		g.line("}")
+		g.line("return %s{ok: true, value: %s / %s}, nil", result, arguments[0], arguments[1])
+	case nativeStdMathRemainder:
+		result := g.goType(resultType)
+		failure := goClassName(stdMathArithmeticFailureName)
+		g.line("if %s == 0 {", arguments[1])
+		g.line("return %s{failure: &%s{%s: %q, %s: %q, %s: %q}}, nil",
+			result, failure,
+			goFieldName("Operation"), "Remainder",
+			goFieldName("Kind"), "DivisionByZero",
+			goFieldName("Message"), "division by zero",
+		)
+		g.line("}")
+		// Avoid host remainder of MinInt64 % -1, which can panic on platforms
+		// that implement rem via the same trapping integer-divide instruction.
+		g.line("if %s == math.MinInt64 && %s == -1 {", arguments[0], arguments[1])
+		g.line("return %s{ok: true, value: int64(0)}, nil", result)
+		g.line("}")
+		g.line("return %s{ok: true, value: %s %% %s}, nil", result, arguments[0], arguments[1])
 	case nativeStdEnvGet:
 		base, _ := optionalBase(resultType)
 		g.line("value, present := os.LookupEnv(%s)", arguments[0])
