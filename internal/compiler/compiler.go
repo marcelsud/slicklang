@@ -147,6 +147,7 @@ type program struct {
 	methodImpls            []*functionDecl
 	diags                  []Diagnostic
 	usesStdIO              bool
+	usesStdHTTP            bool
 	usesUsing              bool
 }
 

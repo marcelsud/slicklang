@@ -134,6 +134,7 @@ var standardLibraryRegistry = struct {
 		{canonical: "std.env", documentation: "Reads and updates the process environment without exposing values in failures."},
 		{canonical: "std.fs", documentation: "Performs bounded whole-file and directory operations on platform paths."},
 		{canonical: "std.json", documentation: "Encodes and decodes supported Slick values as JSON."},
+		{canonical: "std.http", documentation: "Performs synchronous fully buffered HTTP requests with typed failures."},
 		{canonical: "std.path", documentation: "Manipulates platform-dependent filesystem path strings without accessing the filesystem."},
 		{canonical: "std.text", documentation: "Provides deterministic Unicode-aware and substring text operations."},
 		{canonical: "std.io", documentation: "Provides bounded resource-safe byte readers, writers, and transfer helpers."},
@@ -320,6 +321,36 @@ var standardLibraryRegistry = struct {
 			params:        []paramDecl{{name: "Value", typ: typeRef{name: "T"}}},
 			result:        typeRef{name: "Result<string,std.json.Failure>"},
 			native:        nativeStdJsonEncode,
+		},
+		{
+			canonical:     string(nativeStdHTTPFetch),
+			namespace:     "std.http",
+			name:          "Fetch",
+			documentation: "Executes Request and returns a fully buffered Response or typed Failure.",
+			params:        []paramDecl{{name: "Request", typ: typeRef{name: stdHTTPRequestName}}},
+			result:        typeRef{name: "Result<" + stdHTTPResponseName + "," + stdHTTPFailureName + ">"},
+			native:        nativeStdHTTPFetch,
+		},
+		{
+			canonical:     string(nativeStdHTTPHeaderValues),
+			namespace:     "std.http",
+			name:          "HeaderValues",
+			documentation: "Returns all values for Name using case-insensitive header lookup.",
+			params: []paramDecl{
+				{name: "Headers", typ: typeRef{name: "Map<string,string[]>"}},
+				{name: "Name", typ: typeRef{name: "string"}},
+			},
+			result: typeRef{name: "string[]"},
+			native: nativeStdHTTPHeaderValues,
+		},
+		{
+			canonical:     string(nativeStdHTTPStatusText),
+			namespace:     "std.http",
+			name:          "StatusText",
+			documentation: "Returns the standard text for Status, or null when Status is unknown.",
+			params:        []paramDecl{{name: "Status", typ: typeRef{name: "int"}}},
+			result:        typeRef{name: "string?"},
+			native:        nativeStdHTTPStatusText,
 		},
 		{
 			canonical:     string(nativeStdPathJoin),
@@ -568,6 +599,46 @@ var standardLibraryRegistry = struct {
 				{name: "Operation", typ: typeRef{name: "string"}, documentation: "Names the JSON operation that failed."},
 				{name: "Path", typ: typeRef{name: "string"}, documentation: "Identifies the structural location of the failure."},
 				{name: "Message", typ: typeRef{name: "string"}, documentation: "Explains the JSON failure without including complete source data."},
+			},
+		},
+		{
+			canonical:     stdHTTPRequestName,
+			namespace:     "std.http",
+			name:          "Request",
+			documentation: "Describes one fully buffered HTTP request.",
+			fields: []standardFieldDecl{
+				{name: "Method", typ: typeRef{name: "string"}, documentation: "Provides the exact HTTP method token."},
+				{name: "URL", typ: typeRef{name: "string"}, documentation: "Provides an absolute HTTP or HTTPS URL."},
+				{name: "Headers", typ: typeRef{name: "Map<string,string[]>?"}, documentation: "Provides optional request headers."},
+				{name: "Body", typ: typeRef{name: "bytes?"}, documentation: "Provides an optional immutable request body."},
+				{name: "TimeoutMilliseconds", typ: typeRef{name: "int?"}, documentation: "Provides a positive whole-request timeout in milliseconds."},
+				{name: "MaxResponseBytes", typ: typeRef{name: "int?"}, documentation: "Provides a positive buffered response limit."},
+				{name: "FollowRedirects", typ: typeRef{name: "bool?"}, documentation: "Controls whether up to ten redirects are followed."},
+			},
+		},
+		{
+			canonical:     stdHTTPResponseName,
+			namespace:     "std.http",
+			name:          "Response",
+			documentation: "Contains a complete buffered HTTP response.",
+			fields: []standardFieldDecl{
+				{name: "Status", typ: typeRef{name: "int"}, documentation: "Provides the HTTP status code."},
+				{name: "URL", typ: typeRef{name: "string"}, documentation: "Provides the effective final URL."},
+				{name: "Headers", typ: typeRef{name: "Map<string,string[]>"}, documentation: "Provides deterministic canonical response headers."},
+				{name: "Body", typ: typeRef{name: "bytes"}, documentation: "Provides the immutable complete response body."},
+			},
+		},
+		{
+			canonical:     stdHTTPFailureName,
+			namespace:     "std.http",
+			name:          "Failure",
+			documentation: "Describes a sanitized HTTP request failure.",
+			isError:       true,
+			fields: []standardFieldDecl{
+				{name: "Kind", typ: typeRef{name: "string"}, documentation: "Provides the stable failure classification."},
+				{name: "URL", typ: typeRef{name: "string"}, documentation: "Provides the sanitized URL without userinfo, query, or fragment."},
+				{name: "Status", typ: typeRef{name: "int?"}, documentation: "Provides the response status when one was received."},
+				{name: "Message", typ: typeRef{name: "string"}, documentation: "Explains the failure without exposing request or response secrets."},
 			},
 		},
 		{
@@ -830,6 +901,9 @@ func isAbsoluteCanonicalName(name string) bool {
 
 func (p *program) callNativeFunction(function *functionDecl, frame *runtimeFrame, typeArgs []string) (runtimeValue, error) {
 	if value, err, ok := p.callNativeStdIO(function, frame); ok {
+		return value, err
+	}
+	if value, err, ok := p.callNativeStdHTTP(function, frame); ok {
 		return value, err
 	}
 	resultType := p.resolveType(function.namespace, function.aliases, function.result)
@@ -1240,6 +1314,12 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 		g.line("return slickIOReadAll(%s, %s)", arguments[0], arguments[1])
 	case nativeStdIOCopy:
 		g.line("return slickIOCopy(%s, %s, %s)", arguments[0], arguments[1], arguments[2])
+	case nativeStdHTTPFetch:
+		g.line("return slickHTTPFetch(%s)", arguments[0])
+	case nativeStdHTTPHeaderValues:
+		g.line("return slickHTTPHeaderValues(%s, %s), nil", arguments[0], arguments[1])
+	case nativeStdHTTPStatusText:
+		g.line("return slickHTTPStatusText(%s), nil", arguments[0])
 	default:
 		return fmt.Errorf("unknown native Slick function %s", function.native)
 	}

@@ -425,6 +425,9 @@ func (p *program) checkObjectExpression(node *objectExpression, scope *astScope)
 	if strings.HasPrefix(canonical, "std.io.") {
 		p.usesStdIO = true
 	}
+	if strings.HasPrefix(canonical, "std.http.") {
+		p.usesStdHTTP = true
+	}
 	class := p.classes[canonical]
 	info := expressionInfo{typ: canonical, effects: make(effectSet)}
 	if class == nil {
@@ -584,6 +587,9 @@ func (p *program) checkCallExpression(node *callExpression, scope *astScope) exp
 	}
 	if target.namespace == "std.io" {
 		p.usesStdIO = true
+	}
+	if target.namespace == "std.http" {
+		p.usesStdHTTP = true
 	}
 
 	info := expressionInfo{

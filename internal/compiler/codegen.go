@@ -126,6 +126,11 @@ func (p *program) generateGo() (string, error) {
 		generator.imports["bytes"] = true
 		generator.imports["io"] = true
 	}
+	if p.usesStdHTTP {
+		for _, name := range []string{"bytes", "context", "io", "net/http", "net/url", "sort", "time"} {
+			generator.imports[name] = true
+		}
+	}
 	// Programs that use std.env need os; it is already imported unconditionally
 	// because the shared runtime prints through os.Stdout/Stderr.
 	generator.line("package main")
@@ -181,6 +186,9 @@ func (g *goGenerator) emitRuntime() {
 	}
 	if g.program.usesStdIO {
 		g.emitStdIORuntime()
+	}
+	if g.program.usesStdHTTP {
+		g.emitHTTPRuntimeSupport()
 	}
 	g.line("")
 	g.line(`type slickResult[T, E any] struct { ok bool; value T; failure E }`)
@@ -375,6 +383,9 @@ func (g *goGenerator) emitDeclarations() error {
 		if !g.program.usesStdIO && strings.HasPrefix(name, "std.io.") {
 			continue
 		}
+		if !g.program.usesStdHTTP && strings.HasPrefix(name, "std.http.") {
+			continue
+		}
 		class := g.program.classes[name]
 		g.line("type %s struct {", goClassName(name))
 		fieldNames := sortedKeys(class.fields)
@@ -432,6 +443,9 @@ func (g *goGenerator) emitFunctions() error {
 		if !g.program.usesStdIO && strings.HasPrefix(name, "std.io.") {
 			continue
 		}
+		if !g.program.usesStdHTTP && strings.HasPrefix(name, "std.http.") {
+			continue
+		}
 		if function.native != "" {
 			if err := g.emitNativeFunction(function); err != nil {
 				return err
@@ -446,6 +460,9 @@ func (g *goGenerator) emitFunctions() error {
 	for _, className := range classNames {
 		class := g.program.classes[className]
 		if !g.program.usesStdIO && strings.HasPrefix(className, "std.io.") {
+			continue
+		}
+		if !g.program.usesStdHTTP && strings.HasPrefix(className, "std.http.") {
 			continue
 		}
 		methodNames := sortedKeys(class.implementations)
