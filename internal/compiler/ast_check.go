@@ -1465,6 +1465,10 @@ func dropAssignedNarrowings(node any, narrowed map[string]string) {
 		for _, element := range value.elements {
 			dropAssignedNarrowings(element, narrowed)
 		}
+	case *tupleExpression:
+		for _, element := range value.elements {
+			dropAssignedNarrowings(element, narrowed)
+		}
 	case *rangeExpression:
 		dropAssignedNarrowings(value.start, narrowed)
 		dropAssignedNarrowings(value.end, narrowed)
