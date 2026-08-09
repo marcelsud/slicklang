@@ -111,6 +111,7 @@ func (p *program) generateGo() (string, error) {
 		"reflect":       true,
 		"strconv":       true,
 		"strings":       true,
+		"unicode":       true,
 		"unicode/utf8":  true,
 	}}
 	// Collect JSON codecs first so import decisions are stable before emission.

@@ -1,0 +1,29 @@
+use std.bytes.Slice
+use std.utf8.DecodeAt
+
+function Decode(Value: bytes, Index: int) -> string {
+    match DecodeAt(Value, Index) {
+        Ok(Rune) => `${Rune.Value}:${Rune.Width}`
+        Err(Failure) => Failure.Message
+    }
+}
+
+function Text(Value: Result<bytes, std.bytes.BoundsFailure>) -> string {
+    match Value {
+        Ok(Bytes) => match std.bytes.ToUtf8(Bytes) {
+            Ok(Decoded) => Decoded
+            Err(Failure) => Failure.Message
+        }
+        Err(Failure) => Failure.Message
+    }
+}
+
+function main() -> string {
+    let Source = std.bytes.FromUtf8("let café = 42")
+    let Identifier = Text(Slice(Source, 4, 9))
+    let FirstRune = Decode(Source, 4)
+    let Letter = std.unicode.IsLetter(233)
+    let Digit = std.unicode.IsDigit(52)
+    let Quoted = std.text.Quote(Identifier)
+    `${Identifier};${FirstRune};${Letter};${Digit};${Quoted}`
+}

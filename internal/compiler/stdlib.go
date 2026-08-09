@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -24,6 +25,13 @@ const (
 	nativeStdBufferSet            nativeFunction = "std.buffer.Set"
 	nativeStdBufferLength         nativeFunction = "std.buffer.Length"
 	nativeStdBufferFreeze         nativeFunction = "std.buffer.Freeze"
+	nativeStdBytesSlice           nativeFunction = "std.bytes.Slice"
+	nativeStdBytesFromValues      nativeFunction = "std.bytes.FromValues"
+	nativeStdUTF8DecodeAt         nativeFunction = "std.utf8.DecodeAt"
+	nativeStdUnicodeIsLetter      nativeFunction = "std.unicode.IsLetter"
+	nativeStdUnicodeIsDigit       nativeFunction = "std.unicode.IsDigit"
+	nativeStdUnicodeIsWhitespace  nativeFunction = "std.unicode.IsWhitespace"
+	nativeStdUnicodeIsUpper       nativeFunction = "std.unicode.IsUpper"
 	nativeStdConvertParseInt      nativeFunction = "std.convert.ParseInt"
 	nativeStdConvertParseFloat    nativeFunction = "std.convert.ParseFloat"
 	nativeStdConvertIntToString   nativeFunction = "std.convert.IntToString"
@@ -52,6 +60,7 @@ const (
 	nativeStdTextJoin             nativeFunction = "std.text.Join"
 	nativeStdTextReplaceAll       nativeFunction = "std.text.ReplaceAll"
 	nativeStdTextCut              nativeFunction = "std.text.Cut"
+	nativeStdTextQuote            nativeFunction = "std.text.Quote"
 	nativeStdIOReaderFromBytes    nativeFunction = "std.io.ReaderFromBytes"
 	nativeStdIOWriterToBytes      nativeFunction = "std.io.WriterToBytes"
 	nativeStdIOReadAll            nativeFunction = "std.io.ReadAll"
@@ -73,6 +82,10 @@ const (
 	stdIOWriterName                 = "std.io.Writer"
 	stdIOBytesReaderName            = "std.io.bytesReader"
 	stdIOBytesWriterName            = "std.io.BytesWriter"
+	stdBytesBoundsFailureName       = "std.bytes.BoundsFailure"
+	stdBytesValueFailureName        = "std.bytes.ValueFailure"
+	stdUTF8DecodedRuneName          = "std.utf8.DecodedRune"
+	stdUTF8FailureName              = "std.utf8.Failure"
 )
 
 func isNativeStdBuffer(native nativeFunction) bool {
@@ -157,6 +170,8 @@ var standardLibraryRegistry = struct {
 		{canonical: "std.path", documentation: "Manipulates platform-dependent filesystem path strings without accessing the filesystem."},
 		{canonical: "std.text", documentation: "Provides deterministic Unicode-aware and substring text operations."},
 		{canonical: "std.io", documentation: "Provides bounded resource-safe byte readers, writers, and transfer helpers."},
+		{canonical: "std.utf8", documentation: "Decodes Unicode scalar values from immutable UTF-8 bytes."},
+		{canonical: "std.unicode", documentation: "Classifies Unicode scalar values using the toolchain's pinned tables."},
 	},
 	functions: []standardFunctionDecl{
 		{
@@ -275,6 +290,76 @@ var standardLibraryRegistry = struct {
 			params:        []paramDecl{{name: "Buffer", typ: typeRef{name: "Buffer<T>"}}},
 			result:        typeRef{name: "T[]"},
 			native:        nativeStdBufferFreeze,
+		},
+		{
+			canonical:     string(nativeStdBytesSlice),
+			namespace:     "std.bytes",
+			name:          "Slice",
+			documentation: "Copies the half-open byte range from Start through End or returns BoundsFailure.",
+			params: []paramDecl{
+				{name: "Value", typ: typeRef{name: "bytes"}},
+				{name: "Start", typ: typeRef{name: "int"}},
+				{name: "End", typ: typeRef{name: "int"}},
+			},
+			result: typeRef{name: "Result<bytes," + stdBytesBoundsFailureName + ">"},
+			native: nativeStdBytesSlice,
+		},
+		{
+			canonical:     string(nativeStdBytesFromValues),
+			namespace:     "std.bytes",
+			name:          "FromValues",
+			documentation: "Constructs immutable bytes from integer values or reports the first value outside 0 through 255.",
+			params:        []paramDecl{{name: "Values", typ: typeRef{name: "int[]"}}},
+			result:        typeRef{name: "Result<bytes," + stdBytesValueFailureName + ">"},
+			native:        nativeStdBytesFromValues,
+		},
+		{
+			canonical:     string(nativeStdUTF8DecodeAt),
+			namespace:     "std.utf8",
+			name:          "DecodeAt",
+			documentation: "Decodes the Unicode scalar value beginning at byte Index or returns Failure.",
+			params: []paramDecl{
+				{name: "Value", typ: typeRef{name: "bytes"}},
+				{name: "Index", typ: typeRef{name: "int"}},
+			},
+			result: typeRef{name: "Result<" + stdUTF8DecodedRuneName + "," + stdUTF8FailureName + ">"},
+			native: nativeStdUTF8DecodeAt,
+		},
+		{
+			canonical:     string(nativeStdUnicodeIsLetter),
+			namespace:     "std.unicode",
+			name:          "IsLetter",
+			documentation: "Reports whether Value is a Unicode scalar classified as a letter.",
+			params:        []paramDecl{{name: "Value", typ: typeRef{name: "int"}}},
+			result:        typeRef{name: "bool"},
+			native:        nativeStdUnicodeIsLetter,
+		},
+		{
+			canonical:     string(nativeStdUnicodeIsDigit),
+			namespace:     "std.unicode",
+			name:          "IsDigit",
+			documentation: "Reports whether Value is a Unicode decimal digit.",
+			params:        []paramDecl{{name: "Value", typ: typeRef{name: "int"}}},
+			result:        typeRef{name: "bool"},
+			native:        nativeStdUnicodeIsDigit,
+		},
+		{
+			canonical:     string(nativeStdUnicodeIsWhitespace),
+			namespace:     "std.unicode",
+			name:          "IsWhitespace",
+			documentation: "Reports whether Value is a Unicode white-space scalar.",
+			params:        []paramDecl{{name: "Value", typ: typeRef{name: "int"}}},
+			result:        typeRef{name: "bool"},
+			native:        nativeStdUnicodeIsWhitespace,
+		},
+		{
+			canonical:     string(nativeStdUnicodeIsUpper),
+			namespace:     "std.unicode",
+			name:          "IsUpper",
+			documentation: "Reports whether Value is an uppercase Unicode scalar.",
+			params:        []paramDecl{{name: "Value", typ: typeRef{name: "int"}}},
+			result:        typeRef{name: "bool"},
+			native:        nativeStdUnicodeIsUpper,
 		},
 		{
 			canonical:     string(nativeStdConvertParseInt),
@@ -589,6 +674,15 @@ var standardLibraryRegistry = struct {
 			native: nativeStdTextCut,
 		},
 		{
+			canonical:     string(nativeStdTextQuote),
+			namespace:     "std.text",
+			name:          "Quote",
+			documentation: "Returns Text as a deterministic double-quoted Slick string literal.",
+			params:        []paramDecl{{name: "Text", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "string"},
+			native:        nativeStdTextQuote,
+		},
+		{
 			canonical:     string(nativeStdIOReaderFromBytes),
 			namespace:     "std.io",
 			name:          "ReaderFromBytes",
@@ -638,6 +732,52 @@ var standardLibraryRegistry = struct {
 			name:          "BoundsFailure",
 			documentation: "Reports an invalid half-open collection range or indexed write.",
 			isError:       true,
+		},
+		{
+			canonical:     stdBytesBoundsFailureName,
+			namespace:     "std.bytes",
+			name:          "BoundsFailure",
+			documentation: "Describes invalid bounds for a half-open immutable byte slice.",
+			isError:       true,
+			fields: []standardFieldDecl{
+				{name: "Start", typ: typeRef{name: "int"}, documentation: "Provides the requested inclusive start byte offset."},
+				{name: "End", typ: typeRef{name: "int"}, documentation: "Provides the requested exclusive end byte offset."},
+				{name: "Length", typ: typeRef{name: "int"}, documentation: "Provides the source byte length."},
+				{name: "Message", typ: typeRef{name: "string"}, documentation: "Explains why the requested bounds are invalid."},
+			},
+		},
+		{
+			canonical:     stdBytesValueFailureName,
+			namespace:     "std.bytes",
+			name:          "ValueFailure",
+			documentation: "Describes the first integer that cannot represent a byte.",
+			isError:       true,
+			fields: []standardFieldDecl{
+				{name: "Index", typ: typeRef{name: "int"}, documentation: "Provides the index of the first invalid value."},
+				{name: "Value", typ: typeRef{name: "int"}, documentation: "Provides the invalid integer value."},
+				{name: "Message", typ: typeRef{name: "string"}, documentation: "Explains the valid byte value range."},
+			},
+		},
+		{
+			canonical:     stdUTF8DecodedRuneName,
+			namespace:     "std.utf8",
+			name:          "DecodedRune",
+			documentation: "Contains one decoded Unicode scalar value and its UTF-8 byte width.",
+			fields: []standardFieldDecl{
+				{name: "Value", typ: typeRef{name: "int"}, documentation: "Provides the Unicode scalar value."},
+				{name: "Width", typ: typeRef{name: "int"}, documentation: "Provides the scalar's UTF-8 width in bytes."},
+			},
+		},
+		{
+			canonical:     stdUTF8FailureName,
+			namespace:     "std.utf8",
+			name:          "Failure",
+			documentation: "Describes an invalid byte offset or UTF-8 encoding.",
+			isError:       true,
+			fields: []standardFieldDecl{
+				{name: "Index", typ: typeRef{name: "int"}, documentation: "Provides the requested byte offset."},
+				{name: "Message", typ: typeRef{name: "string"}, documentation: "Explains why decoding failed."},
+			},
 		},
 		{
 			canonical:     stdBytesUtf8FailureName,
@@ -1074,6 +1214,90 @@ func (p *program) callNativeFunction(function *functionDecl, frame *runtimeFrame
 			offset += copy(joined[offset:], value.scalar.([]byte))
 		}
 		return runtimeValue{typ: "bytes", scalar: joined}, nil
+	case nativeStdBytesSlice:
+		value := frame.locals["Value"].scalar.([]byte)
+		start := frame.locals["Start"].scalar.(int64)
+		end := frame.locals["End"].scalar.(int64)
+		if start < 0 || end < start || end > int64(len(value)) {
+			failure := runtimeValue{
+				typ: stdBytesBoundsFailureName,
+				fields: map[string]runtimeValue{
+					"Start":   {typ: "int", scalar: start},
+					"End":     {typ: "int", scalar: end},
+					"Length":  {typ: "int", scalar: int64(len(value))},
+					"Message": {typ: "string", scalar: "slice bounds out of range"},
+				},
+			}
+			return runtimeResultValue(resultType, false, failure), nil
+		}
+		sliced := make([]byte, end-start)
+		copy(sliced, value[start:end])
+		return runtimeResultValue(resultType, true, runtimeValue{typ: "bytes", scalar: sliced}), nil
+	case nativeStdBytesFromValues:
+		values := frame.locals["Values"].elements
+		for index, value := range values {
+			number := value.scalar.(int64)
+			if number < 0 || number > 255 {
+				failure := runtimeValue{
+					typ: stdBytesValueFailureName,
+					fields: map[string]runtimeValue{
+						"Index":   {typ: "int", scalar: int64(index)},
+						"Value":   {typ: "int", scalar: number},
+						"Message": {typ: "string", scalar: "byte value must be between 0 and 255"},
+					},
+				}
+				return runtimeResultValue(resultType, false, failure), nil
+			}
+		}
+		bytes := make([]byte, len(values))
+		for index, value := range values {
+			bytes[index] = byte(value.scalar.(int64))
+		}
+		return runtimeResultValue(resultType, true, runtimeValue{typ: "bytes", scalar: bytes}), nil
+	case nativeStdUTF8DecodeAt:
+		value := frame.locals["Value"].scalar.([]byte)
+		index := frame.locals["Index"].scalar.(int64)
+		if index < 0 || index >= int64(len(value)) {
+			failure := runtimeValue{
+				typ: stdUTF8FailureName,
+				fields: map[string]runtimeValue{
+					"Index":   {typ: "int", scalar: index},
+					"Message": {typ: "string", scalar: "byte index out of range"},
+				},
+			}
+			return runtimeResultValue(resultType, false, failure), nil
+		}
+		decoded, width := utf8.DecodeRune(value[index:])
+		if decoded == utf8.RuneError && width == 1 {
+			failure := runtimeValue{
+				typ: stdUTF8FailureName,
+				fields: map[string]runtimeValue{
+					"Index":   {typ: "int", scalar: index},
+					"Message": {typ: "string", scalar: "invalid UTF-8 encoding"},
+				},
+			}
+			return runtimeResultValue(resultType, false, failure), nil
+		}
+		payload := runtimeValue{
+			typ: stdUTF8DecodedRuneName,
+			fields: map[string]runtimeValue{
+				"Value": {typ: "int", scalar: int64(decoded)},
+				"Width": {typ: "int", scalar: int64(width)},
+			},
+		}
+		return runtimeResultValue(resultType, true, payload), nil
+	case nativeStdUnicodeIsLetter:
+		value := frame.locals["Value"].scalar.(int64)
+		return runtimeValue{typ: "bool", scalar: isUnicodeScalar(value) && unicode.IsLetter(rune(value))}, nil
+	case nativeStdUnicodeIsDigit:
+		value := frame.locals["Value"].scalar.(int64)
+		return runtimeValue{typ: "bool", scalar: isUnicodeScalar(value) && unicode.IsDigit(rune(value))}, nil
+	case nativeStdUnicodeIsWhitespace:
+		value := frame.locals["Value"].scalar.(int64)
+		return runtimeValue{typ: "bool", scalar: isUnicodeScalar(value) && unicode.IsSpace(rune(value))}, nil
+	case nativeStdUnicodeIsUpper:
+		value := frame.locals["Value"].scalar.(int64)
+		return runtimeValue{typ: "bool", scalar: isUnicodeScalar(value) && unicode.IsUpper(rune(value))}, nil
 	case nativeStdConvertParseInt:
 		text := frame.locals["Text"].scalar.(string)
 		value, err := strconv.ParseInt(text, 10, 64)
@@ -1216,9 +1440,15 @@ func (p *program) callNativeFunction(function *functionDecl, frame *runtimeFrame
 			}
 		}
 		return runtimeValue{typ: resultType, optional: optional}, nil
+	case nativeStdTextQuote:
+		return runtimeValue{typ: "string", scalar: strconv.Quote(frame.locals["Text"].scalar.(string))}, nil
 	default:
 		return runtimeValue{}, fmt.Errorf("unknown native Slick function %s", function.native)
 	}
+}
+
+func isUnicodeScalar(value int64) bool {
+	return value >= 0 && value <= utf8.MaxRune && (value < 0xd800 || value > 0xdfff)
 }
 
 func runtimeEnvMutationResult(resultType, operation, name string, err error) runtimeValue {
@@ -1348,6 +1578,71 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 		g.line("%s := 0", offset)
 		g.line("for _, %s := range %s { %s += copy(%s[%s:], %s) }", value, arguments[0], offset, result, offset, value)
 		g.line("return %s, nil", result)
+	case nativeStdBytesSlice:
+		result := g.goType(resultType)
+		failure := goClassName(stdBytesBoundsFailureName)
+		g.line("if %s < 0 || %s < %s || %s > int64(len(%s)) {", arguments[1], arguments[2], arguments[1], arguments[2], arguments[0])
+		g.line("return %s{failure: &%s{%s: %s, %s: %s, %s: int64(len(%s)), %s: %q}}, nil",
+			result, failure,
+			goFieldName("Start"), arguments[1],
+			goFieldName("End"), arguments[2],
+			goFieldName("Length"), arguments[0],
+			goFieldName("Message"), "slice bounds out of range",
+		)
+		g.line("}")
+		g.line("value := make(slickBytes, %s-%s)", arguments[2], arguments[1])
+		g.line("copy(value, %s[%s:%s])", arguments[0], arguments[1], arguments[2])
+		g.line("return %s{ok: true, value: value}, nil", result)
+	case nativeStdBytesFromValues:
+		result := g.goType(resultType)
+		failure := goClassName(stdBytesValueFailureName)
+		g.line("for index, value := range %s {", arguments[0])
+		g.line("if value < 0 || value > 255 {")
+		g.line("return %s{failure: &%s{%s: int64(index), %s: value, %s: %q}}, nil",
+			result, failure,
+			goFieldName("Index"),
+			goFieldName("Value"),
+			goFieldName("Message"), "byte value must be between 0 and 255",
+		)
+		g.line("}")
+		g.line("}")
+		g.line("value := make(slickBytes, len(%s))", arguments[0])
+		g.line("for index, number := range %s { value[index] = byte(number) }", arguments[0])
+		g.line("return %s{ok: true, value: value}, nil", result)
+	case nativeStdUTF8DecodeAt:
+		result := g.goType(resultType)
+		failure := goClassName(stdUTF8FailureName)
+		decodedRune := goClassName(stdUTF8DecodedRuneName)
+		g.line("if %s < 0 || %s >= int64(len(%s)) {", arguments[1], arguments[1], arguments[0])
+		g.line("return %s{failure: &%s{%s: %s, %s: %q}}, nil",
+			result, failure,
+			goFieldName("Index"), arguments[1],
+			goFieldName("Message"), "byte index out of range",
+		)
+		g.line("}")
+		g.line("value, width := utf8.DecodeRune(%s[%s:])", arguments[0], arguments[1])
+		g.line("if value == utf8.RuneError && width == 1 {")
+		g.line("return %s{failure: &%s{%s: %s, %s: %q}}, nil",
+			result, failure,
+			goFieldName("Index"), arguments[1],
+			goFieldName("Message"), "invalid UTF-8 encoding",
+		)
+		g.line("}")
+		g.line("return %s{ok: true, value: %s{%s: int64(value), %s: int64(width)}}, nil",
+			result, decodedRune, goFieldName("Value"), goFieldName("Width"),
+		)
+	case nativeStdUnicodeIsLetter:
+		g.line("return %s >= 0 && %s <= utf8.MaxRune && (%s < 0xd800 || %s > 0xdfff) && unicode.IsLetter(rune(%s)), nil",
+			arguments[0], arguments[0], arguments[0], arguments[0], arguments[0])
+	case nativeStdUnicodeIsDigit:
+		g.line("return %s >= 0 && %s <= utf8.MaxRune && (%s < 0xd800 || %s > 0xdfff) && unicode.IsDigit(rune(%s)), nil",
+			arguments[0], arguments[0], arguments[0], arguments[0], arguments[0])
+	case nativeStdUnicodeIsWhitespace:
+		g.line("return %s >= 0 && %s <= utf8.MaxRune && (%s < 0xd800 || %s > 0xdfff) && unicode.IsSpace(rune(%s)), nil",
+			arguments[0], arguments[0], arguments[0], arguments[0], arguments[0])
+	case nativeStdUnicodeIsUpper:
+		g.line("return %s >= 0 && %s <= utf8.MaxRune && (%s < 0xd800 || %s > 0xdfff) && unicode.IsUpper(rune(%s)), nil",
+			arguments[0], arguments[0], arguments[0], arguments[0], arguments[0])
 	case nativeStdConvertParseInt:
 		result := g.goType(resultType)
 		failure := goClassName(stdConvertFailureName)
@@ -1436,6 +1731,8 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 		g.line("before, after, found := strings.Cut(%s, %s)", arguments[0], arguments[1])
 		g.line("if !found { return slickNone[[]any](), nil }")
 		g.line("return slickSome([]any{before, after}), nil")
+	case nativeStdTextQuote:
+		g.line("return strconv.Quote(%s), nil", arguments[0])
 	case nativeStdIOReaderFromBytes:
 		g.line("return %s{slickResource: slickIONewReader(%s)}, nil", goClassName(stdIOBytesReaderName), arguments[0])
 	case nativeStdIOWriterToBytes:
