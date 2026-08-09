@@ -1,0 +1,26 @@
+// Lowercase declarations remain private to root.bank.domain across files.
+class accountState {
+    id: string
+    owner: string
+    balance: int
+}
+
+function newAccountState(id: string, owner: string, balance: int) -> accountState {
+    accountState {
+        id: id
+        owner: owner
+        balance: balance
+    }
+}
+
+function accountId(state: accountState) -> string {
+    state.id
+}
+
+function accountOwner(state: accountState) -> string {
+    state.owner
+}
+
+function accountBalance(state: accountState) -> int {
+    state.balance
+}

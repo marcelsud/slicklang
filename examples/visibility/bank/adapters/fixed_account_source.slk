@@ -1,0 +1,16 @@
+use root.bank.application.AccountSource
+use root.bank.domain.Account
+
+// The concrete adapter stays private; callers receive the application interface.
+class fixedAccountSource implements AccountSource {
+    account: Account
+    function Load() -> Account {
+        self.account
+    }
+}
+
+function NewFixedAccountSource(account: Account) -> AccountSource {
+    fixedAccountSource {
+        account: account
+    }
+}

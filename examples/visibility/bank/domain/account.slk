@@ -1,0 +1,34 @@
+// Public domain declarations expose behavior while private state stays hidden.
+class InvalidAmount implements Error {
+    Message: string
+}
+
+class Account {
+    state: accountState
+    function Id() -> string {
+        accountId(self.state)
+    }
+    function Owner() -> string {
+        accountOwner(self.state)
+    }
+    function Balance() -> int {
+        accountBalance(self.state)
+    }
+    function Deposit(amount: int) -> Account throws InvalidAmount {
+        if (amount <= 0) {
+            throw InvalidAmount("deposit must be positive")
+        }
+        Account {
+            state: newAccountState(accountId(self.state), accountOwner(self.state), accountBalance(self.state) + amount,)
+        }
+    }
+}
+
+function OpenAccount(id: string, owner: string, openingBalance: int) -> Account throws InvalidAmount {
+    if (openingBalance < 0) {
+        throw InvalidAmount("opening balance cannot be negative")
+    }
+    Account {
+        state: newAccountState(id, owner, openingBalance)
+    }
+}
