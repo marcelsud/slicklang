@@ -660,7 +660,22 @@ func (g *goGenerator) emitStatement(body *strings.Builder, statement statementNo
 		fmt.Fprintf(body, "%s, %s := %s\n", variable, callError, expression)
 		g.emitErrorReturn(body, callError, resultType)
 		fmt.Fprintf(body, "_ = %s\n", variable)
-		scope.locals[node.name] = newGoBinding(variable, typ)
+		if len(node.names) == 1 {
+			scope.locals[node.names[0]] = newGoBinding(variable, typ)
+			break
+		}
+		elementTypes, tuple := tupleElementTypes(typ)
+		if !tuple || len(elementTypes) != len(node.names) {
+			return fmt.Errorf("invalid generated destructuring type %s", typ)
+		}
+		for index, name := range node.names {
+			if name == "_" {
+				continue
+			}
+			binding := g.unique("binding")
+			fmt.Fprintf(body, "%s := %s[%d].(%s)\n_ = %s\n", binding, variable, index, g.goType(elementTypes[index]), binding)
+			scope.locals[name] = newGoBinding(binding, elementTypes[index])
+		}
 	case *asyncLetStatement:
 		if err := g.emitAsyncLet(body, node, scope, resultType); err != nil {
 			return err
@@ -866,6 +881,8 @@ func (g *goGenerator) emitFor(body *strings.Builder, node *forStatement, scope *
 		valueExpression := fmt.Sprintf("%s.At(%s, %d)", sequence, index, bindingIndex)
 		if len(node.bindings) == 1 {
 			valueExpression = fmt.Sprintf("slickItem(%s, %s)", sequence, index)
+		} else if strings.HasSuffix(iterableType, "[]") {
+			valueExpression = fmt.Sprintf("slickItem(%s, %s).([]any)[%d]", sequence, index, bindingIndex)
 		}
 		fmt.Fprintf(body, "%s := %s.(%s)\n", variable, valueExpression, g.goType(bindingTypes[bindingIndex]))
 		loopScope.locals[name] = newGoBinding(variable, bindingTypes[bindingIndex])
@@ -896,6 +913,24 @@ func (g *goGenerator) expression(expression expressionNode, scope *goScope) (str
 	switch node := expression.(type) {
 	case *literalExpression:
 		fmt.Fprintf(&body, "return %s, nil\n", goLiteral(node.value))
+	case *tupleExpression:
+		elementTypes, tuple := tupleElementTypes(typ)
+		if !tuple || len(elementTypes) != len(node.elements) {
+			return "", fmt.Errorf("invalid generated tuple type %s", typ)
+		}
+		values := make([]string, 0, len(node.elements))
+		for index, element := range node.elements {
+			value, err := g.evalExpression(&body, element, scope, "tuple", typ)
+			if err != nil {
+				return "", err
+			}
+			valueType, err := g.expressionType(element, scope)
+			if err != nil {
+				return "", err
+			}
+			values = append(values, g.convert(value, valueType, elementTypes[index]))
+		}
+		fmt.Fprintf(&body, "return []any{%s}, nil\n", strings.Join(values, ", "))
 	case *arrayExpression:
 		elementType, _ := arrayElementType(typ)
 		values := make([]string, 0, len(node.elements))
@@ -1619,6 +1654,9 @@ func (g *goGenerator) nameExpression(node *nameExpression, scope *goScope) (stri
 }
 
 func (g *goGenerator) expressionType(expression expressionNode, scope *goScope) (string, error) {
+	if node, ok := expression.(*tupleExpression); ok && node.resolved != "" {
+		return node.resolved, nil
+	}
 	if node, ok := expression.(*arrayExpression); ok && node.resolved != "" {
 		return node.resolved, nil
 	}
@@ -1657,6 +1695,18 @@ func (g *goGenerator) resolveDeclaredType(namespace string, aliases map[string]a
 			return "", err
 		}
 		return resolved + "[]", nil
+	}
+	parsed := parseTypeName(name)
+	if parsed.kind == typeKindTuple {
+		resolved := make([]string, len(parsed.args))
+		for index, arg := range parsed.args {
+			element, err := g.resolveDeclaredType(namespace, aliases, arg)
+			if err != nil {
+				return "", err
+			}
+			resolved[index] = element
+		}
+		return "(" + strings.Join(resolved, ",") + ")", nil
 	}
 	// Generic arguments resolve exactly as canonicalTypeName resolves them, so a
 	// declared Iterable<Dog> or Result<Dog, E> names the same type in the

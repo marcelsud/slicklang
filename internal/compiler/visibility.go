@@ -72,6 +72,10 @@ func (p *program) checkTypeName(pos position, namespace, name string) {
 		p.checkTypeName(pos, namespace, parsed.base)
 		return
 	case typeKindTuple:
+		if len(parsed.args) < 2 {
+			p.add(pos, diagnosticCodeTypeMismatch, "tuple types require at least two elements")
+			return
+		}
 		for _, element := range parsed.args {
 			p.checkTypeName(pos, namespace, element)
 		}

@@ -173,7 +173,32 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 	case *letStatement:
 		info := p.checkASTExpression(node.value, scope)
 		node.resolved = info.typ
-		scope.bind(node.name, info.typ)
+		if len(node.names) == 1 {
+			scope.bind(node.names[0], info.typ)
+			return expressionInfo{typ: "null", effects: info.effects}
+		}
+		tupleTypes, tuple := tupleElementTypes(info.typ)
+		if !tuple || len(tupleTypes) != len(node.names) {
+			if info.typ != typeUnknown {
+				p.add(node.pos, diagnosticCodeLoopBindings, "let has %d bindings, but the value produces %s", len(node.names), displayName(info.typ))
+			}
+			tupleTypes = make([]string, len(node.names))
+			for index := range tupleTypes {
+				tupleTypes[index] = typeUnknown
+			}
+		}
+		seen := make(map[string]struct{}, len(node.names))
+		for index, name := range node.names {
+			if name == "_" {
+				continue
+			}
+			if _, duplicate := seen[name]; duplicate {
+				p.add(node.pos, diagnosticCodeTypeMismatch, "duplicate destructuring binding %s", name)
+				continue
+			}
+			seen[name] = struct{}{}
+			scope.bind(name, tupleTypes[index])
+		}
 		return expressionInfo{typ: "null", effects: info.effects}
 	case *asyncLetStatement:
 		p.usesAsync = true
@@ -338,20 +363,23 @@ func (p *program) checkASTExpressionExpecting(expression expressionNode, scope *
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	case *literalExpression:
 		return expressionInfo{typ: literalType(node.value), effects: make(effectSet)}
+	case *tupleExpression:
+		return p.checkTupleExpression(node, scope, expected)
 	case *arrayExpression:
 		return p.checkArrayExpression(node, scope, expected)
+
 	case *mapExpression:
 		return p.checkMapExpression(node, scope, expected)
 	case *rangeExpression:
 		return p.checkRangeExpression(node, scope)
-	case *templateExpression:
-		return p.checkTemplateExpression(node, scope)
-	case *nameExpression:
-		return p.checkNameExpression(node, scope)
 	case *objectExpression:
 		return p.checkObjectExpression(node, scope)
 	case *callExpression:
 		return p.checkCallExpression(node, scope)
+	case *templateExpression:
+		return p.checkTemplateExpression(node, scope)
+	case *nameExpression:
+		return p.checkNameExpression(node, scope)
 	case *awaitExpression:
 		return p.checkAwaitExpression(node, scope)
 	case *unaryExpression:
@@ -373,6 +401,45 @@ func (p *program) checkASTExpressionExpecting(expression expressionNode, scope *
 	default:
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	}
+}
+func (p *program) checkTupleExpression(node *tupleExpression, scope *astScope, expected string) expressionInfo {
+	info := expressionInfo{effects: make(effectSet)}
+	expectedTypes, hasExpectedTuple := tupleElementTypes(expected)
+	if hasExpectedTuple && len(expectedTypes) != len(node.elements) {
+		for _, element := range node.elements {
+			elementInfo := p.checkASTExpression(element, scope)
+			mergeEffects(info.effects, elementInfo.effects)
+		}
+		p.add(node.pos, diagnosticCodeLoopBindings, "tuple expects %d elements, found %d", len(expectedTypes), len(node.elements))
+		info.typ = typeUnknown
+		return info
+	}
+	types := make([]string, len(node.elements))
+	mismatch := false
+	for index, element := range node.elements {
+		elementExpected := ""
+		if hasExpectedTuple {
+			elementExpected = expectedTypes[index]
+		}
+		elementInfo := p.checkASTExpressionExpecting(element, scope, elementExpected)
+		mergeEffects(info.effects, elementInfo.effects)
+		types[index] = elementInfo.typ
+		if hasExpectedTuple && !p.assignable(elementInfo.typ, elementExpected) {
+			mismatch = true
+			p.reportUnassignable(element.expressionPos(), elementInfo.typ, elementExpected,
+				diagnosticCodeTypeMismatch, "tuple element %d must be %s, found %s",
+				index+1, displayName(elementExpected), displayName(elementInfo.typ))
+		}
+	}
+	info.typ = "(" + strings.Join(types, ",") + ")"
+	if hasExpectedTuple {
+		node.resolved = expected
+		info.typ = expected
+		if mismatch {
+			return info
+		}
+	}
+	return info
 }
 
 func (p *program) checkTemplateExpression(node *templateExpression, scope *astScope) expressionInfo {
@@ -1398,6 +1465,10 @@ func dropAssignedNarrowings(node any, narrowed map[string]string) {
 		for _, element := range value.elements {
 			dropAssignedNarrowings(element, narrowed)
 		}
+	case *tupleExpression:
+		for _, element := range value.elements {
+			dropAssignedNarrowings(element, narrowed)
+		}
 	case *rangeExpression:
 		dropAssignedNarrowings(value.start, narrowed)
 		dropAssignedNarrowings(value.end, narrowed)
@@ -1624,7 +1695,7 @@ func iterableType(elementTypes ...string) string {
 
 func tupleElementTypes(name string) ([]string, bool) {
 	parsed := parseTypeName(name)
-	if parsed.kind != typeKindTuple {
+	if parsed.kind != typeKindTuple || len(parsed.args) < 2 {
 		return nil, false
 	}
 	return parsed.args, true

@@ -494,10 +494,23 @@ func (p *program) evalStatement(statement statementNode, frame *runtimeFrame) (r
 		if err != nil {
 			return runtimeValue{}, err
 		}
-		// A fresh binding replaces any refinement of the same name, exactly as
-		// the checker's scope does.
-		delete(frame.narrowed, node.name)
-		frame.locals[node.name] = coerceRuntimeValue(value, node.resolved)
+		if len(node.names) == 1 {
+			name := node.names[0]
+			delete(frame.narrowed, name)
+			frame.locals[name] = coerceRuntimeValue(value, node.resolved)
+			return nullRuntimeValue(), nil
+		}
+		elementTypes, tuple := tupleElementTypes(node.resolved)
+		if !tuple || len(elementTypes) != len(node.names) || len(value.elements) != len(node.names) {
+			return runtimeValue{}, runtimeError(node.pos, "invalid destructuring value")
+		}
+		for index, name := range node.names {
+			if name == "_" {
+				continue
+			}
+			delete(frame.narrowed, name)
+			frame.locals[name] = coerceRuntimeValue(value.elements[index], elementTypes[index])
+		}
 		return nullRuntimeValue(), nil
 	case *asyncLetStatement:
 		if err := checkTaskCancellation(frame.ctx); err != nil {
@@ -561,6 +574,28 @@ func (p *program) evalExpression(expression expressionNode, frame *runtimeFrame)
 	switch node := expression.(type) {
 	case *literalExpression:
 		return runtimeValue{typ: literalType(node.value), scalar: node.value}, nil
+	case *tupleExpression:
+		elements := make([]runtimeValue, 0, len(node.elements))
+		for _, element := range node.elements {
+			value, err := p.evalExpression(element, frame)
+			if err != nil {
+				return runtimeValue{}, err
+			}
+			elements = append(elements, value)
+		}
+		typ := node.resolved
+		elementTypes, typed := tupleElementTypes(typ)
+		if !typed {
+			elementTypes = make([]string, len(elements))
+			for index, element := range elements {
+				elementTypes[index] = element.typ
+			}
+			typ = "(" + strings.Join(elementTypes, ",") + ")"
+		}
+		for index, elementType := range elementTypes {
+			elements[index] = coerceRuntimeValue(elements[index], elementType)
+		}
+		return runtimeValue{typ: typ, elements: elements}, nil
 	case *arrayExpression:
 		elements := make([]runtimeValue, 0, len(node.elements))
 		elementType := ""
@@ -1056,6 +1091,8 @@ func (p *program) evalFor(node *forStatement, frame *runtimeFrame) (runtimeValue
 		}
 		if len(node.bindings) == 1 {
 			values = []runtimeValue{packRuntimeValues(values)}
+		} else if len(values) == 1 && len(values[0].elements) == len(node.bindings) {
+			values = values[0].elements
 		}
 		iteration := frame.clone()
 		for bindingIndex, binding := range node.bindings {

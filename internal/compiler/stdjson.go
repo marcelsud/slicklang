@@ -582,6 +582,10 @@ func (g *goGenerator) collectJSONCodecs() []jsonCodecNeed {
 			for _, arg := range node.args {
 				walk(arg)
 			}
+		case *tupleExpression:
+			for _, element := range node.elements {
+				walk(element)
+			}
 		case *arrayExpression:
 			for _, element := range node.elements {
 				walk(element)

@@ -1101,6 +1101,12 @@ func displayName(name string) string {
 		return displayName(parsed.base) + "?"
 	case typeKindArray:
 		return displayName(parsed.base) + "[]"
+	case typeKindTuple:
+		short := make([]string, len(parsed.args))
+		for index, arg := range parsed.args {
+			short[index] = displayName(arg)
+		}
+		return "(" + strings.Join(short, ", ") + ")"
 	case typeKindGeneric:
 		short := make([]string, len(parsed.args))
 		for index, arg := range parsed.args {
