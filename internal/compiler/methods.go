@@ -226,6 +226,29 @@ func (p *program) resolveType(namespace string, aliases map[string]aliasDecl, re
 }
 
 func (p *program) methodForType(typeName, methodName string) (*methodSignature, bool) {
+	if elementType, ok := arrayElementType(typeName); ok {
+		method := &methodSignature{
+			name:     methodName,
+			aliases:  make(map[string]aliasDecl),
+			throwSet: make(map[string]struct{}),
+		}
+		switch methodName {
+		case "Length":
+			method.result = typeRef{name: "int"}
+		case "Get":
+			method.params = []paramDecl{{name: "Index", typ: typeRef{name: "int"}}}
+			method.result = typeRef{name: optionalOf(elementType)}
+		case "Slice":
+			method.params = []paramDecl{
+				{name: "Start", typ: typeRef{name: "int"}},
+				{name: "End", typ: typeRef{name: "int"}},
+			}
+			method.result = typeRef{name: "Result<" + typeName + "," + stdCollectionsBoundsFailureName + ">"}
+		default:
+			return nil, false
+		}
+		return method, true
+	}
 	if keyType, valueType, ok := mapTypeArgs(typeName); ok {
 		method := &methodSignature{
 			name:     methodName,

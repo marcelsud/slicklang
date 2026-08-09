@@ -49,7 +49,7 @@ func TestHighlightPreservesExactNameUse(t *testing.T) {
 func TestHighlightClassifiesSlickTokens(t *testing.T) {
 	source := "// note\n" +
 		"/// load docs\n" +
-		"function load(Count: int, Data: Map<string, bytes>) -> Result<string, Failure> throws Failure {\n" +
+		"function load(Count: int, Data: Map<string, bytes>, Scratch: Buffer<string>) -> Result<string, Failure> throws Failure {\n" +
 		"    using Handle = self.read() { map {} match Handle? { Ok(Text) => `${Text}` Err(_) => \"x\" } }\n" +
 		"}\n"
 
@@ -72,6 +72,7 @@ func TestHighlightClassifiesSlickTokens(t *testing.T) {
 		"string":        compiler.ClassType,
 		"Result":        compiler.ClassType,
 		"Map":           compiler.ClassType,
+		"Buffer":        compiler.ClassType,
 		"bytes":         compiler.ClassType,
 		"map":           compiler.ClassKeyword,
 		"Ok":            compiler.ClassConstructor,

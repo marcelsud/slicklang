@@ -5,6 +5,7 @@ import "strings"
 const (
 	resultTypeName   = "Result"
 	mapTypeName      = "Map"
+	bufferTypeName   = "Buffer"
 	iterableTypeName = "Iterable"
 	errorTypeName    = "Error"
 )
@@ -32,6 +33,7 @@ var coreTypeRegistry = map[string]coreTypeDecl{
 	errorTypeName:    {kind: coreKindInterface},
 	iterableTypeName: {kind: coreKindGeneric, typeParams: []string{"T"}},
 	mapTypeName:      {kind: coreKindGeneric, typeParams: []string{"K", "V"}},
+	bufferTypeName:   {kind: coreKindGeneric, typeParams: []string{"T"}},
 	resultTypeName:   {kind: coreKindGeneric, typeParams: []string{"T", "E"}},
 }
 
@@ -167,6 +169,18 @@ func mapType(key, value string) string {
 func isMapType(name string) bool {
 	_, _, ok := mapTypeArgs(name)
 	return ok
+}
+
+func bufferTypeArg(name string) (string, bool) {
+	base, args, generic := genericType(name)
+	if !generic || base != bufferTypeName || len(args) != 1 {
+		return "", false
+	}
+	return args[0], true
+}
+
+func bufferType(element string) string {
+	return bufferTypeName + "<" + element + ">"
 }
 
 func isMapKeyType(name string) bool {
@@ -323,7 +337,8 @@ func comparableTypes(left, right string) bool {
 	if right == "null" {
 		return isOptionalType(left)
 	}
-	if isMapOrOptionalMap(left) || isMapOrOptionalMap(right) {
+	if isMapOrOptionalMap(left) || isMapOrOptionalMap(right) ||
+		isBufferOrOptionalBuffer(left) || isBufferOrOptionalBuffer(right) {
 		return false
 	}
 	if left == right {
@@ -347,4 +362,12 @@ func isMapOrOptionalMap(name string) bool {
 		name = base
 	}
 	return isMapType(name)
+}
+
+func isBufferOrOptionalBuffer(name string) bool {
+	if base, optional := optionalBase(name); optional {
+		name = base
+	}
+	_, buffer := bufferTypeArg(name)
+	return buffer
 }

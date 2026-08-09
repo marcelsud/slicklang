@@ -229,6 +229,29 @@ func (g *goGenerator) emitRuntime() {
 	g.line(`return slickFormat(optional.value)`)
 	g.line(`}`)
 	g.line("")
+	g.line(`type slickBuffer[T any] struct { values []T }`)
+	g.line(`func (*slickBuffer[T]) String() string { return "Buffer" }`)
+	g.line(`func slickBufferNew[T any]() (*slickBuffer[T], error) { return &slickBuffer[T]{}, nil }`)
+	g.line(`func slickBufferPush[T any](buffer *slickBuffer[T], value T) (struct{}, error) {`)
+	g.line(`buffer.values = append(buffer.values, value)`)
+	g.line(`return struct{}{}, nil`)
+	g.line(`}`)
+	g.line(`func slickBufferGet[T any](buffer *slickBuffer[T], index int64) (slickOptional[T], error) {`)
+	g.line(`if index < 0 || index >= int64(len(buffer.values)) { return slickNone[T](), nil }`)
+	g.line(`return slickSome(buffer.values[index]), nil`)
+	g.line(`}`)
+	g.line(`func slickBufferGetOptional[T any](buffer *slickBuffer[slickOptional[T]], index int64) (slickOptional[T], error) {`)
+	g.line(`if index < 0 || index >= int64(len(buffer.values)) { return slickNone[T](), nil }`)
+	g.line(`return buffer.values[index], nil`)
+	g.line(`}`)
+	g.line("func slickBufferSet[T any](buffer *slickBuffer[T], index int64, value T) (slickResult[struct{}, *%s], error) {", goClassName(stdCollectionsBoundsFailureName))
+	g.line("if index < 0 || index >= int64(len(buffer.values)) { return slickResult[struct{}, *%s]{failure: &%s{}}, nil }", goClassName(stdCollectionsBoundsFailureName), goClassName(stdCollectionsBoundsFailureName))
+	g.line(`buffer.values[index] = value`)
+	g.line("return slickResult[struct{}, *%s]{ok: true, value: struct{}{}}, nil", goClassName(stdCollectionsBoundsFailureName))
+	g.line(`}`)
+	g.line(`func slickBufferLength[T any](buffer *slickBuffer[T]) (int64, error) { return int64(len(buffer.values)), nil }`)
+	g.line(`func slickBufferFreeze[T any](buffer *slickBuffer[T]) ([]T, error) { return append([]T(nil), buffer.values...), nil }`)
+	g.line("")
 	g.line(`type slickBytes []byte`)
 	g.line(`type slickMapEntry[K comparable, V any] struct { key K; value V }`)
 	g.line(`type slickMap[K comparable, V any] struct { entries []slickMapEntry[K, V]; index map[K]int }`)
@@ -752,6 +775,11 @@ func (g *goGenerator) emitAsyncLet(body *strings.Builder, node *asyncLetStatemen
 		receiver := g.unique("asyncReceiver")
 		fmt.Fprintf(body, "%s := %s\n_ = %s\n", receiver, binding.name, receiver)
 		callName = receiver + "." + goMethodName(parts[1])
+	} else if bufferCall, buffer, err := g.bufferCallName(call); buffer {
+		if err != nil {
+			return err
+		}
+		callName = bufferCall
 	} else if call.resolvedNative == nativeStdJsonDecode || call.resolvedNative == nativeStdJsonEncode {
 		if len(call.resolvedTypeArgs) != 1 {
 			return fmt.Errorf("generated async JSON call is missing its type argument")
@@ -783,7 +811,9 @@ func (g *goGenerator) emitAsyncLet(body *strings.Builder, node *asyncLetStatemen
 	}
 	childContext := g.unique("childContext")
 	childArguments := arguments
-	if call.resolvedNative != nativeStdJsonDecode && call.resolvedNative != nativeStdJsonEncode {
+	if call.resolvedNative != nativeStdJsonDecode &&
+		call.resolvedNative != nativeStdJsonEncode &&
+		!isNativeStdBuffer(call.resolvedNative) {
 		childArguments = append([]string{childContext}, childArguments...)
 	}
 	task := g.unique("task")
@@ -1157,7 +1187,13 @@ func (g *goGenerator) emitCallExpression(body *strings.Builder, node *callExpres
 		}
 		argumentTypes = append(argumentTypes, typ)
 	}
+	if emitted, err := g.emitArrayCallExpression(body, node, name, scope, arguments, argumentTypes); emitted || err != nil {
+		return err
+	}
 	if emitted, err := g.emitMapCallExpression(body, name, scope, arguments, argumentTypes); emitted || err != nil {
+		return err
+	}
+	if emitted, err := g.emitBufferCallExpression(body, node, arguments, argumentTypes); emitted || err != nil {
 		return err
 	}
 	if name.name == "enumerate" {
@@ -1243,6 +1279,101 @@ func (g *goGenerator) emitCallExpression(body *strings.Builder, node *callExpres
 	fmt.Fprintf(body, "return %s(%s)\n", call, strings.Join(arguments, ", "))
 	return nil
 }
+
+func (g *goGenerator) emitArrayCallExpression(
+	body *strings.Builder,
+	node *callExpression,
+	name *nameExpression,
+	scope *goScope,
+	arguments, argumentTypes []string,
+) (bool, error) {
+	parts := strings.Split(name.name, ".")
+	if len(parts) != 2 {
+		return false, nil
+	}
+	receiver, exists := scope.locals[parts[0]]
+	if !exists {
+		return false, nil
+	}
+	elementType, isArray := arrayElementType(receiver.typ)
+	if !isArray {
+		return false, nil
+	}
+	argument := func(index int) string {
+		return g.convert(arguments[index], argumentTypes[index], "int")
+	}
+	switch parts[1] {
+	case "Length":
+		fmt.Fprintf(body, "return int64(len(%s)), nil\n", receiver.name)
+	case "Get":
+		index := argument(0)
+		fmt.Fprintf(body, "if %s < 0 || %s >= int64(len(%s)) { return %s, nil }\n",
+			index, index, receiver.name, g.zero(optionalOf(elementType)))
+		if isOptionalType(elementType) {
+			fmt.Fprintf(body, "return %s[%s], nil\n", receiver.name, index)
+		} else {
+			fmt.Fprintf(body, "return slickSome(%s[%s]), nil\n", receiver.name, index)
+		}
+	case "Slice":
+		start, end := argument(0), argument(1)
+		result := g.goType(node.resolvedResult)
+		failure := goClassName(stdCollectionsBoundsFailureName)
+		fmt.Fprintf(body, "if %s < 0 || %s < %s || %s > int64(len(%s)) { return %s{failure: &%s{}}, nil }\n",
+			start, end, start, end, receiver.name, result, failure)
+		fmt.Fprintf(body, "return %s{ok: true, value: %s[%s:%s]}, nil\n", result, receiver.name, start, end)
+	default:
+		return false, nil
+	}
+	return true, nil
+}
+
+func (g *goGenerator) emitBufferCallExpression(
+	body *strings.Builder,
+	node *callExpression,
+	arguments, argumentTypes []string,
+) (bool, error) {
+	call, ok, err := g.bufferCallName(node)
+	if !ok || err != nil {
+		return ok, err
+	}
+	for index := range arguments {
+		arguments[index] = g.convert(arguments[index], argumentTypes[index], node.resolvedParams[index])
+	}
+	fmt.Fprintf(body, "return %s(%s)\n", call, strings.Join(arguments, ", "))
+	return true, nil
+}
+
+func (g *goGenerator) bufferCallName(node *callExpression) (string, bool, error) {
+	if !isNativeStdBuffer(node.resolvedNative) {
+		return "", false, nil
+	}
+	if len(node.resolvedTypeArgs) != 1 {
+		return "", true, fmt.Errorf("generated buffer call is missing its type argument")
+	}
+	elementType := node.resolvedTypeArgs[0]
+	typeArgument := elementType
+	name := ""
+	switch node.resolvedNative {
+	case nativeStdBufferNew:
+		name = "slickBufferNew"
+	case nativeStdBufferPush:
+		name = "slickBufferPush"
+	case nativeStdBufferGet:
+		name = "slickBufferGet"
+		if base, optional := optionalBase(elementType); optional {
+			name = "slickBufferGetOptional"
+			typeArgument = base
+		}
+	case nativeStdBufferSet:
+		name = "slickBufferSet"
+	case nativeStdBufferLength:
+		name = "slickBufferLength"
+	case nativeStdBufferFreeze:
+		name = "slickBufferFreeze"
+	}
+	return name + "[" + g.goType(typeArgument) + "]", true, nil
+}
+
 func (g *goGenerator) emitMapCallExpression(
 	body *strings.Builder,
 	name *nameExpression,
@@ -1580,6 +1711,9 @@ func (g *goGenerator) goType(typ string) string {
 	}
 	if key, value, ok := mapTypeArgs(typ); ok {
 		return "slickMap[" + g.goType(key) + ", " + g.goType(value) + "]"
+	}
+	if element, ok := bufferTypeArg(typ); ok {
+		return "*slickBuffer[" + g.goType(element) + "]"
 	}
 	if success, failure, ok := resultTypeArgs(typ); ok {
 		return "slickResult[" + g.goType(success) + ", " + g.goType(failure) + "]"

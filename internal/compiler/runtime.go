@@ -16,6 +16,7 @@ type runtimeValue struct {
 	elements []runtimeValue
 	iterable *runtimeIterable
 	mapping  *runtimeMap
+	buffer   *runtimeBuffer
 	result   *runtimeResult
 	optional *runtimeOptional
 	native   *nativeIOResource
@@ -51,6 +52,11 @@ type runtimeMapEntry struct {
 type runtimeMap struct {
 	entries []runtimeMapEntry
 	index   map[runtimeMapKey]int
+}
+
+type runtimeBuffer struct {
+	elementType string
+	values      []runtimeValue
 }
 
 func canonicalRuntimeMapKey(value runtimeValue) (runtimeMapKey, error) {
@@ -846,6 +852,9 @@ func (p *program) evalCall(node *callExpression, frame *runtimeFrame) (runtimeVa
 				}
 				receiver = receiver.optional.value
 			}
+			if _, isArray := arrayElementType(receiver.typ); isArray {
+				return evalRuntimeArrayCall(node, parts[1], receiver, args)
+			}
 			if receiver.mapping != nil {
 				return evalRuntimeMapCall(node, parts[1], receiver, args)
 			}
@@ -866,6 +875,38 @@ func (p *program) evalCall(node *callExpression, frame *runtimeFrame) (runtimeVa
 		return runtimeValue{}, runtimeError(node.pos, "unknown function %s", name.name)
 	}
 	return p.callFunctionContext(frame.ctx, function, args, nil, append([]string(nil), node.resolvedTypeArgs...))
+}
+
+func evalRuntimeArrayCall(node *callExpression, method string, receiver runtimeValue, args []runtimeValue) (runtimeValue, error) {
+	elementType, _ := arrayElementType(receiver.typ)
+	switch method {
+	case "Length":
+		return runtimeValue{typ: "int", scalar: int64(len(receiver.elements))}, nil
+	case "Get":
+		return runtimeIndexedValue(elementType, receiver.elements, args[0].scalar.(int64)), nil
+	case "Slice":
+		start, end := args[0].scalar.(int64), args[1].scalar.(int64)
+		if start < 0 || end < start || end > int64(len(receiver.elements)) {
+			failure := runtimeValue{typ: stdCollectionsBoundsFailureName}
+			return runtimeResultValue(node.resolvedResult, false, failure), nil
+		}
+		values := append([]runtimeValue(nil), receiver.elements[start:end]...)
+		return runtimeResultValue(node.resolvedResult, true, runtimeValue{typ: receiver.typ, elements: values}), nil
+	default:
+		return runtimeValue{}, runtimeError(node.pos, "%s has no method %s", displayName(receiver.typ), method)
+	}
+}
+
+func runtimeIndexedValue(elementType string, values []runtimeValue, index int64) runtimeValue {
+	resultType := optionalOf(elementType)
+	if index < 0 || index >= int64(len(values)) {
+		return coerceRuntimeValue(nullRuntimeValue(), resultType)
+	}
+	value := coerceRuntimeValue(values[index], elementType)
+	if isOptionalType(elementType) {
+		return value
+	}
+	return runtimeValue{typ: resultType, optional: &runtimeOptional{present: true, value: value}}
 }
 func evalRuntimeMapCall(node *callExpression, method string, receiver runtimeValue, args []runtimeValue) (runtimeValue, error) {
 	keyType, valueType, _ := mapTypeArgs(receiver.typ)
@@ -1405,6 +1446,9 @@ func formatRuntimeValue(value runtimeValue) string {
 	case "bool":
 		return strconv.FormatBool(value.scalar.(bool))
 	default:
+		if value.buffer != nil {
+			return "Buffer"
+		}
 		if value.mapping != nil {
 			items := make([]string, len(value.mapping.entries))
 			for index, entry := range value.mapping.entries {
