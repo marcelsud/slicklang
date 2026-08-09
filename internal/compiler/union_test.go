@@ -132,15 +132,22 @@ function Name(Value: Shape) -> string {
     }
 }
 
+function Anything(Value: Shape) -> string {
+    match Value {
+        _ => "any"
+    }
+}
+
 function main() -> string {
     let Sized = Kind(Shape.Rect(7, 9))
     let Fallback = Kind(Shape.Empty)
     let Circle = Name(Shape.Circle(1.0))
     let Other = Name(Shape.Empty)
-    `+"`${Sized};${Fallback};${Circle};${Other}`"+`
+    let Every = Anything(Shape.Rect(1, 2))
+    `+"`${Sized};${Fallback};${Circle};${Other};${Every}`"+`
 }
 `)
-	want := "7;0;circle;other"
+	want := "7;0;circle;other;any"
 	if output != want {
 		t.Fatalf("wildcard output = %q, want %q", output, want)
 	}
@@ -407,6 +414,16 @@ function Check(Value: Shape) -> string {
 			body:    "union Twice {\n    One\n    One\n}",
 			code:    "SLK001",
 			message: "duplicate variant root.Twice.One",
+		},
+		{
+			name: "async let on a variant constructor",
+			body: `function Start() -> string {
+    async let Task = Shape.Circle(1.0)
+    let Value = await Task
+    "done"
+}`,
+			code:    "SLK394",
+			message: "async let initializer must resolve to one function or method call",
 		},
 		{
 			name:    "union without variants",

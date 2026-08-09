@@ -209,9 +209,11 @@ func (p *program) checkVariantConstruction(node *callExpression, name *nameExpre
 	} else if len(node.args) != len(resolved.fields) {
 		p.add(node.pos, diagnosticCodeCallArgument, "%s.%s expects %d payload values, found %d", union.name, resolved.name, len(resolved.fields), len(node.args))
 	}
+	// A constructor is not a call: both backends build the value inline from the
+	// variant declaration. Leaving resolvedResult empty is what keeps
+	// "async let X = Union.Variant(...)" a checked error instead of a backend
+	// failure, since there is no function for a task to run.
 	declared := p.variantFieldTypes(union, resolved)
-	node.resolvedParams = declared
-	node.resolvedResult = union.qualified
 	node.resolvedArgumentTypes = make([]string, len(node.args))
 	for index, argument := range node.args {
 		expected := ""
