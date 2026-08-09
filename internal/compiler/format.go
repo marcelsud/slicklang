@@ -214,6 +214,8 @@ func (f *sourceFormatter) collectBlock(block *blockNode) {
 		switch node := statement.(type) {
 		case *letStatement:
 			f.collectExpression(node.value)
+		case *asyncLetStatement:
+			f.collectExpression(node.call)
 		case *assignmentStatement:
 			f.collectExpression(node.value)
 		case *forStatement:

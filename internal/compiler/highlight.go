@@ -31,11 +31,11 @@ type HighlightToken struct {
 }
 
 var highlightKeywords = map[string]struct{}{
-	"as": {}, "break": {}, "catch": {}, "class": {}, "continue": {},
-	"else": {}, "extension": {}, "for": {}, "function": {}, "if": {},
-	"implements": {}, "in": {}, "interface": {}, "let": {}, "map": {},
-	"match": {}, "return": {}, "self": {}, "throw": {}, "throws": {},
-	"use": {}, "using": {},
+	"as": {}, "async": {}, "await": {}, "break": {}, "catch": {},
+	"class": {}, "continue": {}, "else": {}, "extension": {}, "for": {},
+	"function": {}, "if": {}, "implements": {}, "in": {}, "interface": {},
+	"let": {}, "map": {}, "match": {}, "return": {}, "self": {},
+	"throw": {}, "throws": {}, "use": {}, "using": {},
 }
 
 // Highlight splits source into classified spans. Concatenating every Text

@@ -9,6 +9,7 @@ import (
 type blockNode struct {
 	statements []statementNode
 	pos        position
+	hasAsync   bool
 }
 
 type statementNode interface {
@@ -30,6 +31,14 @@ type letStatement struct {
 }
 
 func (n *letStatement) statementPos() position { return n.pos }
+
+type asyncLetStatement struct {
+	name string
+	call *callExpression
+	pos  position
+}
+
+func (n *asyncLetStatement) statementPos() position { return n.pos }
 
 // assignmentStatement writes a local. resolved is the local's declared storage
 // type, which branch narrowing never changes.
@@ -158,17 +167,28 @@ type objectExpression struct {
 func (n *objectExpression) expressionPos() position { return n.pos }
 
 type callExpression struct {
-	callee           expressionNode
-	typeArgs         []typeRef
-	args             []expressionNode
-	resolvedTypeArgs []string
-	resolvedParams   []string
-	resolvedResult   string
-	resolvedNative   nativeFunction
-	pos              position
+	callee                expressionNode
+	typeArgs              []typeRef
+	args                  []expressionNode
+	resolvedTypeArgs      []string
+	resolvedParams        []string
+	resolvedArgumentTypes []string
+	resolvedResult        string
+	resolvedReceiver      string
+	resolvedThrows        effectSet
+	resolvedNative        nativeFunction
+	pos                   position
 }
 
 func (n *callExpression) expressionPos() position { return n.pos }
+
+type awaitExpression struct {
+	name     string
+	resolved string
+	pos      position
+}
+
+func (n *awaitExpression) expressionPos() position { return n.pos }
 
 type unaryExpression struct {
 	op    string
@@ -202,6 +222,7 @@ func (n *ifExpression) expressionPos() position { return n.pos }
 
 type catchArm struct {
 	errorType typeRef
+	binding   string
 	value     expressionNode
 }
 
@@ -348,6 +369,28 @@ func (p *bodyParser) parseStatement() statementNode {
 	}
 	if p.accept("continue") {
 		return &continueStatement{pos: p.previous().pos}
+	}
+	if p.accept("async") {
+		pos := p.previous().pos
+		if !p.accept("let") {
+			p.error(pos, "expected 'let' after 'async'")
+			return nil
+		}
+		name, ok := p.expectIdent("binding name")
+		if !ok {
+			return nil
+		}
+		if !p.accept("=") {
+			p.error(p.current().pos, "expected '=' after binding name")
+			return nil
+		}
+		value := p.parseExpression()
+		call, ok := value.(*callExpression)
+		if !ok {
+			p.error(pos, "async let initializer must be one function or method call")
+			return nil
+		}
+		return &asyncLetStatement{name: name.text, call: call, pos: pos}
 	}
 	if p.current().kind == scanner.Ident && p.index+1 < len(p.tokens) && p.tokens[p.index+1].text == "=" &&
 		(p.index+2 >= len(p.tokens) || p.tokens[p.index+2].text != "=") {
@@ -630,6 +673,13 @@ func (p *bodyParser) parsePrimary() expressionNode {
 		return nil
 	}
 	tok := p.current()
+	if p.accept("await") {
+		name, ok := p.expectIdent("pending binding after await")
+		if !ok {
+			return &invalidExpression{pos: tok.pos}
+		}
+		return &awaitExpression{name: name.text, pos: tok.pos}
+	}
 	if p.accept("using") {
 		return p.parseUsing(tok.pos)
 	}
@@ -1046,6 +1096,14 @@ func (p *bodyParser) parseCatchExpression(value expressionNode) expressionNode {
 			continue
 		}
 		p.index = next
+		armBinding := ""
+		if p.accept("as") {
+			name, bindingOK := p.expectIdent("catch binding")
+			if !bindingOK {
+				continue
+			}
+			armBinding = name.text
+		}
 		if !p.matchPair("=", ">") {
 			p.error(p.current().pos, "expected '=>' after caught error type")
 			continue
@@ -1055,7 +1113,7 @@ func (p *bodyParser) parseCatchExpression(value expressionNode) expressionNode {
 			p.error(ref.pos, "expected catch arm value")
 			continue
 		}
-		arms = append(arms, catchArm{errorType: typeRef{name: ref.name, pos: ref.pos}, value: armValue})
+		arms = append(arms, catchArm{errorType: typeRef{name: ref.name, pos: ref.pos}, binding: armBinding, value: armValue})
 	}
 	if !p.accept("}") {
 		p.error(pos, "unterminated catch expression")
@@ -1189,6 +1247,11 @@ func (p *bodyParser) expectIdent(label string) (token, bool) {
 		return token{}, false
 	}
 	tok := p.current()
+	if isAsyncKeyword(tok.text) {
+		p.error(tok.pos, "%s is a reserved language keyword", tok.text)
+		p.index++
+		return token{}, false
+	}
 	p.index++
 	return tok, true
 }

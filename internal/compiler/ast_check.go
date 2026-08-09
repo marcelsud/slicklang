@@ -38,6 +38,28 @@ type usingBinding struct {
 	outerLocals map[string]struct{}
 }
 
+type pendingState uint8
+
+const (
+	pendingAvailable pendingState = iota
+	pendingConsumed
+	pendingInvalid
+)
+
+type pendingBinding struct {
+	typ       string
+	effects   effectSet
+	state     pendingState
+	loopDepth int
+	owner     *blockNode
+	pos       position
+}
+
+type pendingPath struct {
+	scope  *astScope
+	normal bool
+}
+
 // astScope keeps the two type facts a local carries apart. locals holds the
 // declared or inferred storage type, which assignment validates against and
 // which narrowing never rewrites. narrowed holds the branch-local refinement a
@@ -48,6 +70,8 @@ type astScope struct {
 	locals        map[string]string
 	narrowed      map[string]string
 	usingBindings map[string]usingBinding
+	pending       map[string]pendingBinding
+	currentBlock  *blockNode
 	loopDepth     int
 }
 
@@ -57,6 +81,7 @@ func newASTScope(function *functionDecl, size int) *astScope {
 		locals:        make(map[string]string, size),
 		narrowed:      make(map[string]string),
 		usingBindings: make(map[string]usingBinding),
+		pending:       make(map[string]pendingBinding),
 	}
 }
 
@@ -114,6 +139,10 @@ func (p *program) checkASTFunction(function *functionDecl) {
 // checkASTBlock types every statement in block. expected is the type the block
 // as a whole must produce, so it reaches only the final statement.
 func (p *program) checkASTBlock(block *blockNode, scope *astScope, expected string) expressionInfo {
+	previousBlock := scope.currentBlock
+	scope.currentBlock = block
+	defer func() { scope.currentBlock = previousBlock }()
+
 	info := expressionInfo{typ: "null", effects: make(effectSet)}
 	for index, statement := range block.statements {
 		statementExpected := ""
@@ -123,6 +152,18 @@ func (p *program) checkASTBlock(block *blockNode, scope *astScope, expected stri
 		statementInfo := p.checkASTStatement(statement, scope, statementExpected)
 		mergeEffects(info.effects, statementInfo.effects)
 		info.typ = statementInfo.typ
+	}
+	if info.typ != typeNever {
+		for _, statement := range block.statements {
+			node, ok := statement.(*asyncLetStatement)
+			if !ok {
+				continue
+			}
+			binding, exists := scope.pending[node.name]
+			if exists && binding.owner == block && binding.state == pendingAvailable {
+				p.add(node.pos, diagnosticCodePendingMissingAwait, "pending binding %s must be awaited on every normal path leaving this block", node.name)
+			}
+		}
 	}
 	return info
 }
@@ -134,9 +175,58 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		node.resolved = info.typ
 		scope.bind(node.name, info.typ)
 		return expressionInfo{typ: "null", effects: info.effects}
+	case *asyncLetStatement:
+		p.usesAsync = true
+		if scope.currentBlock != nil {
+			scope.currentBlock.hasAsync = true
+		}
+		info := p.checkCallExpressionEffects(node.call, scope, false)
+		if pending, exists := scope.pending[node.name]; exists && pending.state == pendingAvailable {
+			p.add(node.pos, diagnosticCodePendingAssignment, "pending binding %s is immutable and cannot be redeclared before it is awaited", node.name)
+			return expressionInfo{typ: "null", effects: info.effects}
+		}
+		if node.call.resolvedResult == "" {
+			if info.typ != typeUnknown {
+				p.add(node.pos, diagnosticCodeAsyncInitializer, "async let initializer must resolve to one function or method call")
+			}
+			return expressionInfo{typ: "null", effects: info.effects}
+		}
+		unsafe := false
+		if node.call.resolvedReceiver != "" && !p.taskSafeType(node.call.resolvedReceiver, make(map[string]bool)) {
+			p.add(node.pos, diagnosticCodeAsyncUnsafeValue, "async call receiver has task-unsafe type %s", displayName(node.call.resolvedReceiver))
+			unsafe = true
+		}
+		for index, typ := range node.call.resolvedArgumentTypes {
+			if typ != "" && typ != typeUnknown && !p.taskSafeType(typ, make(map[string]bool)) {
+				p.add(node.call.args[index].expressionPos(), diagnosticCodeAsyncUnsafeValue, "async argument %d has task-unsafe type %s", index+1, displayName(typ))
+				unsafe = true
+			}
+		}
+		if node.call.resolvedResult != "" && !p.taskSafeType(node.call.resolvedResult, make(map[string]bool)) {
+			p.add(node.pos, diagnosticCodeAsyncUnsafeValue, "async call result has task-unsafe type %s", displayName(node.call.resolvedResult))
+			unsafe = true
+		}
+		state := pendingAvailable
+		if unsafe {
+			state = pendingInvalid
+		}
+		scope.pending[node.name] = pendingBinding{
+			typ:       node.call.resolvedResult,
+			effects:   cloneEffects(node.call.resolvedThrows),
+			state:     state,
+			loopDepth: scope.loopDepth,
+			owner:     scope.currentBlock,
+			pos:       node.pos,
+		}
+		return expressionInfo{typ: "null", effects: info.effects}
 	case *assignmentStatement:
 		if _, active := scope.usingBindings[node.name]; active {
 			p.add(node.pos, diagnosticCodeUsingAssignment, "using binding %s is immutable", node.name)
+		}
+		if pending, exists := scope.pending[node.name]; exists && pending.state != pendingInvalid {
+			p.add(node.pos, diagnosticCodePendingAssignment, "pending binding %s is immutable and can only be consumed by await", node.name)
+			info := p.checkASTExpression(node.value, scope)
+			return expressionInfo{typ: "null", effects: info.effects}
 		}
 		declared, exists := scope.locals[node.name]
 		if !exists {
@@ -255,13 +345,15 @@ func (p *program) checkASTExpressionExpecting(expression expressionNode, scope *
 	case *rangeExpression:
 		return p.checkRangeExpression(node, scope)
 	case *templateExpression:
-		return expressionInfo{typ: "string", effects: make(effectSet)}
+		return p.checkTemplateExpression(node, scope)
 	case *nameExpression:
 		return p.checkNameExpression(node, scope)
 	case *objectExpression:
 		return p.checkObjectExpression(node, scope)
 	case *callExpression:
 		return p.checkCallExpression(node, scope)
+	case *awaitExpression:
+		return p.checkAwaitExpression(node, scope)
 	case *unaryExpression:
 		return p.checkUnaryExpression(node, scope)
 	case *binaryExpression:
@@ -283,14 +375,41 @@ func (p *program) checkASTExpressionExpecting(expression expressionNode, scope *
 	}
 }
 
+func (p *program) checkTemplateExpression(node *templateExpression, scope *astScope) expressionInfo {
+	info := expressionInfo{typ: "string", effects: make(effectSet)}
+	text := node.text
+	for {
+		start := strings.Index(text, "${")
+		if start < 0 {
+			return info
+		}
+		text = text[start+2:]
+		end := strings.IndexByte(text, '}')
+		if end < 0 {
+			return info
+		}
+		name := strings.TrimSpace(text[:end])
+		mergeEffects(info.effects, p.checkNameExpression(&nameExpression{name: name, pos: node.pos}, scope).effects)
+		text = text[end+1:]
+	}
+}
+
 func (p *program) checkNameExpression(node *nameExpression, scope *astScope) expressionInfo {
 	parts := strings.Split(node.name, ".")
 	if len(parts) == 1 {
+		if pending, exists := scope.pending[node.name]; exists {
+			p.add(node.pos, diagnosticCodePendingUse, "pending binding %s is not a value; use await %s", node.name, node.name)
+			return expressionInfo{typ: pending.typ, effects: make(effectSet)}
+		}
 		if typ, exists := scope.lookup(node.name); exists {
 			return expressionInfo{typ: typ, effects: make(effectSet)}
 		}
 		p.add(node.pos, diagnosticCodeUnknownValue, "unknown value %s", node.name)
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
+	}
+	if pending, exists := scope.pending[parts[0]]; exists {
+		p.add(node.pos, diagnosticCodePendingUse, "pending binding %s is not a value or receiver; use await %s", parts[0], parts[0])
+		return expressionInfo{typ: pending.typ, effects: make(effectSet)}
 	}
 	if len(parts) == 2 {
 		receiver, exists := scope.lookup(parts[0])
@@ -312,6 +431,43 @@ func (p *program) checkNameExpression(node *nameExpression, scope *astScope) exp
 	}
 	p.add(node.pos, diagnosticCodeUnknownValue, "unknown value %s", node.name)
 	return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
+}
+
+func (p *program) checkAwaitExpression(node *awaitExpression, scope *astScope) expressionInfo {
+	binding, exists := scope.pending[node.name]
+	if !exists && node.resolved != "" {
+		return expressionInfo{typ: node.resolved, effects: make(effectSet)}
+	}
+	if !exists {
+		if _, ordinary := scope.lookup(node.name); ordinary {
+			p.add(node.pos, diagnosticCodeAwaitOrdinary, "await requires a pending binding, but %s is an ordinary value", node.name)
+		} else {
+			p.add(node.pos, diagnosticCodeAwaitUnknown, "await refers to unknown pending binding %s", node.name)
+		}
+		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
+	}
+	node.resolved = binding.typ
+	if scope.loopDepth > binding.loopDepth {
+		p.add(node.pos, diagnosticCodeAwaitLoop, "pending binding %s cannot be awaited from a loop that may consume it more than once", node.name)
+		binding.state = pendingInvalid
+		scope.pending[node.name] = binding
+		return expressionInfo{typ: binding.typ, effects: make(effectSet)}
+	}
+	switch binding.state {
+	case pendingConsumed:
+		p.add(node.pos, diagnosticCodeAwaitTwice, "pending binding %s has already been awaited", node.name)
+		return expressionInfo{typ: binding.typ, effects: make(effectSet)}
+	case pendingInvalid:
+		return expressionInfo{typ: binding.typ, effects: make(effectSet)}
+	}
+	binding.state = pendingConsumed
+	scope.pending[node.name] = binding
+	effects := make(effectSet, len(binding.effects))
+	for name, origin := range binding.effects {
+		origin.pos = node.pos
+		effects[name] = origin
+	}
+	return expressionInfo{typ: binding.typ, effects: effects}
 }
 
 func (p *program) checkArrayExpression(node *arrayExpression, scope *astScope, expected string) expressionInfo {
@@ -486,6 +642,9 @@ func (p *program) checkUsingExpression(node *usingExpression, scope *astScope, e
 	body := p.checkASTBlock(node.body, bodyScope, expected)
 	mergeEffects(info.effects, body.effects)
 	info.typ = body.typ
+	if body.typ != typeNever {
+		copyPendingStates(scope, bodyScope)
+	}
 
 	if resource, _, ok := directUsingBlockValue(node.body, bodyScope); ok {
 		p.add(node.pos, diagnosticCodeUsingEscape, "using binding %s cannot escape its scope", resource)
@@ -541,12 +700,24 @@ func directUsingBlockValue(block *blockNode, scope *astScope) (string, usingBind
 }
 
 func (p *program) checkCallExpression(node *callExpression, scope *astScope) expressionInfo {
+	return p.checkCallExpressionEffects(node, scope, true)
+}
+
+func (p *program) checkCallExpressionEffects(node *callExpression, scope *astScope, includeThrows bool) expressionInfo {
 	name, ok := node.callee.(*nameExpression)
 	if !ok {
 		p.add(node.pos, diagnosticCodeUnknownValue, "call target is not a function or method")
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	}
 	parts := strings.Split(name.name, ".")
+	if pending, exists := scope.pending[parts[0]]; exists {
+		p.add(node.pos, diagnosticCodePendingUse, "pending binding %s is not a call receiver; use await %s", parts[0], parts[0])
+		info := expressionInfo{typ: pending.typ, effects: make(effectSet)}
+		for _, argument := range node.args {
+			mergeEffects(info.effects, p.checkASTExpression(argument, scope).effects)
+		}
+		return info
+	}
 	if len(parts) == 2 && parts[1] == "Close" {
 		if _, active := scope.usingBindings[parts[0]]; active {
 			p.add(node.pos, diagnosticCodeManualClose, "cannot call Close directly on active using binding %s", parts[0])
@@ -575,6 +746,11 @@ func (p *program) checkCallExpression(node *callExpression, scope *astScope) exp
 	}
 
 	target, reported := p.resolveASTCall(scope.function, name, scope)
+	if len(parts) == 2 {
+		if receiver, exists := scope.lookup(parts[0]); exists {
+			node.resolvedReceiver = receiver
+		}
+	}
 	if target == nil {
 		if !reported {
 			p.add(node.pos, diagnosticCodeUnknownCallable, "unknown function or method %s", name.name)
@@ -647,22 +823,30 @@ func (p *program) checkCallExpression(node *callExpression, scope *astScope) exp
 	}
 	node.resolvedResult = info.typ
 	node.resolvedNative = target.native
+	node.resolvedThrows = make(effectSet, len(target.throwSet))
+	for thrown := range target.throwSet {
+		node.resolvedThrows[thrown] = effectOrigin{pos: node.pos, origin: target.name}
+	}
 
 	if len(node.args) != len(params) {
 		p.add(node.pos, diagnosticCodeCallArgument, "%s expects %d arguments, found %d", target.name, len(params), len(node.args))
 	}
+	node.resolvedArgumentTypes = make([]string, len(node.args))
 	for index, argument := range node.args {
 		if index >= len(params) {
-			mergeEffects(info.effects, p.checkASTExpression(argument, scope).effects)
+			argumentInfo := p.checkASTExpression(argument, scope)
+			node.resolvedArgumentTypes[index] = argumentInfo.typ
+			mergeEffects(info.effects, argumentInfo.effects)
 			continue
 		}
 		expected := node.resolvedParams[index]
 		argumentInfo := p.checkASTExpressionExpecting(argument, scope, expected)
+		node.resolvedArgumentTypes[index] = argumentInfo.typ
 		mergeEffects(info.effects, argumentInfo.effects)
 		p.checkAssignable(node.pos, argumentInfo.typ, expected, target.name, index+1)
 	}
-	for thrown := range target.throwSet {
-		info.effects[thrown] = effectOrigin{pos: node.pos, origin: target.name}
+	if includeThrows {
+		mergeEffects(info.effects, node.resolvedThrows)
 	}
 	return info
 }
@@ -924,12 +1108,16 @@ func (p *program) checkIfExpression(node *ifExpression, scope *astScope, expecte
 	info := expressionInfo{typ: "null", effects: make(effectSet)}
 	mergeEffects(info.effects, condition.effects)
 	mergeEffects(info.effects, thenInfo.effects)
+	elseInfo := expressionInfo{typ: "null", effects: make(effectSet)}
+	if node.elseBlock != nil {
+		elseInfo = p.checkASTBlock(node.elseBlock, elseScope, expected)
+		mergeEffects(info.effects, elseInfo.effects)
+	}
+	p.mergePendingBranches(scope, thenScope, elseScope, thenInfo.typ != typeNever, elseInfo.typ != typeNever, node.pos)
 	if node.elseBlock == nil {
 		clearAssignedNarrowings(scope, node.thenBlock)
 		return info
 	}
-	elseInfo := p.checkASTBlock(node.elseBlock, elseScope, expected)
-	mergeEffects(info.effects, elseInfo.effects)
 	clearAssignedNarrowings(scope, node.thenBlock, node.elseBlock)
 	joined, ok := joinTypes(thenInfo.typ, elseInfo.typ)
 	if !ok {
@@ -947,6 +1135,7 @@ func (p *program) checkCatchExpression(node *catchExpression, scope *astScope, e
 		remaining[name] = origin
 	}
 	result := expressionInfo{typ: valueInfo.typ, effects: make(effectSet)}
+	paths := []pendingPath{{scope: scope.clone(), normal: valueInfo.typ != typeNever}}
 	catchAll := false
 	for _, arm := range node.arms {
 		resolved, ok := p.resolveErrorIn(scope.function.namespace, scope.function.aliases, arm.errorType.name)
@@ -966,11 +1155,16 @@ func (p *program) checkCatchExpression(node *catchExpression, scope *astScope, e
 			delete(remaining, resolved)
 		}
 		armScope := scope.clone()
-		if node.binding != "" {
-			armScope.bind(node.binding, resolved)
+		binding := arm.binding
+		if binding == "" {
+			binding = node.binding
+		}
+		if binding != "" {
+			armScope.bind(binding, resolved)
 		}
 		armInfo := p.checkASTExpressionExpecting(arm.value, armScope, expected)
 		mergeEffects(result.effects, armInfo.effects)
+		paths = append(paths, pendingPath{scope: armScope, normal: armInfo.typ != typeNever})
 		clearAssignedNarrowings(scope, arm.value)
 		if armInfo.typ != typeNever && result.typ != armInfo.typ {
 			p.add(arm.errorType.pos, diagnosticCodeTypeMismatch, "catch success and error paths must produce one type; found %s and %s", displayName(result.typ), displayName(armInfo.typ))
@@ -985,6 +1179,7 @@ func (p *program) checkCatchExpression(node *catchExpression, scope *astScope, e
 		sort.Strings(missing)
 		p.add(node.pos, diagnosticCodeNonExhaustiveCatch, "non-exhaustive catch for %s; missing %s", expressionLabel(node.value), strings.Join(missing, ", "))
 	}
+	p.mergePendingPaths(scope, node.pos, paths)
 	return result
 }
 
@@ -1052,6 +1247,7 @@ func (p *program) checkMatchExpression(node *matchExpression, scope *astScope, e
 	}
 	handled := make(map[matchPattern]position, len(node.arms))
 	armType := ""
+	var paths []pendingPath
 	for _, arm := range node.arms {
 		if previous, duplicate := handled[arm.pattern]; duplicate {
 			p.add(arm.pos, diagnosticCodeMatchArm, "duplicate %s arm; already handled at %s:%d:%d", arm.pattern, previous.file, previous.line, previous.column)
@@ -1078,6 +1274,7 @@ func (p *program) checkMatchExpression(node *matchExpression, scope *astScope, e
 		}
 		armInfo := p.checkASTExpressionExpecting(arm.value, armScope, expected)
 		mergeEffects(info.effects, armInfo.effects)
+		paths = append(paths, pendingPath{scope: armScope, normal: armInfo.typ != typeNever})
 		clearAssignedNarrowings(scope, arm.value)
 		if armInfo.typ == typeNever || armInfo.typ == typeUnknown {
 			continue
@@ -1099,6 +1296,7 @@ func (p *program) checkMatchExpression(node *matchExpression, scope *astScope, e
 			p.add(node.pos, diagnosticCodeMatchExhaustiveness, "match does not handle Err; add an Err(...) or _ arm")
 		}
 	}
+	p.mergePendingPaths(scope, node.pos, paths)
 	if armType != "" {
 		info.typ = armType
 	}
@@ -1250,15 +1448,130 @@ func (scope *astScope) clone() *astScope {
 	for name, binding := range scope.usingBindings {
 		usingBindings[name] = binding
 	}
+	pending := make(map[string]pendingBinding, len(scope.pending))
+	for name, binding := range scope.pending {
+		binding.effects = cloneEffects(binding.effects)
+		pending[name] = binding
+	}
 	return &astScope{
 		function:      scope.function,
 		locals:        locals,
 		narrowed:      narrowed,
 		usingBindings: usingBindings,
+		pending:       pending,
+		currentBlock:  scope.currentBlock,
 		loopDepth:     scope.loopDepth,
 	}
 }
 
+func cloneEffects(source effectSet) effectSet {
+	cloned := make(effectSet, len(source))
+	for name, origin := range source {
+		cloned[name] = origin
+	}
+	return cloned
+}
+
+func copyPendingStates(target, source *astScope) {
+	for name, binding := range target.pending {
+		updated, exists := source.pending[name]
+		if exists && updated.owner == binding.owner {
+			binding.state = updated.state
+			target.pending[name] = binding
+		}
+	}
+}
+
+func (p *program) mergePendingBranches(target, left, right *astScope, leftNormal, rightNormal bool, pos position) {
+	p.mergePendingPaths(target, pos, []pendingPath{{scope: left, normal: leftNormal}, {scope: right, normal: rightNormal}})
+}
+
+func (p *program) mergePendingPaths(target *astScope, pos position, paths []pendingPath) {
+	for name, binding := range target.pending {
+		var state pendingState
+		haveState := false
+		mismatch := false
+		for _, path := range paths {
+			if !path.normal {
+				continue
+			}
+			pathBinding, exists := path.scope.pending[name]
+			if !exists || pathBinding.owner != binding.owner {
+				pathBinding = binding
+			}
+			if !haveState {
+				state = pathBinding.state
+				haveState = true
+				continue
+			}
+			if pathBinding.state != state {
+				mismatch = true
+			}
+		}
+		if !haveState {
+			continue
+		}
+		if mismatch {
+			if state != pendingInvalid {
+				p.add(pos, diagnosticCodePendingPath, "pending binding %s is awaited on only some normal branches", name)
+			}
+			binding.state = pendingInvalid
+		} else {
+			binding.state = state
+		}
+		target.pending[name] = binding
+	}
+}
+
+func (p *program) taskSafeType(name string, visiting map[string]bool) bool {
+	parsed := parseTypeName(name)
+	switch parsed.kind {
+	case typeKindOptional, typeKindArray:
+		return p.taskSafeType(parsed.base, visiting)
+	case typeKindTuple:
+		for _, element := range parsed.args {
+			if !p.taskSafeType(element, visiting) {
+				return false
+			}
+		}
+		return true
+	case typeKindGeneric:
+		if parsed.base != "Result" && parsed.base != mapTypeName {
+			return false
+		}
+		for _, argument := range parsed.args {
+			if !p.taskSafeType(argument, visiting) {
+				return false
+			}
+		}
+		return true
+	case typeKindName:
+		switch name {
+		case "null", "bool", "int", "float", "string", "bytes":
+			return true
+		}
+		if p.interfaces[name] != nil {
+			return false
+		}
+		class := p.classes[name]
+		if class == nil || class.nativeResource {
+			return false
+		}
+		if visiting[name] {
+			return true
+		}
+		visiting[name] = true
+		defer delete(visiting, name)
+		for _, field := range class.fields {
+			if !p.taskSafeType(p.resolveType(class.namespace, class.aliases, field.typ), visiting) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
 func mergeEffects(target, source effectSet) {
 	for name, origin := range source {
 		if _, exists := target[name]; !exists {

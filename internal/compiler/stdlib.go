@@ -1180,7 +1180,10 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 		return err
 	}
 	arguments := make([]string, 0, len(function.params))
-	parameters := make([]string, 0, len(function.params))
+	parameters := make([]string, 0, len(function.params)+1)
+	if g.program.usesAsync {
+		parameters = append(parameters, "slickContext context.Context")
+	}
 	for _, parameter := range function.params {
 		typ, err := g.declaredType(function.namespace, function.aliases, parameter.typ)
 		if err != nil {
@@ -1191,6 +1194,9 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 		parameters = append(parameters, argument+" "+g.goType(typ))
 	}
 	g.line("func %s(%s) (%s, error) {", goFunctionName(function.qualified), strings.Join(parameters, ", "), g.goType(resultType))
+	if g.program.usesAsync {
+		g.line("if err := slickCheckCancellation(slickContext); err != nil { return %s, err }", g.zero(resultType))
+	}
 	switch function.native {
 	case nativeStdBytesFromUtf8:
 		g.line("return slickBytes([]byte(%s)), nil", arguments[0])
@@ -1311,11 +1317,23 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 	case nativeStdIOWriterToBytes:
 		g.line("return %s{slickResource: slickIONewWriter()}, nil", goClassName(stdIOBytesWriterName))
 	case nativeStdIOReadAll:
-		g.line("return slickIOReadAll(%s, %s)", arguments[0], arguments[1])
+		if g.program.usesAsync {
+			g.line("return slickIOReadAll(slickContext, %s, %s)", arguments[0], arguments[1])
+		} else {
+			g.line("return slickIOReadAll(%s, %s)", arguments[0], arguments[1])
+		}
 	case nativeStdIOCopy:
-		g.line("return slickIOCopy(%s, %s, %s)", arguments[0], arguments[1], arguments[2])
+		if g.program.usesAsync {
+			g.line("return slickIOCopy(slickContext, %s, %s, %s)", arguments[0], arguments[1], arguments[2])
+		} else {
+			g.line("return slickIOCopy(%s, %s, %s)", arguments[0], arguments[1], arguments[2])
+		}
 	case nativeStdHTTPFetch:
-		g.line("return slickHTTPFetch(%s)", arguments[0])
+		if g.program.usesAsync {
+			g.line("return slickHTTPFetch(slickContext, %s)", arguments[0])
+		} else {
+			g.line("return slickHTTPFetch(%s)", arguments[0])
+		}
 	case nativeStdHTTPHeaderValues:
 		g.line("return slickHTTPHeaderValues(%s, %s), nil", arguments[0], arguments[1])
 	case nativeStdHTTPStatusText:

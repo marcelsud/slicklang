@@ -149,6 +149,7 @@ type program struct {
 	usesStdIO              bool
 	usesStdHTTP            bool
 	usesUsing              bool
+	usesAsync              bool
 }
 
 func CheckPath(path string) ([]Diagnostic, error) {
@@ -691,6 +692,12 @@ func (p *parser) parseFunction() {
 		return
 	}
 	parts := strings.Split(ref.name, ".")
+	for _, part := range parts {
+		if isAsyncKeyword(part) {
+			p.error(ref.pos, "%s is a reserved language keyword", part)
+			return
+		}
+	}
 	if len(parts) == 1 && isIterableBuiltin(ref.name) {
 		p.error(ref.pos, "function name %s is reserved by the iterable standard library", ref.name)
 		return
@@ -883,6 +890,11 @@ func (p *parser) expectIdent(label string) (token, bool) {
 	tok := p.current()
 	if tok.kind != scanner.Ident {
 		p.error(tok.pos, "expected %s", label)
+		return token{}, false
+	}
+	if isAsyncKeyword(tok.text) {
+		p.error(tok.pos, "%s is a reserved language keyword", tok.text)
+		p.advance()
 		return token{}, false
 	}
 	p.advance()
@@ -1116,6 +1128,9 @@ func validNamespace(namespace string) bool {
 }
 
 func validIdentifier(value string) bool {
+	if isAsyncKeyword(value) {
+		return false
+	}
 	for index, r := range value {
 		if index == 0 {
 			if r != '_' && !unicode.IsLetter(r) {
@@ -1126,4 +1141,8 @@ func validIdentifier(value string) bool {
 		}
 	}
 	return value != ""
+}
+
+func isAsyncKeyword(value string) bool {
+	return value == "async" || value == "await"
 }
