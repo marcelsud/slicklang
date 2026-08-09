@@ -1708,6 +1708,7 @@ func (g *goGenerator) resolveDeclaredType(namespace string, aliases map[string]a
 		}
 		return "(" + strings.Join(resolved, ",") + ")", nil
 	}
+	// Generic arguments resolve exactly as canonicalTypeName resolves them, so a
 	// declared Iterable<Dog> or Result<Dog, E> names the same type in the
 	// checker and in generated Go.
 	if base, args, generic := genericType(name); generic {
