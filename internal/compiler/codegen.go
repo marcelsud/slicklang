@@ -69,8 +69,10 @@ func newGoBinding(name, typ string) goBinding {
 }
 
 type goScope struct {
-	function *functionDecl
-	locals   map[string]goBinding
+	function  *functionDecl
+	locals    map[string]goBinding
+	pending   map[string]string
+	taskScope string
 }
 
 func (scope *goScope) clone() *goScope {
@@ -78,7 +80,11 @@ func (scope *goScope) clone() *goScope {
 	for name, binding := range scope.locals {
 		locals[name] = binding
 	}
-	return &goScope{function: scope.function, locals: locals}
+	pending := make(map[string]string, len(scope.pending))
+	for name, binding := range scope.pending {
+		pending[name] = binding
+	}
+	return &goScope{function: scope.function, locals: locals, pending: pending, taskScope: scope.taskScope}
 }
 
 type goGenerator struct {
@@ -131,6 +137,9 @@ func (p *program) generateGo() (string, error) {
 			generator.imports[name] = true
 		}
 	}
+	if p.usesAsync {
+		generator.imports["context"] = true
+	}
 	// Programs that use std.env need os; it is already imported unconditionally
 	// because the shared runtime prints through os.Stdout/Stderr.
 	generator.line("package main")
@@ -156,7 +165,11 @@ func (p *program) generateGo() (string, error) {
 		return "", err
 	}
 	generator.line("func main() {")
-	generator.line("value, err := %s()", goFunctionName(main.qualified))
+	if p.usesAsync {
+		generator.line("value, err := %s(context.Background())", goFunctionName(main.qualified))
+	} else {
+		generator.line("value, err := %s()", goFunctionName(main.qualified))
+	}
 	generator.line("if err != nil {")
 	generator.line("fmt.Fprintln(os.Stderr, err)")
 	generator.line("os.Exit(1)")
@@ -178,9 +191,17 @@ func (g *goGenerator) emitRuntime() {
 	g.line(`type slickContinue struct{}`)
 	g.line(`func (*slickContinue) Error() string { return "continue" }`)
 	g.line(`func slickIsControl(err error) bool {`)
-	g.line(`switch err.(type) { case *slickReturn, *slickBreak, *slickContinue: return true }`)
-	g.line(`return false`)
+	if g.program.usesAsync {
+		g.line(`var returned *slickReturn; var broken *slickBreak; var continued *slickContinue`)
+		g.line(`return errors.As(err, &returned) || errors.As(err, &broken) || errors.As(err, &continued)`)
+	} else {
+		g.line(`switch err.(type) { case *slickReturn, *slickBreak, *slickContinue: return true }`)
+		g.line(`return false`)
+	}
 	g.line(`}`)
+	if g.program.usesAsync {
+		g.emitTaskRuntime()
+	}
 	if g.program.usesUsing {
 		g.emitUsingRuntime()
 	}
@@ -318,6 +339,39 @@ func (g *goGenerator) emitRuntime() {
 	g.line("")
 }
 
+func (g *goGenerator) emitTaskRuntime() {
+	g.line(`type slickTaskCancelled struct{}`)
+	g.line(`func (*slickTaskCancelled) Error() string { return "task cancelled" }`)
+	g.line(`func slickCheckCancellation(ctx context.Context) error { if ctx.Err() != nil { return &slickTaskCancelled{} }; return nil }`)
+	g.line(`func slickIsTaskCancellation(err error) bool { var cancelled *slickTaskCancelled; return errors.As(err, &cancelled) }`)
+	g.line(`type slickTaskPanicFailure struct { value any }`)
+	g.line(`func (failure *slickTaskPanicFailure) Error() string { return fmt.Sprintf("panic: %%v", failure.value) }`)
+	g.line(`type slickTaskSuppressedFailure struct { primary error; suppressed []error }`)
+	g.line(`func (failure *slickTaskSuppressedFailure) Error() string { items := make([]string, len(failure.suppressed)); for index, err := range failure.suppressed { items[index] = err.Error() }; return failure.primary.Error() + " (suppressed: " + strings.Join(items, "; ") + ")" }`)
+	g.line(`func (failure *slickTaskSuppressedFailure) Unwrap() error { return failure.primary }`)
+	g.line(`func slickTaskSuppress(primary, suppressed error) error { if combined, ok := primary.(*slickTaskSuppressedFailure); ok { failures := append([]error(nil), combined.suppressed...); return &slickTaskSuppressedFailure{primary: combined.primary, suppressed: append(failures, suppressed)} }; return &slickTaskSuppressedFailure{primary: primary, suppressed: []error{suppressed}} }`)
+	g.line(`type slickTaskChild interface { slickTaskConsumed() bool; slickTaskCancel(); slickTaskAwaitError() error }`)
+	g.line(`type slickTaskResult[T any] struct { value T; err error }`)
+	g.line(`type slickTask[T any] struct { result chan slickTaskResult[T]; cancel context.CancelFunc; consumed bool }`)
+	g.line(`func (task *slickTask[T]) await() (T, error) { if task.consumed { var zero T; return zero, errors.New("pending binding already awaited") }; task.consumed = true; result := <-task.result; task.cancel(); return result.value, result.err }`)
+	g.line(`func (task *slickTask[T]) slickTaskConsumed() bool { return task.consumed }`)
+	g.line(`func (task *slickTask[T]) slickTaskCancel() { task.cancel() }`)
+	g.line(`func (task *slickTask[T]) slickTaskAwaitError() error { _, err := task.await(); return err }`)
+	g.line(`type slickTaskScope struct { context context.Context; cancel context.CancelFunc; children []slickTaskChild }`)
+	g.line(`func slickNewTaskScope(parent context.Context) *slickTaskScope { ctx, cancel := context.WithCancel(parent); return &slickTaskScope{context: ctx, cancel: cancel} }`)
+	g.line(`func slickStartTask[T any](scope *slickTaskScope, call func(context.Context) (T, error)) *slickTask[T] {`)
+	g.line(`ctx, cancel := context.WithCancel(scope.context); task := &slickTask[T]{result: make(chan slickTaskResult[T], 1), cancel: cancel}; scope.children = append(scope.children, task)`)
+	g.line(`go func() { result := slickTaskResult[T]{}; defer func() { if failure := recover(); failure != nil { result = slickTaskResult[T]{err: &slickTaskPanicFailure{value: failure}} }; task.result <- result }(); result.value, result.err = call(ctx) }()`)
+	g.line(`return task`)
+	g.line(`}`)
+	g.line(`func slickFinishTaskScope(scope *slickTaskScope, primary error) error {`)
+	g.line(`outstanding := false; for _, child := range scope.children { if !child.slickTaskConsumed() { outstanding = true; break } }; if outstanding { scope.cancel() }`)
+	g.line(`for _, child := range scope.children { if child.slickTaskConsumed() { continue }; childError := child.slickTaskAwaitError(); if childError == nil || slickIsTaskCancellation(childError) { continue }; if primary == nil { primary = childError } else { primary = slickTaskSuppress(primary, childError) } }`)
+	g.line(`scope.cancel(); return primary`)
+	g.line(`}`)
+	g.line("")
+}
+
 func (g *goGenerator) emitUsingRuntime() {
 	g.line(`type slickPanicFailure struct { value any }`)
 	g.line(`func (failure *slickPanicFailure) Error() string { return fmt.Sprintf("panic: %%v", failure.value) }`)
@@ -372,6 +426,9 @@ func (g *goGenerator) emitDeclarations() error {
 			parameters, err := g.parameterTypes(method.namespace, method.aliases, method.params)
 			if err != nil {
 				return err
+			}
+			if g.program.usesAsync {
+				parameters = append([]string{"context.Context"}, parameters...)
 			}
 			g.line("%s(%s) (%s, error)", goMethodName(method.name), strings.Join(parameters, ", "), g.goType(result))
 		}
@@ -486,8 +543,11 @@ func (g *goGenerator) emitFunction(function *functionDecl, receiver string) erro
 	if err != nil {
 		return err
 	}
-	scope := &goScope{function: function, locals: make(map[string]goBinding, len(function.params)+1)}
-	parameters := make([]string, 0, len(function.params))
+	scope := &goScope{function: function, locals: make(map[string]goBinding, len(function.params)+1), pending: make(map[string]string)}
+	parameters := make([]string, 0, len(function.params)+1)
+	if g.program.usesAsync {
+		parameters = append(parameters, "slickContext context.Context")
+	}
 	for _, parameter := range function.params {
 		typ, err := g.declaredType(function.namespace, function.aliases, parameter.typ)
 		if err != nil {
@@ -505,6 +565,9 @@ func (g *goGenerator) emitFunction(function *functionDecl, receiver string) erro
 		g.line("func (%s %s) %s(%s) (%s, error) {", self, g.goType(receiver), functionName, strings.Join(parameters, ", "), g.goType(resultType))
 	} else {
 		g.line("func %s(%s) (%s, error) {", functionName, strings.Join(parameters, ", "), g.goType(resultType))
+	}
+	if g.program.usesAsync {
+		g.line("if err := slickCheckCancellation(slickContext); err != nil { return %s, err }", g.zero(resultType))
 	}
 	body, err := g.blockExpression(function.ast, scope, resultType, "")
 	if err != nil {
@@ -529,9 +592,20 @@ func (g *goGenerator) emitFunction(function *functionDecl, receiver string) erro
 // only inside the branch that proved it present.
 func (g *goGenerator) blockExpression(block *blockNode, scope *goScope, resultType, prelude string) (string, error) {
 	var body strings.Builder
-	body.WriteString("func() (")
-	body.WriteString(g.goType(resultType))
-	body.WriteString(", error) {\n")
+	if block != nil && block.hasAsync {
+		value := g.unique("blockValue")
+		blockError := g.unique("blockError")
+		taskScope := g.unique("taskScope")
+		scope.taskScope = taskScope
+		fmt.Fprintf(&body, "func() (%s %s, %s error) {\n", value, g.goType(resultType), blockError)
+		fmt.Fprintf(&body, "%s := slickNewTaskScope(slickContext)\n", taskScope)
+		fmt.Fprintf(&body, "defer func() { if failure := recover(); failure != nil { %s = %s; %s = &slickTaskPanicFailure{value: failure} }; %s = slickFinishTaskScope(%s, %s) }()\n",
+			value, g.zero(resultType), blockError, blockError, taskScope, blockError)
+	} else {
+		body.WriteString("func() (")
+		body.WriteString(g.goType(resultType))
+		body.WriteString(", error) {\n")
+	}
 	body.WriteString(prelude)
 	if block == nil || len(block.statements) == 0 {
 		fmt.Fprintf(&body, "return %s, nil\n", g.zero(resultType))
@@ -563,6 +637,10 @@ func (g *goGenerator) emitStatement(body *strings.Builder, statement statementNo
 		g.emitErrorReturn(body, callError, resultType)
 		fmt.Fprintf(body, "_ = %s\n", variable)
 		scope.locals[node.name] = newGoBinding(variable, typ)
+	case *asyncLetStatement:
+		if err := g.emitAsyncLet(body, node, scope, resultType); err != nil {
+			return err
+		}
 	case *assignmentStatement:
 		binding, ok := scope.locals[node.name]
 		if !ok {
@@ -653,6 +731,71 @@ func (g *goGenerator) emitStatement(body *strings.Builder, statement statementNo
 	return nil
 }
 
+func (g *goGenerator) emitAsyncLet(body *strings.Builder, node *asyncLetStatement, scope *goScope, resultType string) error {
+	if scope.taskScope == "" {
+		return fmt.Errorf("async let has no generated task scope")
+	}
+	call := node.call
+	name, ok := call.callee.(*nameExpression)
+	if !ok {
+		return fmt.Errorf("generated async call target is not a name")
+	}
+	fmt.Fprintf(body, "if err := slickCheckCancellation(slickContext); err != nil { return %s, err }\n", g.zero(resultType))
+
+	callName := ""
+	parts := strings.Split(name.name, ".")
+	if len(parts) == 2 && call.resolvedReceiver != "" {
+		binding, exists := scope.locals[parts[0]]
+		if !exists {
+			return fmt.Errorf("unknown generated async receiver %s", parts[0])
+		}
+		receiver := g.unique("asyncReceiver")
+		fmt.Fprintf(body, "%s := %s\n_ = %s\n", receiver, binding.name, receiver)
+		callName = receiver + "." + goMethodName(parts[1])
+	} else if call.resolvedNative == nativeStdJsonDecode || call.resolvedNative == nativeStdJsonEncode {
+		if len(call.resolvedTypeArgs) != 1 {
+			return fmt.Errorf("generated async JSON call is missing its type argument")
+		}
+		operation := "Decode"
+		if call.resolvedNative == nativeStdJsonEncode {
+			operation = "Encode"
+		}
+		callName = goJSONHelperName(operation, call.resolvedTypeArgs[0])
+	} else {
+		function := g.program.resolveFunction(scope.function, name.name)
+		if function == nil {
+			return fmt.Errorf("unknown generated async function %s", name.name)
+		}
+		callName = goFunctionName(function.qualified)
+	}
+
+	arguments := make([]string, 0, len(call.args)+1)
+	for index, argument := range call.args {
+		value, err := g.evalExpression(body, argument, scope, "asyncArgument", resultType)
+		if err != nil {
+			return err
+		}
+		actual := call.resolvedArgumentTypes[index]
+		if index < len(call.resolvedParams) {
+			value = g.convert(value, actual, call.resolvedParams[index])
+		}
+		arguments = append(arguments, value)
+	}
+	childContext := g.unique("childContext")
+	childArguments := arguments
+	if call.resolvedNative != nativeStdJsonDecode && call.resolvedNative != nativeStdJsonEncode {
+		childArguments = append([]string{childContext}, childArguments...)
+	}
+	task := g.unique("task")
+	fmt.Fprintf(body, "%s := slickStartTask[%s](%s, func(%s context.Context) (%s, error) {\n",
+		task, g.goType(call.resolvedResult), scope.taskScope, childContext, g.goType(call.resolvedResult))
+	fmt.Fprintf(body, "if err := slickCheckCancellation(%s); err != nil { return %s, err }\n", childContext, g.zero(call.resolvedResult))
+	fmt.Fprintf(body, "return %s(%s)\n", callName, strings.Join(childArguments, ", "))
+	fmt.Fprintf(body, "})\n_ = %s\n", task)
+	scope.pending[node.name] = task
+	return nil
+}
+
 func (g *goGenerator) emitFor(body *strings.Builder, node *forStatement, scope *goScope, resultType string) error {
 	expression, err := g.expression(node.iterable, scope)
 	if err != nil {
@@ -680,6 +823,9 @@ func (g *goGenerator) emitFor(body *strings.Builder, node *forStatement, scope *
 	index := g.unique("index")
 	label := g.unique("loop")
 	fmt.Fprintf(body, "%s: for %s := 0; %s < %s.Len(); %s++ {\n", label, index, index, sequence, index)
+	if g.program.usesAsync {
+		fmt.Fprintf(body, "if err := slickCheckCancellation(slickContext); err != nil { return %s, err }\n", g.zero(resultType))
+	}
 	loopScope := scope.clone()
 	for bindingIndex, name := range node.bindings {
 		if name == "_" {
@@ -793,6 +939,12 @@ func (g *goGenerator) expression(expression expressionNode, scope *goScope) (str
 		if err := g.emitCallExpression(&body, node, scope, typ); err != nil {
 			return "", err
 		}
+	case *awaitExpression:
+		task, exists := scope.pending[node.name]
+		if !exists {
+			return "", fmt.Errorf("unknown generated pending binding %s", node.name)
+		}
+		fmt.Fprintf(&body, "return %s.await()\n", task)
 	case *unaryExpression:
 		value, err := g.evalExpression(&body, node.value, scope, "unary", typ)
 		if err != nil {
@@ -974,8 +1126,12 @@ func (g *goGenerator) emitUsingExpression(body *strings.Builder, node *usingExpr
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(body, "return slickUsing(%s, func() error { _, err := %s.%s(); return err })\n",
-		strings.TrimSuffix(usingBody, "()"), resource, goMethodName("Close"))
+	closeArguments := ""
+	if g.program.usesAsync {
+		closeArguments = "context.WithoutCancel(slickContext)"
+	}
+	fmt.Fprintf(body, "return slickUsing(%s, func() error { _, err := %s.%s(%s); return err })\n",
+		strings.TrimSuffix(usingBody, "()"), resource, goMethodName("Close"), closeArguments)
 	return nil
 }
 
@@ -983,6 +1139,9 @@ func (g *goGenerator) emitCallExpression(body *strings.Builder, node *callExpres
 	name, ok := node.callee.(*nameExpression)
 	if !ok {
 		return fmt.Errorf("generated call target is not a name")
+	}
+	if g.program.usesAsync {
+		fmt.Fprintf(body, "if err := slickCheckCancellation(slickContext); err != nil { return %s, err }\n", g.zero(resultType))
 	}
 	arguments := make([]string, 0, len(node.args))
 	argumentTypes := make([]string, 0, len(node.args))
@@ -1078,6 +1237,9 @@ func (g *goGenerator) emitCallExpression(body *strings.Builder, node *callExpres
 		}
 		arguments[index] = g.convert(arguments[index], argumentTypes[index], declared)
 	}
+	if g.program.usesAsync {
+		arguments = append([]string{"slickContext"}, arguments...)
+	}
 	fmt.Fprintf(body, "return %s(%s)\n", call, strings.Join(arguments, ", "))
 	return nil
 }
@@ -1147,9 +1309,13 @@ func (g *goGenerator) emitCatchExpression(body *strings.Builder, node *catchExpr
 			continue
 		}
 		armScope := scope.clone()
+		binding := arm.binding
+		if binding == "" {
+			binding = node.binding
+		}
 		if errorType == "Error" {
-			if node.binding != "" {
-				armScope.locals[node.binding] = goBinding{name: caughtError, typ: "Error"}
+			if binding != "" {
+				armScope.locals[binding] = goBinding{name: caughtError, typ: "Error"}
 			}
 			armValue, err := g.expression(arm.value, armScope)
 			if err != nil {
@@ -1162,8 +1328,8 @@ func (g *goGenerator) emitCatchExpression(body *strings.Builder, node *catchExpr
 		fmt.Fprintf(body, "var %s *%s\n", caught, goClassName(errorType))
 		fmt.Fprintf(body, "if errors.As(%s, &%s) {\n", caughtError, caught)
 		fmt.Fprintf(body, "_ = %s\n", caught)
-		if node.binding != "" {
-			armScope.locals[node.binding] = goBinding{name: caught, typ: errorType}
+		if binding != "" {
+			armScope.locals[binding] = goBinding{name: caught, typ: errorType}
 		}
 		armValue, err := g.expression(arm.value, armScope)
 		if err != nil {
@@ -1326,6 +1492,9 @@ func (g *goGenerator) expressionType(expression expressionNode, scope *goScope) 
 	}
 	if node, ok := expression.(*usingExpression); ok && node.result != "" {
 		return node.result, nil
+	}
+	if node, ok := expression.(*awaitExpression); ok && node.resolved != "" {
+		return node.resolved, nil
 	}
 	locals := make(map[string]string, len(scope.locals))
 	for name, binding := range scope.locals {

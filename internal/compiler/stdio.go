@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -159,9 +160,11 @@ func (p *program) callNativeStdIO(function *functionDecl, frame *runtimeFrame) (
 		}
 		return nullRuntimeValue(), nil, true
 	case nativeStdIOReadAll:
-		return p.runtimeIOReadAll(frame.locals["Reader"], frame.locals["MaxBytes"].scalar.(int64), resultType), nil, true
+		value, err := p.runtimeIOReadAll(frame.ctx, frame.locals["Reader"], frame.locals["MaxBytes"].scalar.(int64), resultType)
+		return value, err, true
 	case nativeStdIOCopy:
-		return p.runtimeIOCopy(frame.locals["Reader"], frame.locals["Writer"], frame.locals["MaxBytes"].scalar.(int64), resultType), nil, true
+		value, err := p.runtimeIOCopy(frame.ctx, frame.locals["Reader"], frame.locals["Writer"], frame.locals["MaxBytes"].scalar.(int64), resultType)
+		return value, err, true
 	default:
 		return runtimeValue{}, nil, false
 	}
@@ -184,57 +187,75 @@ func runtimeIOFailureResult(resultType, operation string, err error) runtimeValu
 	return runtimeResultValue(resultType, false, runtimeIOFailure(operation, err.Error()))
 }
 
-func (p *program) runtimeIOReadAll(reader runtimeValue, maxBytes int64, resultType string) runtimeValue {
+func (p *program) runtimeIOReadAll(ctx context.Context, reader runtimeValue, maxBytes int64, resultType string) (runtimeValue, error) {
 	if maxBytes < 0 {
-		return runtimeIOFailureResult(resultType, "ReadAll", errors.New("MaxBytes must not be negative"))
+		return runtimeIOFailureResult(resultType, "ReadAll", errors.New("MaxBytes must not be negative")), nil
 	}
 	output := make([]byte, 0)
 	for {
+		if err := checkTaskCancellation(ctx); err != nil {
+			return runtimeValue{}, err
+		}
 		request := boundedReadSize(maxBytes - int64(len(output)))
-		chunk, eof, failure := p.runtimeIORead(reader, request)
+		chunk, eof, failure := p.runtimeIORead(ctx, reader, request)
 		if failure != nil {
-			return runtimeIOFailureResult(resultType, "ReadAll", failure)
+			if isTaskCancellation(failure) {
+				return runtimeValue{}, failure
+			}
+			return runtimeIOFailureResult(resultType, "ReadAll", failure), nil
 		}
 		if eof {
-			return runtimeResultValue(resultType, true, runtimeValue{typ: "bytes", scalar: output})
+			return runtimeResultValue(resultType, true, runtimeValue{typ: "bytes", scalar: output}), nil
 		}
 		if len(chunk) == 0 {
-			return runtimeIOFailureResult(resultType, "ReadAll", errors.New("reader made no progress"))
+			return runtimeIOFailureResult(resultType, "ReadAll", errors.New("reader made no progress")), nil
 		}
 		if int64(len(chunk)) > maxBytes-int64(len(output)) {
-			return runtimeIOFailureResult(resultType, "ReadAll", errors.New("byte limit exceeded"))
+			return runtimeIOFailureResult(resultType, "ReadAll", errors.New("byte limit exceeded")), nil
 		}
 		output = append(output, chunk...)
 	}
 }
 
-func (p *program) runtimeIOCopy(reader, writer runtimeValue, maxBytes int64, resultType string) runtimeValue {
+func (p *program) runtimeIOCopy(ctx context.Context, reader, writer runtimeValue, maxBytes int64, resultType string) (runtimeValue, error) {
 	if maxBytes < 0 {
-		return runtimeIOFailureResult(resultType, "Copy", errors.New("MaxBytes must not be negative"))
+		return runtimeIOFailureResult(resultType, "Copy", errors.New("MaxBytes must not be negative")), nil
 	}
 	var total int64
 	for {
-		chunk, eof, failure := p.runtimeIORead(reader, boundedReadSize(maxBytes-total))
+		if err := checkTaskCancellation(ctx); err != nil {
+			return runtimeValue{}, err
+		}
+		chunk, eof, failure := p.runtimeIORead(ctx, reader, boundedReadSize(maxBytes-total))
 		if failure != nil {
-			return runtimeIOFailureResult(resultType, "Copy", failure)
+			if isTaskCancellation(failure) {
+				return runtimeValue{}, failure
+			}
+			return runtimeIOFailureResult(resultType, "Copy", failure), nil
 		}
 		if eof {
-			return runtimeResultValue(resultType, true, runtimeValue{typ: "int", scalar: total})
+			return runtimeResultValue(resultType, true, runtimeValue{typ: "int", scalar: total}), nil
 		}
 		if len(chunk) == 0 {
-			return runtimeIOFailureResult(resultType, "Copy", errors.New("reader made no progress"))
+			return runtimeIOFailureResult(resultType, "Copy", errors.New("reader made no progress")), nil
 		}
 		remaining := maxBytes - total
 		if int64(len(chunk)) > remaining {
 			if remaining > 0 {
-				if failure = p.runtimeIOWrite(writer, chunk[:int(remaining)]); failure != nil {
-					return runtimeIOFailureResult(resultType, "Copy", failure)
+				if failure = p.runtimeIOWrite(ctx, writer, chunk[:int(remaining)]); failure != nil {
+					if isTaskCancellation(failure) {
+						return runtimeValue{}, failure
+					}
+					return runtimeIOFailureResult(resultType, "Copy", failure), nil
 				}
 			}
-			return runtimeIOFailureResult(resultType, "Copy", errors.New("byte limit exceeded"))
+			return runtimeIOFailureResult(resultType, "Copy", errors.New("byte limit exceeded")), nil
 		}
-		if failure = p.runtimeIOWrite(writer, chunk); failure != nil {
-			return runtimeIOFailureResult(resultType, "Copy", failure)
+		if failure = p.runtimeIOWrite(ctx, writer, chunk); failure != nil {
+			if isTaskCancellation(failure) {
+				return runtimeValue{}, failure
+			}
+			return runtimeIOFailureResult(resultType, "Copy", failure), nil
 		}
 		total += int64(len(chunk))
 	}
@@ -247,8 +268,8 @@ func boundedReadSize(remaining int64) int64 {
 	return stdioChunkSize
 }
 
-func (p *program) runtimeIORead(receiver runtimeValue, maxBytes int64) ([]byte, bool, error) {
-	value, err := p.callRuntimeIOMethod(receiver, "Read", []runtimeValue{{typ: "int", scalar: maxBytes}})
+func (p *program) runtimeIORead(ctx context.Context, receiver runtimeValue, maxBytes int64) ([]byte, bool, error) {
+	value, err := p.callRuntimeIOMethod(ctx, receiver, "Read", []runtimeValue{{typ: "int", scalar: maxBytes}})
 	if err != nil {
 		return nil, false, err
 	}
@@ -284,8 +305,8 @@ func (p *program) runtimeIORead(receiver runtimeValue, maxBytes int64) ([]byte, 
 	return append([]byte(nil), chunk...), false, nil
 }
 
-func (p *program) runtimeIOWrite(receiver runtimeValue, chunk []byte) error {
-	value, err := p.callRuntimeIOMethod(receiver, "Write", []runtimeValue{{typ: "bytes", scalar: append([]byte(nil), chunk...)}})
+func (p *program) runtimeIOWrite(ctx context.Context, receiver runtimeValue, chunk []byte) error {
+	value, err := p.callRuntimeIOMethod(ctx, receiver, "Write", []runtimeValue{{typ: "bytes", scalar: append([]byte(nil), chunk...)}})
 	if err != nil {
 		return err
 	}
@@ -298,12 +319,12 @@ func (p *program) runtimeIOWrite(receiver runtimeValue, chunk []byte) error {
 	return nil
 }
 
-func (p *program) callRuntimeIOMethod(receiver runtimeValue, name string, arguments []runtimeValue) (runtimeValue, error) {
+func (p *program) callRuntimeIOMethod(ctx context.Context, receiver runtimeValue, name string, arguments []runtimeValue) (runtimeValue, error) {
 	class := p.classes[receiver.typ]
 	if class == nil || class.implementations[name] == nil {
 		return runtimeValue{}, fmt.Errorf("%s has no implemented %s method", displayName(receiver.typ), name)
 	}
-	return p.callFunction(class.implementations[name], arguments, &receiver, nil)
+	return p.callFunctionContext(ctx, class.implementations[name], arguments, &receiver, nil)
 }
 
 func runtimeIOFailureMessage(value runtimeValue) string {
@@ -320,7 +341,10 @@ func (g *goGenerator) emitNativeMethod(function *functionDecl, receiverType stri
 	}
 	receiver := g.unique("self")
 	arguments := make([]string, 0, len(function.params))
-	parameters := make([]string, 0, len(function.params))
+	parameters := make([]string, 0, len(function.params)+1)
+	if g.program.usesAsync {
+		parameters = append(parameters, "slickContext context.Context")
+	}
 	for _, parameter := range function.params {
 		typ, err := g.declaredType(function.namespace, function.aliases, parameter.typ)
 		if err != nil {
@@ -332,6 +356,9 @@ func (g *goGenerator) emitNativeMethod(function *functionDecl, receiverType stri
 	}
 	g.line("func (%s %s) %s(%s) (%s, error) {",
 		receiver, goClassName(receiverType), goMethodName(function.name), strings.Join(parameters, ", "), g.goType(resultType))
+	if g.program.usesAsync {
+		g.line("if err := slickCheckCancellation(slickContext); err != nil { return %s, err }", g.zero(resultType))
+	}
 	switch function.native {
 	case nativeStdIOReaderRead:
 		g.line("return slickIORead(%s.slickResource, %s), nil", receiver, arguments[0])
@@ -430,12 +457,19 @@ func (g *goGenerator) emitStdIORuntime() {
 	g.line("if remaining < %d { return remaining + 1 }", stdioChunkSize)
 	g.line("return %d", stdioChunkSize)
 	g.line(`}`)
-	g.line("func slickIOReadAll(reader %s, maxBytes int64) (%s, error) {", readerInterface, readAllResult)
+	contextParameter, contextArgument := "", ""
+	if g.program.usesAsync {
+		contextParameter, contextArgument = "slickContext context.Context, ", "slickContext, "
+	}
+	g.line("func slickIOReadAll(%sreader %s, maxBytes int64) (%s, error) {", contextParameter, readerInterface, readAllResult)
 	g.line("if maxBytes < 0 { return %s{failure: slickIOFailure(%q, %q)}, nil }", readAllResult, "ReadAll", "MaxBytes must not be negative")
 	g.line(`output := make(slickBytes, 0)`)
 	g.line(`for {`)
+	if g.program.usesAsync {
+		g.line("if err := slickCheckCancellation(slickContext); err != nil { return %s{}, err }", readAllResult)
+	}
 	g.line(`request := slickIOReadSize(maxBytes - int64(len(output)))`)
-	g.line("read, err := reader.%s(request)", goMethodName("Read"))
+	g.line("read, err := reader.%s(%srequest)", goMethodName("Read"), contextArgument)
 	g.line("if err != nil { return %s{}, err }", readAllResult)
 	g.line("if !read.ok { return %s{failure: slickIOFailure(%q, read.failure.%s)}, nil }", readAllResult, "ReadAll", messageField)
 	g.line("if !read.value.present { return %s{ok: true, value: output}, nil }", readAllResult)
@@ -446,12 +480,15 @@ func (g *goGenerator) emitStdIORuntime() {
 	g.line(`output = append(output, chunk...)`)
 	g.line(`}`)
 	g.line(`}`)
-	g.line("func slickIOCopy(reader %s, writer %s, maxBytes int64) (%s, error) {", readerInterface, writerInterface, copyResult)
+	g.line("func slickIOCopy(%sreader %s, writer %s, maxBytes int64) (%s, error) {", contextParameter, readerInterface, writerInterface, copyResult)
 	g.line("if maxBytes < 0 { return %s{failure: slickIOFailure(%q, %q)}, nil }", copyResult, "Copy", "MaxBytes must not be negative")
 	g.line(`var total int64`)
 	g.line(`for {`)
+	if g.program.usesAsync {
+		g.line("if err := slickCheckCancellation(slickContext); err != nil { return %s{}, err }", copyResult)
+	}
 	g.line(`request := slickIOReadSize(maxBytes - total)`)
-	g.line("read, err := reader.%s(request)", goMethodName("Read"))
+	g.line("read, err := reader.%s(%srequest)", goMethodName("Read"), contextArgument)
 	g.line("if err != nil { return %s{}, err }", copyResult)
 	g.line("if !read.ok { return %s{failure: slickIOFailure(%q, read.failure.%s)}, nil }", copyResult, "Copy", messageField)
 	g.line("if !read.value.present { return %s{ok: true, value: total}, nil }", copyResult)
@@ -461,13 +498,13 @@ func (g *goGenerator) emitStdIORuntime() {
 	g.line(`remaining := maxBytes - total`)
 	g.line(`if int64(len(chunk)) > remaining {`)
 	g.line(`if remaining > 0 {`)
-	g.line("written, err := writer.%s(append(slickBytes(nil), chunk[:int(remaining)]...))", goMethodName("Write"))
+	g.line("written, err := writer.%s(%sappend(slickBytes(nil), chunk[:int(remaining)]...))", goMethodName("Write"), contextArgument)
 	g.line("if err != nil { return %s{}, err }", copyResult)
 	g.line("if !written.ok { return %s{failure: slickIOFailure(%q, written.failure.%s)}, nil }", copyResult, "Copy", messageField)
 	g.line(`}`)
 	g.line("return %s{failure: slickIOFailure(%q, %q)}, nil", copyResult, "Copy", "byte limit exceeded")
 	g.line(`}`)
-	g.line("written, err := writer.%s(append(slickBytes(nil), chunk...))", goMethodName("Write"))
+	g.line("written, err := writer.%s(%sappend(slickBytes(nil), chunk...))", goMethodName("Write"), contextArgument)
 	g.line("if err != nil { return %s{}, err }", copyResult)
 	g.line("if !written.ok { return %s{failure: slickIOFailure(%q, written.failure.%s)}, nil }", copyResult, "Copy", messageField)
 	g.line(`total += int64(len(chunk))`)

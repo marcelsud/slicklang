@@ -629,6 +629,8 @@ func (g *goGenerator) collectJSONCodecs() []jsonCodecNeed {
 			switch node := statement.(type) {
 			case *letStatement:
 				walk(node.value)
+			case *asyncLetStatement:
+				walk(node.call)
 			case *assignmentStatement:
 				walk(node.value)
 			case *forStatement:

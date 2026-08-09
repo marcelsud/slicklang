@@ -1,0 +1,34 @@
+function FetchPair(LeftURL: string, RightURL: string) -> Result<string, std.http.Failure> {
+    async let LeftJob = std.http.Fetch(std.http.Request {
+        Method: "GET"
+        URL: LeftURL
+    })
+    async let RightJob = std.http.Fetch(std.http.Request {
+        Method: "GET"
+        URL: RightURL
+    })
+    let Left = await LeftJob?
+    let Right = await RightJob?
+    let LeftLength = std.bytes.Length(Left.Body)
+    let RightLength = std.bytes.Length(Right.Body)
+    Ok(`${Left.Status}:${LeftLength},${Right.Status}:${RightLength}`)
+}
+
+function main() -> string {
+    let MaybeLeftURL = std.env.Get("SLICK_ASYNC_LEFT_URL")
+    let LeftURL = if (MaybeLeftURL == null) {
+        return "set SLICK_ASYNC_LEFT_URL and SLICK_ASYNC_RIGHT_URL"
+    } else {
+        MaybeLeftURL
+    }
+    let MaybeRightURL = std.env.Get("SLICK_ASYNC_RIGHT_URL")
+    let RightURL = if (MaybeRightURL == null) {
+        return "set SLICK_ASYNC_LEFT_URL and SLICK_ASYNC_RIGHT_URL"
+    } else {
+        MaybeRightURL
+    }
+    match FetchPair(LeftURL, RightURL) {
+        Ok(Output) => Output
+        Err(Failure) => `${Failure.Kind}: ${Failure.Message}`
+    }
+}

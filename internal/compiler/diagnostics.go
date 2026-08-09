@@ -83,6 +83,16 @@ const (
 	diagnosticCodeOrphanDocumentation      diagnosticCode = "SLK391"
 	diagnosticCodeConflictingDocumentation diagnosticCode = "SLK392"
 	diagnosticCodeResourceRequiresUsing    diagnosticCode = "SLK393"
+	diagnosticCodeAsyncInitializer         diagnosticCode = "SLK394"
+	diagnosticCodePendingUse               diagnosticCode = "SLK395"
+	diagnosticCodePendingAssignment        diagnosticCode = "SLK396"
+	diagnosticCodeAwaitUnknown             diagnosticCode = "SLK397"
+	diagnosticCodeAwaitOrdinary            diagnosticCode = "SLK398"
+	diagnosticCodeAwaitTwice               diagnosticCode = "SLK399"
+	diagnosticCodePendingMissingAwait      diagnosticCode = "SLK400"
+	diagnosticCodePendingPath              diagnosticCode = "SLK401"
+	diagnosticCodeAwaitLoop                diagnosticCode = "SLK402"
+	diagnosticCodeAsyncUnsafeValue         diagnosticCode = "SLK403"
 )
 
 var ErrUnknownDiagnostic = errors.New("unknown diagnostic")
@@ -435,6 +445,56 @@ var diagnosticDefinitions = []diagnosticDefinition{
 		"Standard I/O resources must be owned by using so cleanup occurs on every exit path.",
 		"A standard reader or writer is used outside automatic using ownership.",
 		"Acquire and consume the resource inside a using scope."),
+	defineDiagnostic(diagnosticCodeAsyncInitializer, DiagnosticPhaseTypeCheck,
+		"Invalid async initializer",
+		"An async let starts exactly one existing function or method call.",
+		"The initializer is not a resolved function or method call.",
+		"Call one function or method directly after the equals sign."),
+	defineDiagnostic(diagnosticCodePendingUse, DiagnosticPhaseTypeCheck,
+		"Pending binding used as a value",
+		"A pending binding is compiler-owned task state and has no public value representation.",
+		"Code reads, stores, passes, returns, or otherwise uses a pending binding without await.",
+		"Use the binding only as the direct operand of await."),
+	defineDiagnostic(diagnosticCodePendingAssignment, DiagnosticPhaseTypeCheck,
+		"Pending binding is immutable",
+		"An async let binding identifies one lexical child until await consumes it.",
+		"Code assigns to a pending binding.",
+		"Remove the assignment and await the original binding."),
+	defineDiagnostic(diagnosticCodeAwaitUnknown, DiagnosticPhaseNameResolution,
+		"Unknown pending binding",
+		"Await can consume only an async let binding visible in the current lexical scope.",
+		"The await operand does not name a visible pending binding.",
+		"Fix the name or declare the async let in an enclosing block."),
+	defineDiagnostic(diagnosticCodeAwaitOrdinary, DiagnosticPhaseTypeCheck,
+		"Ordinary value awaited",
+		"Only async let bindings are pending and awaitable.",
+		"The await operand names an ordinary local or parameter.",
+		"Remove await or await an async let binding."),
+	defineDiagnostic(diagnosticCodeAwaitTwice, DiagnosticPhaseTypeCheck,
+		"Pending binding awaited twice",
+		"Await consumes its pending binding exactly once.",
+		"A control-flow path reaches a second await of the same binding.",
+		"Keep one await and reuse its ordinary result value."),
+	defineDiagnostic(diagnosticCodePendingMissingAwait, DiagnosticPhaseTypeCheck,
+		"Pending binding is not awaited",
+		"Every normal path out of an owning block must consume each pending binding exactly once.",
+		"A normal block exit leaves an async let binding pending.",
+		"Await the binding on every normal path or after the branch."),
+	defineDiagnostic(diagnosticCodePendingPath, DiagnosticPhaseTypeCheck,
+		"Pending binding consumption differs by branch",
+		"A pending binding must be consumed exactly once on every normal control-flow path.",
+		"Some normal branches await a binding while others do not.",
+		"Await it in every normal branch or once after the branch."),
+	defineDiagnostic(diagnosticCodeAwaitLoop, DiagnosticPhaseTypeCheck,
+		"Pending binding awaited from a repeating loop",
+		"An outer pending binding cannot be consumed by more than one loop iteration.",
+		"Await occurs in a loop deeper than the binding's owning block.",
+		"Await before or after the loop, or declare and await the async let inside one iteration."),
+	defineDiagnostic(diagnosticCodeAsyncUnsafeValue, DiagnosticPhaseTypeCheck,
+		"Task-unsafe value crosses into a child",
+		"Child receivers and arguments must be immutable structural values without native resources or resource-hiding interfaces.",
+		"An async call captures a native resource, structural resource interface, or unsupported contained type.",
+		"Pass immutable data instead and acquire resources inside the child."),
 }
 
 var diagnosticRegistry = mustBuildDiagnosticRegistry(diagnosticDefinitions)

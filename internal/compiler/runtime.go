@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -193,10 +194,107 @@ type runtimeIterable struct {
 // holds the payload a null test proved present. Assignment writes storage and
 // retires the refinement, so a narrowed branch never hides a write.
 type runtimeFrame struct {
-	function *functionDecl
-	locals   map[string]runtimeValue
-	narrowed map[string]runtimeValue
-	parent   *runtimeFrame
+	function  *functionDecl
+	locals    map[string]runtimeValue
+	narrowed  map[string]runtimeValue
+	pending   map[string]*runtimePending
+	taskScope *runtimeTaskScope
+	ctx       context.Context
+	parent    *runtimeFrame
+}
+
+type taskCancelled struct{}
+
+func (*taskCancelled) Error() string { return "task cancelled" }
+
+func checkTaskCancellation(ctx context.Context) error {
+	if ctx != nil && ctx.Err() != nil {
+		return &taskCancelled{}
+	}
+	return nil
+}
+
+func isTaskCancellation(err error) bool {
+	var cancelled *taskCancelled
+	return errors.As(err, &cancelled)
+}
+
+type runtimeTaskResult struct {
+	value runtimeValue
+	err   error
+}
+
+type runtimePending struct {
+	result   chan runtimeTaskResult
+	cancel   context.CancelFunc
+	consumed bool
+}
+
+func (pending *runtimePending) await() (runtimeValue, error) {
+	if pending.consumed {
+		return runtimeValue{}, errors.New("pending binding already awaited")
+	}
+	pending.consumed = true
+	result := <-pending.result
+	pending.cancel()
+	return result.value, result.err
+}
+
+type runtimeTaskScope struct {
+	ctx      context.Context
+	cancel   context.CancelFunc
+	children []*runtimePending
+}
+
+func newRuntimeTaskScope(parent context.Context) *runtimeTaskScope {
+	ctx, cancel := context.WithCancel(parent)
+	return &runtimeTaskScope{ctx: ctx, cancel: cancel}
+}
+
+func (scope *runtimeTaskScope) start(call func(context.Context) (runtimeValue, error)) *runtimePending {
+	ctx, cancel := context.WithCancel(scope.ctx)
+	pending := &runtimePending{result: make(chan runtimeTaskResult, 1), cancel: cancel}
+	scope.children = append(scope.children, pending)
+	go func() {
+		result := runtimeTaskResult{}
+		defer func() {
+			if failure := recover(); failure != nil {
+				result = runtimeTaskResult{err: &panicFailure{value: failure}}
+			}
+			pending.result <- result
+		}()
+		result.value, result.err = call(ctx)
+	}()
+	return pending
+}
+
+func (scope *runtimeTaskScope) finish(primary error) error {
+	outstanding := false
+	for _, child := range scope.children {
+		if !child.consumed {
+			outstanding = true
+			break
+		}
+	}
+	if outstanding {
+		scope.cancel()
+	}
+	for _, child := range scope.children {
+		if child.consumed {
+			continue
+		}
+		_, childError := child.await()
+		if childError == nil || isTaskCancellation(childError) {
+			continue
+		}
+		if primary == nil {
+			primary = childError
+		} else {
+			primary = suppressFailure(primary, childError)
+		}
+	}
+	scope.cancel()
+	return primary
 }
 
 type slickThrow struct {
@@ -292,14 +390,21 @@ func (p *program) runMain() (runtimeValue, error) {
 	if len(main.params) != 0 {
 		return runtimeValue{}, errors.New("root.main must not accept parameters")
 	}
-	return p.callFunction(main, nil, nil, nil)
+	return p.callFunctionContext(context.Background(), main, nil, nil, nil)
 }
 
 func (p *program) callFunction(function *functionDecl, args []runtimeValue, self *runtimeValue, typeArgs []string) (runtimeValue, error) {
+	return p.callFunctionContext(context.Background(), function, args, self, typeArgs)
+}
+
+func (p *program) callFunctionContext(ctx context.Context, function *functionDecl, args []runtimeValue, self *runtimeValue, typeArgs []string) (runtimeValue, error) {
+	if err := checkTaskCancellation(ctx); err != nil {
+		return runtimeValue{}, err
+	}
 	if len(args) != len(function.params) {
 		return runtimeValue{}, fmt.Errorf("%s expects %d arguments, found %d", function.qualified, len(function.params), len(args))
 	}
-	frame := &runtimeFrame{function: function, locals: make(map[string]runtimeValue, len(args)+1)}
+	frame := &runtimeFrame{function: function, locals: make(map[string]runtimeValue, len(args)+1), ctx: ctx}
 	paramTypes := make([]string, len(function.params))
 	if len(function.typeParams) > 0 {
 		if len(typeArgs) != len(function.typeParams) {
@@ -345,13 +450,29 @@ func (p *program) callFunction(function *functionDecl, args []runtimeValue, self
 	return coerceRuntimeValue(value, result), nil
 }
 
-func (p *program) evalBlock(block *blockNode, frame *runtimeFrame) (runtimeValue, error) {
-	last := nullRuntimeValue()
+func (p *program) evalBlock(block *blockNode, frame *runtimeFrame) (last runtimeValue, err error) {
+	last = nullRuntimeValue()
 	if block == nil {
 		return last, nil
 	}
+	if block.hasAsync {
+		scope := newRuntimeTaskScope(frame.ctx)
+		blockFrame := frame.clone()
+		blockFrame.ctx = scope.ctx
+		blockFrame.taskScope = scope
+		blockFrame.pending = make(map[string]*runtimePending)
+		frame = blockFrame
+		defer func() {
+			if failure := recover(); failure != nil {
+				last = runtimeValue{}
+				err = &panicFailure{value: failure}
+			}
+			err = scope.finish(err)
+		}()
+	}
 	for _, statement := range block.statements {
-		value, err := p.evalStatement(statement, frame)
+		var value runtimeValue
+		value, err = p.evalStatement(statement, frame)
 		if err != nil {
 			return runtimeValue{}, err
 		}
@@ -371,6 +492,22 @@ func (p *program) evalStatement(statement statementNode, frame *runtimeFrame) (r
 		// the checker's scope does.
 		delete(frame.narrowed, node.name)
 		frame.locals[node.name] = coerceRuntimeValue(value, node.resolved)
+		return nullRuntimeValue(), nil
+	case *asyncLetStatement:
+		if err := checkTaskCancellation(frame.ctx); err != nil {
+			return runtimeValue{}, err
+		}
+		call, err := p.prepareAsyncCall(node.call, frame)
+		if err != nil {
+			return runtimeValue{}, err
+		}
+		if frame.taskScope == nil {
+			return runtimeValue{}, runtimeError(node.pos, "async let has no owning task scope")
+		}
+		if frame.pending == nil {
+			frame.pending = make(map[string]*runtimePending)
+		}
+		frame.pending[node.name] = frame.taskScope.start(call)
 		return nullRuntimeValue(), nil
 	case *assignmentStatement:
 		value, err := p.evalExpression(node.value, frame)
@@ -492,6 +629,12 @@ func (p *program) evalExpression(expression expressionNode, frame *runtimeFrame)
 		return p.evalObject(node, frame)
 	case *callExpression:
 		return p.evalCall(node, frame)
+	case *awaitExpression:
+		pending, ok := frame.lookupPending(node.name)
+		if !ok {
+			return runtimeValue{}, runtimeError(node.pos, "unknown pending binding %s", node.name)
+		}
+		return pending.await()
 	case *unaryExpression:
 		return p.evalUnary(node, frame)
 	case *binaryExpression:
@@ -520,7 +663,7 @@ func (p *program) evalUsing(node *usingExpression, frame *runtimeFrame) (runtime
 	bodyFrame := frame.clone()
 	bodyFrame.locals[node.name] = resource
 	value, bodyError := p.evalUsingBody(node.body, bodyFrame)
-	closeError := p.closeUsingResource(resource, node)
+	closeError := p.closeUsingResource(frame.ctx, resource, node)
 	if closeError == nil {
 		return value, bodyError
 	}
@@ -540,7 +683,7 @@ func (p *program) evalUsingBody(body *blockNode, frame *runtimeFrame) (value run
 	return p.evalBlock(body, frame)
 }
 
-func (p *program) closeUsingResource(resource runtimeValue, node *usingExpression) (err error) {
+func (p *program) closeUsingResource(ctx context.Context, resource runtimeValue, node *usingExpression) (err error) {
 	defer func() {
 		if failure := recover(); failure != nil {
 			err = &panicFailure{value: failure}
@@ -550,7 +693,7 @@ func (p *program) closeUsingResource(resource runtimeValue, node *usingExpressio
 	if class == nil || class.implementations["Close"] == nil {
 		return runtimeError(node.pos, "%s has no implemented Close method", displayName(resource.typ))
 	}
-	_, err = p.callFunction(class.implementations["Close"], nil, &resource, nil)
+	_, err = p.callFunctionContext(context.WithoutCancel(ctx), class.implementations["Close"], nil, &resource, nil)
 	return err
 }
 
@@ -601,6 +744,56 @@ func (p *program) evalObject(node *objectExpression, frame *runtimeFrame) (runti
 		value.fields[field.name] = coerceRuntimeValue(fieldValue, declared[field.name])
 	}
 	return value, nil
+}
+
+func (p *program) prepareAsyncCall(node *callExpression, frame *runtimeFrame) (func(context.Context) (runtimeValue, error), error) {
+	name, ok := node.callee.(*nameExpression)
+	if !ok {
+		return nil, runtimeError(node.pos, "async call target is not callable")
+	}
+
+	var function *functionDecl
+	var receiver *runtimeValue
+	parts := strings.Split(name.name, ".")
+	if len(parts) == 2 && node.resolvedReceiver != "" {
+		class := p.classes[node.resolvedReceiver]
+		if class == nil || class.implementations[parts[1]] == nil {
+			return nil, runtimeError(node.pos, "unknown async method %s", name.name)
+		}
+		function = class.implementations[parts[1]]
+		value, exists := frame.lookup(parts[0])
+		if !exists {
+			return nil, runtimeError(node.pos, "unknown async receiver %s", parts[0])
+		}
+		if value.optional != nil {
+			if !value.optional.present {
+				return nil, runtimeError(node.pos, "%s is null and has no method %s", displayName(value.typ), parts[1])
+			}
+			value = value.optional.value
+		}
+		receiver = &value
+	} else {
+		function = p.resolveFunction(frame.function, name.name)
+		if function == nil {
+			return nil, runtimeError(node.pos, "unknown async function %s", name.name)
+		}
+	}
+
+	args := make([]runtimeValue, len(node.args))
+	for index, argument := range node.args {
+		value, err := p.evalExpression(argument, frame)
+		if err != nil {
+			return nil, err
+		}
+		if index < len(node.resolvedParams) {
+			value = coerceRuntimeValue(value, node.resolvedParams[index])
+		}
+		args[index] = value
+	}
+	typeArgs := append([]string(nil), node.resolvedTypeArgs...)
+	return func(ctx context.Context) (runtimeValue, error) {
+		return p.callFunctionContext(ctx, function, args, receiver, typeArgs)
+	}, nil
 }
 
 func (p *program) evalCall(node *callExpression, frame *runtimeFrame) (runtimeValue, error) {
@@ -664,7 +857,7 @@ func (p *program) evalCall(node *callExpression, frame *runtimeFrame) (runtimeVa
 			if implementation == nil {
 				return runtimeValue{}, runtimeError(node.pos, "%s has no implemented method %s", class.name, parts[1])
 			}
-			return p.callFunction(implementation, args, &receiver, nil)
+			return p.callFunctionContext(frame.ctx, implementation, args, &receiver, nil)
 		}
 	}
 	canonical := p.resolveNameIn(frame.function.namespace, frame.function.aliases, name.name)
@@ -672,7 +865,7 @@ func (p *program) evalCall(node *callExpression, frame *runtimeFrame) (runtimeVa
 	if function == nil {
 		return runtimeValue{}, runtimeError(node.pos, "unknown function %s", name.name)
 	}
-	return p.callFunction(function, args, nil, append([]string(nil), node.resolvedTypeArgs...))
+	return p.callFunctionContext(frame.ctx, function, args, nil, append([]string(nil), node.resolvedTypeArgs...))
 }
 func evalRuntimeMapCall(node *callExpression, method string, receiver runtimeValue, args []runtimeValue) (runtimeValue, error) {
 	keyType, valueType, _ := mapTypeArgs(receiver.typ)
@@ -813,6 +1006,9 @@ func (p *program) evalFor(node *forStatement, frame *runtimeFrame) (runtimeValue
 		return runtimeValue{}, runtimeError(node.pos, "%v", err)
 	}
 	for index := 0; index < length; index++ {
+		if err := checkTaskCancellation(frame.ctx); err != nil {
+			return runtimeValue{}, err
+		}
 		values, err := runtimeIterableValues(iterable, index)
 		if err != nil {
 			return runtimeValue{}, runtimeError(node.pos, "%v", err)
@@ -984,12 +1180,16 @@ func (p *program) evalCatch(node *catchExpression, frame *runtimeFrame) (runtime
 			continue
 		}
 		armFrame := frame.clone()
-		if node.binding != "" {
+		binding := arm.binding
+		if binding == "" {
+			binding = node.binding
+		}
+		if binding != "" {
 			caught := thrown.value
 			if caught.typ == "" {
 				caught = runtimeValue{typ: thrown.typ, scalar: thrown.message, fields: make(map[string]runtimeValue)}
 			}
-			armFrame.locals[node.binding] = caught
+			armFrame.locals[binding] = caught
 		}
 		return p.evalExpression(arm.value, armFrame)
 	}
@@ -1074,7 +1274,7 @@ func (p *program) renderTemplate(template string, frame *runtimeFrame) (string, 
 }
 
 func (frame *runtimeFrame) clone() *runtimeFrame {
-	return &runtimeFrame{function: frame.function, locals: make(map[string]runtimeValue), parent: frame}
+	return &runtimeFrame{function: frame.function, locals: make(map[string]runtimeValue), ctx: frame.ctx, parent: frame}
 }
 
 // lookup reads a name as the nearest frame sees it: a refinement proven on that
@@ -1089,6 +1289,15 @@ func (frame *runtimeFrame) lookup(name string) (runtimeValue, bool) {
 		}
 	}
 	return runtimeValue{}, false
+}
+
+func (frame *runtimeFrame) lookupPending(name string) (*runtimePending, bool) {
+	for current := frame; current != nil; current = current.parent {
+		if pending, exists := current.pending[name]; exists {
+			return pending, true
+		}
+	}
+	return nil, false
 }
 
 // assign writes the declared storage and retires every refinement of the name
