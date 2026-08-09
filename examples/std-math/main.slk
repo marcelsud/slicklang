@@ -1,0 +1,30 @@
+use std.math.Divide as Divide
+use std.math.Remainder as Remainder
+use std.math.ArithmeticFailure as ArithmeticFailure
+
+function Format(Value: int) -> string {
+    std.convert.IntToString(Value)
+}
+
+function Describe(Dividend: int, Divisor: int) -> string {
+    match Divide(Dividend, Divisor) {
+        Ok(Quotient) => match Remainder(Dividend, Divisor) {
+            Ok(Rem) => Format(Dividend) + " = " + Format(Quotient) + " * " + Format(Divisor) + " + " + Format(Rem)
+            Err(Failure) => Failure.Kind
+        }
+        Err(Failure) => Failure.Operation + ":" + Failure.Kind
+    }
+}
+
+function SafeQuotient(Dividend: int, Divisor: int) -> Result<int, ArithmeticFailure> {
+    Divide(Dividend, Divisor)
+}
+
+function main() -> string {
+    let OkCase = Describe(20, 3)
+    let ZeroCase = match SafeQuotient(1, 0) {
+        Ok(Value) => Format(Value)
+        Err(Failure) => Failure.Operation + ":" + Failure.Kind
+    }
+    OkCase + "|" + ZeroCase
+}
