@@ -593,6 +593,8 @@ func (g *goGenerator) collectJSONCodecs() []jsonCodecNeed {
 			for _, field := range node.fields {
 				walk(field.value)
 			}
+		case *unaryExpression:
+			walk(node.value)
 		case *binaryExpression:
 			walk(node.left)
 			walk(node.right)

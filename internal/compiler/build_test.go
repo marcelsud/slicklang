@@ -22,6 +22,7 @@ var exampleOutputs = map[string]string{
 	"maps":               "37; 2; Ada=37;Linus=55;; map {Ada: 37, Grace: 36}",
 	"optional":           "missing user",
 	"optional-throws":    "Ada; Grace has no nickname; missing; Countess",
+	"operators":          "difference=7; product=30; ordered=true; logic=true; negative=-10; grouped=14",
 	"result":             "missing user",
 	"result-match":       "on is true; bad flag maybe; yes; no; false",
 	"result-propagation": "localhost:8080; empty host; 6; zero is not scorable",

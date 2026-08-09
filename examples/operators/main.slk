@@ -1,0 +1,15 @@
+// Strict core expression operators
+// ================================
+//
+// The output is `difference=7; product=30; ordered=true; logic=true; negative=-10; grouped=14`.
+
+function main() -> string {
+    let Value = 10
+    let Difference = Value - 3
+    let Product = Difference * 5 - 5
+    let Ordered = Difference < Product
+    let Logic = !false && (Difference <= Product || false)
+    let Negative = -Value
+    let Grouped = (Value - 3) * 2
+    `difference=${Difference}; product=${Product}; ordered=${Ordered}; logic=${Logic}; negative=${Negative}; grouped=${Grouped}`
+}

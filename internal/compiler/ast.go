@@ -84,6 +84,12 @@ type expressionStatement struct {
 
 func (n *expressionStatement) statementPos() position { return n.pos }
 
+type invalidExpression struct {
+	pos position
+}
+
+func (n *invalidExpression) expressionPos() position { return n.pos }
+
 type literalExpression struct {
 	value any
 	pos   position
@@ -164,11 +170,20 @@ type callExpression struct {
 
 func (n *callExpression) expressionPos() position { return n.pos }
 
+type unaryExpression struct {
+	op    string
+	value expressionNode
+	pos   position
+}
+
+func (n *unaryExpression) expressionPos() position { return n.pos }
+
 type binaryExpression struct {
 	left  expressionNode
 	op    string
 	right expressionNode
 	pos   position
+	opPos position
 }
 
 func (n *binaryExpression) expressionPos() position { return n.pos }
@@ -420,11 +435,11 @@ func (p *bodyParser) parseExpression() expressionNode {
 }
 
 func (p *bodyParser) parseRangeExpression() expressionNode {
-	start := p.parseEquality()
+	start := p.parseBooleanOr()
 	if start == nil || !p.matchPair(".", ".") {
 		return start
 	}
-	end := p.parseEquality()
+	end := p.parseBooleanOr()
 	if end == nil {
 		p.error(p.current().pos, "expected range end")
 		return start
@@ -432,37 +447,134 @@ func (p *bodyParser) parseRangeExpression() expressionNode {
 	return &rangeExpression{start: start, end: end, pos: start.expressionPos()}
 }
 
+func (p *bodyParser) parseBooleanOr() expressionNode {
+	left := p.parseBooleanAnd()
+	if left == nil {
+		return nil
+	}
+	for p.matchPair("|", "|") {
+		opPos := p.tokens[p.index-2].pos
+		right := p.parseBooleanAnd()
+		if right == nil {
+			p.error(p.current().pos, "expected expression after ||")
+			return left
+		}
+		left = &binaryExpression{left: left, op: "||", right: right, pos: left.expressionPos(), opPos: opPos}
+	}
+	return left
+}
+
+func (p *bodyParser) parseBooleanAnd() expressionNode {
+	left := p.parseEquality()
+	if left == nil {
+		return nil
+	}
+	for p.matchPair("&", "&") {
+		opPos := p.tokens[p.index-2].pos
+		right := p.parseEquality()
+		if right == nil {
+			p.error(p.current().pos, "expected expression after &&")
+			return left
+		}
+		left = &binaryExpression{left: left, op: "&&", right: right, pos: left.expressionPos(), opPos: opPos}
+	}
+	return left
+}
+
 func (p *bodyParser) parseEquality() expressionNode {
-	left := p.parseAddition()
+	left := p.parseOrdering()
 	if left == nil {
 		return nil
 	}
 	for p.matchPair("=", "=") || p.matchPair("!", "=") {
 		operator := p.tokens[p.index-2].text + p.tokens[p.index-1].text
+		opPos := p.tokens[p.index-2].pos
+		right := p.parseOrdering()
+		if right == nil {
+			p.error(p.current().pos, "expected expression after %s", operator)
+			return left
+		}
+		left = &binaryExpression{left: left, op: operator, right: right, pos: left.expressionPos(), opPos: opPos}
+	}
+	return left
+}
+
+func (p *bodyParser) parseOrdering() expressionNode {
+	left := p.parseAddition()
+	if left == nil {
+		return nil
+	}
+	for {
+		operator := ""
+		opPos := p.current().pos
+		switch {
+		case p.matchPair("<", "="):
+			operator = "<="
+		case p.matchPair(">", "="):
+			operator = ">="
+		case p.accept("<"):
+			operator = "<"
+		case p.accept(">"):
+			operator = ">"
+		default:
+			return left
+		}
 		right := p.parseAddition()
 		if right == nil {
 			p.error(p.current().pos, "expected expression after %s", operator)
 			return left
 		}
-		left = &binaryExpression{left: left, op: operator, right: right, pos: left.expressionPos()}
+		left = &binaryExpression{left: left, op: operator, right: right, pos: left.expressionPos(), opPos: opPos}
+	}
+}
+
+func (p *bodyParser) parseAddition() expressionNode {
+	left := p.parseMultiplication()
+	if left == nil {
+		return nil
+	}
+	for p.current().text == "+" || p.current().text == "-" {
+		operator := p.current()
+		p.index++
+		right := p.parseMultiplication()
+		if right == nil {
+			p.error(p.current().pos, "expected expression after %q", operator.text)
+			return left
+		}
+		left = &binaryExpression{left: left, op: operator.text, right: right, pos: left.expressionPos(), opPos: operator.pos}
 	}
 	return left
 }
 
-func (p *bodyParser) parseAddition() expressionNode {
-	left := p.parsePostfix()
+func (p *bodyParser) parseMultiplication() expressionNode {
+	left := p.parseUnary()
 	if left == nil {
 		return nil
 	}
-	for p.accept("+") {
-		right := p.parsePostfix()
+	for p.accept("*") {
+		opPos := p.previous().pos
+		right := p.parseUnary()
 		if right == nil {
-			p.error(p.current().pos, "expected expression after '+'")
+			p.error(p.current().pos, "expected expression after '*'")
 			return left
 		}
-		left = &binaryExpression{left: left, op: "+", right: right, pos: left.expressionPos()}
+		left = &binaryExpression{left: left, op: "*", right: right, pos: left.expressionPos(), opPos: opPos}
 	}
 	return left
+}
+
+func (p *bodyParser) parseUnary() expressionNode {
+	if p.current().text == "-" || p.current().text == "!" {
+		operator := p.current()
+		p.index++
+		value := p.parseUnary()
+		if value == nil {
+			p.error(operator.pos, "expected expression after unary %s", operator.text)
+			return &invalidExpression{pos: operator.pos}
+		}
+		return &unaryExpression{op: operator.text, value: value, pos: operator.pos}
+	}
+	return p.parsePostfix()
 }
 
 func (p *bodyParser) parsePostfix() expressionNode {
@@ -515,30 +627,6 @@ func (p *bodyParser) parsePrimary() expressionNode {
 		return nil
 	}
 	tok := p.current()
-	if p.accept("-") {
-		number := p.current()
-		switch number.kind {
-		case scanner.Int:
-			p.index++
-			value, err := strconv.ParseInt(number.text, 10, 64)
-			if err != nil {
-				p.error(tok.pos, "invalid integer literal")
-				return nil
-			}
-			return &literalExpression{value: -value, pos: tok.pos}
-		case scanner.Float:
-			p.index++
-			value, err := strconv.ParseFloat(number.text, 64)
-			if err != nil {
-				p.error(tok.pos, "invalid float literal")
-				return nil
-			}
-			return &literalExpression{value: -value, pos: tok.pos}
-		default:
-			p.error(tok.pos, "expected a number after '-'")
-			return nil
-		}
-	}
 	if p.accept("using") {
 		return p.parseUsing(tok.pos)
 	}

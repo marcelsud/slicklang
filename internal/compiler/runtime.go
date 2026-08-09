@@ -492,6 +492,8 @@ func (p *program) evalExpression(expression expressionNode, frame *runtimeFrame)
 		return p.evalObject(node, frame)
 	case *callExpression:
 		return p.evalCall(node, frame)
+	case *unaryExpression:
+		return p.evalUnary(node, frame)
 	case *binaryExpression:
 		return p.evalBinary(node, frame)
 	case *ifExpression:
@@ -718,10 +720,34 @@ func evalRuntimeMapCall(node *callExpression, method string, receiver runtimeVal
 	}
 }
 
+func (p *program) evalUnary(node *unaryExpression, frame *runtimeFrame) (runtimeValue, error) {
+	value, err := p.evalExpression(node.value, frame)
+	if err != nil {
+		return runtimeValue{}, err
+	}
+	switch node.op {
+	case "-":
+		if value.typ == "int" {
+			return runtimeValue{typ: "int", scalar: -value.scalar.(int64)}, nil
+		}
+		return runtimeValue{typ: "float", scalar: -value.scalar.(float64)}, nil
+	case "!":
+		return runtimeValue{typ: "bool", scalar: !value.scalar.(bool)}, nil
+	default:
+		return runtimeValue{}, runtimeError(node.pos, "unsupported unary operation %s", node.op)
+	}
+}
+
 func (p *program) evalBinary(node *binaryExpression, frame *runtimeFrame) (runtimeValue, error) {
 	left, err := p.evalExpression(node.left, frame)
 	if err != nil {
 		return runtimeValue{}, err
+	}
+	if node.op == "&&" && !left.scalar.(bool) {
+		return runtimeValue{typ: "bool", scalar: false}, nil
+	}
+	if node.op == "||" && left.scalar.(bool) {
+		return runtimeValue{typ: "bool", scalar: true}, nil
 	}
 	right, err := p.evalExpression(node.right, frame)
 	if err != nil {
@@ -741,6 +767,38 @@ func (p *program) evalBinary(node *binaryExpression, frame *runtimeFrame) (runti
 		case "float":
 			return runtimeValue{typ: "float", scalar: left.scalar.(float64) + right.scalar.(float64)}, nil
 		}
+	case "-":
+		if left.typ == "int" {
+			return runtimeValue{typ: "int", scalar: left.scalar.(int64) - right.scalar.(int64)}, nil
+		}
+		return runtimeValue{typ: "float", scalar: left.scalar.(float64) - right.scalar.(float64)}, nil
+	case "*":
+		if left.typ == "int" {
+			return runtimeValue{typ: "int", scalar: left.scalar.(int64) * right.scalar.(int64)}, nil
+		}
+		return runtimeValue{typ: "float", scalar: left.scalar.(float64) * right.scalar.(float64)}, nil
+	case "<":
+		if left.typ == "int" {
+			return runtimeValue{typ: "bool", scalar: left.scalar.(int64) < right.scalar.(int64)}, nil
+		}
+		return runtimeValue{typ: "bool", scalar: left.scalar.(float64) < right.scalar.(float64)}, nil
+	case "<=":
+		if left.typ == "int" {
+			return runtimeValue{typ: "bool", scalar: left.scalar.(int64) <= right.scalar.(int64)}, nil
+		}
+		return runtimeValue{typ: "bool", scalar: left.scalar.(float64) <= right.scalar.(float64)}, nil
+	case ">":
+		if left.typ == "int" {
+			return runtimeValue{typ: "bool", scalar: left.scalar.(int64) > right.scalar.(int64)}, nil
+		}
+		return runtimeValue{typ: "bool", scalar: left.scalar.(float64) > right.scalar.(float64)}, nil
+	case ">=":
+		if left.typ == "int" {
+			return runtimeValue{typ: "bool", scalar: left.scalar.(int64) >= right.scalar.(int64)}, nil
+		}
+		return runtimeValue{typ: "bool", scalar: left.scalar.(float64) >= right.scalar.(float64)}, nil
+	case "&&", "||":
+		return runtimeValue{typ: "bool", scalar: right.scalar.(bool)}, nil
 	}
 	return runtimeValue{}, runtimeError(node.pos, "unsupported binary operation %s", node.op)
 }

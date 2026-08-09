@@ -244,6 +244,8 @@ func (p *program) checkASTExpressionExpecting(expression expressionNode, scope *
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	}
 	switch node := expression.(type) {
+	case *invalidExpression:
+		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	case *literalExpression:
 		return expressionInfo{typ: literalType(node.value), effects: make(effectSet)}
 	case *arrayExpression:
@@ -260,6 +262,8 @@ func (p *program) checkASTExpressionExpecting(expression expressionNode, scope *
 		return p.checkObjectExpression(node, scope)
 	case *callExpression:
 		return p.checkCallExpression(node, scope)
+	case *unaryExpression:
+		return p.checkUnaryExpression(node, scope)
 	case *binaryExpression:
 		return p.checkBinaryExpression(node, scope)
 	case *ifExpression:
@@ -808,6 +812,53 @@ func (p *program) checkAssignable(pos position, actual, expected, target string,
 		"argument %d to %s must be %s, found %s", argument, target, displayName(expected), displayName(actual))
 }
 
+func (p *program) checkUnaryExpression(node *unaryExpression, scope *astScope) expressionInfo {
+	value := p.checkASTExpression(node.value, scope)
+	if value.typ == typeUnknown {
+		return value
+	}
+	switch node.op {
+	case "-":
+		if value.typ != "int" && value.typ != "float" {
+			p.reportUnaryOperatorType(node.pos, node.op, value.typ)
+			value.typ = typeUnknown
+		}
+	case "!":
+		if value.typ != "bool" {
+			p.reportUnaryOperatorType(node.pos, node.op, value.typ)
+		}
+		value.typ = "bool"
+	}
+	return value
+}
+
+func (p *program) reportUnaryOperatorType(pos position, operator, typ string) {
+	if isOptionalType(typ) {
+		p.add(pos, diagnosticCodeOptionalValue,
+			"unary operator %s does not accept %s; %s may be null; compare it with null and use the narrowed value",
+			operator, displayName(typ), displayName(typ))
+		return
+	}
+	p.add(pos, diagnosticCodeTypeMismatch, "unary operator %s does not accept %s", operator, displayName(typ))
+}
+
+func (p *program) reportBinaryOperatorType(pos position, operator, left, right string) {
+	optional := ""
+	if isOptionalType(left) {
+		optional = left
+	} else if isOptionalType(right) {
+		optional = right
+	}
+	if optional != "" {
+		p.add(pos, diagnosticCodeOptionalValue,
+			"operator %s does not accept %s and %s; %s may be null; compare it with null and use the narrowed value",
+			operator, displayName(left), displayName(right), displayName(optional))
+		return
+	}
+	p.add(pos, diagnosticCodeTypeMismatch, "operator %s does not accept %s and %s",
+		operator, displayName(left), displayName(right))
+}
+
 func (p *program) checkBinaryExpression(node *binaryExpression, scope *astScope) expressionInfo {
 	left := p.checkASTExpression(node.left, scope)
 	right := p.checkASTExpression(node.right, scope)
@@ -824,12 +875,30 @@ func (p *program) checkBinaryExpression(node *binaryExpression, scope *astScope)
 			p.add(node.pos, code, "cannot compare %s with %s", displayName(left.typ), displayName(right.typ))
 		}
 		return expressionInfo{typ: "bool", effects: effects}
-	case "+":
-		if left.typ != right.typ || (left.typ != "int" && left.typ != "float" && left.typ != "string") {
-			p.add(node.pos, diagnosticCodeTypeMismatch, "operator + does not accept %s and %s", displayName(left.typ), displayName(right.typ))
+	case "+", "-", "*":
+		if left.typ == typeUnknown || right.typ == typeUnknown {
+			return expressionInfo{typ: typeUnknown, effects: effects}
+		}
+		valid := left.typ == right.typ && (left.typ == "int" || left.typ == "float")
+		if node.op == "+" {
+			valid = valid || left.typ == "string" && right.typ == "string"
+		}
+		if !valid {
+			p.reportBinaryOperatorType(node.pos, node.op, left.typ, right.typ)
 			return expressionInfo{typ: typeUnknown, effects: effects}
 		}
 		return expressionInfo{typ: left.typ, effects: effects}
+	case "<", "<=", ">", ">=":
+		if left.typ != typeUnknown && right.typ != typeUnknown &&
+			(left.typ != right.typ || left.typ != "int" && left.typ != "float") {
+			p.reportBinaryOperatorType(node.pos, node.op, left.typ, right.typ)
+		}
+		return expressionInfo{typ: "bool", effects: effects}
+	case "&&", "||":
+		if left.typ != typeUnknown && right.typ != typeUnknown && (left.typ != "bool" || right.typ != "bool") {
+			p.reportBinaryOperatorType(node.pos, node.op, left.typ, right.typ)
+		}
+		return expressionInfo{typ: "bool", effects: effects}
 	default:
 		return expressionInfo{typ: typeUnknown, effects: effects}
 	}
@@ -1136,6 +1205,8 @@ func dropAssignedNarrowings(node any, narrowed map[string]string) {
 		for _, argument := range value.args {
 			dropAssignedNarrowings(argument, narrowed)
 		}
+	case *unaryExpression:
+		dropAssignedNarrowings(value.value, narrowed)
 	case *binaryExpression:
 		dropAssignedNarrowings(value.left, narrowed)
 		dropAssignedNarrowings(value.right, narrowed)
