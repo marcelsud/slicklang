@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"slick/internal/compiler"
@@ -38,15 +39,14 @@ func run(args []string) int {
 		fmt.Printf("built %s\n", output)
 		return 0
 	}
-	if len(args) > 2 || (args[0] != "check" && args[0] != "run") {
-		return reportUsage()
-	}
-
-	path := "."
-	if len(args) == 2 {
-		path = args[1]
-	}
 	if args[0] == "check" {
+		if len(args) > 2 {
+			return reportUsage()
+		}
+		path := "."
+		if len(args) == 2 {
+			path = args[1]
+		}
 		diagnostics, err := compiler.CheckPath(path)
 		if err != nil {
 			return reportError("check", err)
@@ -57,16 +57,38 @@ func run(args []string) int {
 		fmt.Println("ok")
 		return 0
 	}
-
-	output, diagnostics, err := compiler.RunPath(path)
-	if err != nil {
-		return reportError("run", err)
+	if args[0] != "run" {
+		return reportUsage()
 	}
-	if reportDiagnostics(diagnostics) {
+	return runProgram(args[1:], os.Stdout, os.Stderr)
+}
+
+// runProgram runs a Slick project as a command-line tool. Everything after the
+// project path belongs to the program, not to the toolchain, and a program that
+// returns std.process.Status writes its exact bytes and becomes the exit code.
+func runProgram(args []string, stdout, stderr io.Writer) int {
+	path := "."
+	var programArguments []string
+	if len(args) >= 1 {
+		path = args[0]
+		programArguments = args[1:]
+	}
+	outcome, diagnostics, err := compiler.RunPathArguments(path, programArguments)
+	if outcome.Status != nil {
+		stdout.Write(outcome.Status.Output)
+		stderr.Write(outcome.Status.ErrorOutput)
+	}
+	if err != nil {
+		return reportErrorTo(stderr, "run", err)
+	}
+	if reportDiagnosticsTo(stdout, diagnostics) {
 		return 1
 	}
-	if output != "" {
-		fmt.Println(output)
+	if outcome.Status != nil {
+		return outcome.Status.ExitCode
+	}
+	if outcome.Text != "" {
+		fmt.Fprintln(stdout, outcome.Text)
 	}
 	return 0
 }
@@ -102,17 +124,25 @@ func reportUsage() int {
 }
 
 func reportDiagnostics(diagnostics []compiler.Diagnostic) bool {
+	return reportDiagnosticsTo(os.Stdout, diagnostics)
+}
+
+func reportDiagnosticsTo(stdout io.Writer, diagnostics []compiler.Diagnostic) bool {
 	for _, diagnostic := range diagnostics {
-		fmt.Printf("%s:%d:%d: error[%s]: %s\n", diagnostic.File, diagnostic.Line, diagnostic.Column, diagnostic.Code, diagnostic.Message)
+		fmt.Fprintf(stdout, "%s:%d:%d: error[%s]: %s\n", diagnostic.File, diagnostic.Line, diagnostic.Column, diagnostic.Code, diagnostic.Message)
 	}
 	return len(diagnostics) > 0
 }
 
 func reportError(command string, err error) int {
+	return reportErrorTo(os.Stderr, command, err)
+}
+
+func reportErrorTo(stderr io.Writer, command string, err error) int {
 	if errors.Is(err, compiler.ErrNoSources) {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(stderr, err)
 	} else {
-		fmt.Fprintf(os.Stderr, "%s: %v\n", command, err)
+		fmt.Fprintf(stderr, "%s: %v\n", command, err)
 	}
 	return 2
 }

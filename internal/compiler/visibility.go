@@ -69,6 +69,9 @@ func (p *program) checkTypeName(pos position, namespace, name string) {
 	if pos.file != "" && usesStdFSDirectoryName(name) {
 		p.usesStdFSDirectory = true
 	}
+	if pos.file != "" && strings.Contains(name, "std.process.") {
+		p.usesStdProcess = true
+	}
 	parsed := parseTypeName(name)
 	switch parsed.kind {
 	case typeKindOptional, typeKindArray:

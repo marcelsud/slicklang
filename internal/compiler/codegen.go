@@ -99,8 +99,14 @@ func (p *program) generateGo() (string, error) {
 	if main == nil {
 		return "", fmt.Errorf("root.main is not defined")
 	}
-	if len(main.params) != 0 {
-		return "", fmt.Errorf("root.main must not accept parameters")
+	acceptsArguments, err := p.mainAcceptsArguments(main)
+	if err != nil {
+		return "", err
+	}
+	// A Status-returning main needs the subprocess declarations even when the
+	// program never calls std.process.Run.
+	if p.resolveType(main.namespace, main.aliases, main.result) == stdProcessStatusName {
+		p.usesStdProcess = true
 	}
 	generator := &goGenerator{program: p, imports: map[string]bool{
 		"errors":        true,
@@ -138,6 +144,10 @@ func (p *program) generateGo() (string, error) {
 			generator.imports[name] = true
 		}
 	}
+	if p.usesStdProcess {
+		generator.imports["os/exec"] = true
+		generator.imports["sync"] = true
+	}
 	if p.usesAsync {
 		generator.imports["context"] = true
 	}
@@ -165,17 +175,31 @@ func (p *program) generateGo() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	generator.line("func main() {")
+	callArguments := make([]string, 0, 2)
 	if p.usesAsync {
-		generator.line("value, err := %s(context.Background())", goFunctionName(main.qualified))
-	} else {
-		generator.line("value, err := %s()", goFunctionName(main.qualified))
+		callArguments = append(callArguments, "context.Background()")
 	}
+	if acceptsArguments {
+		callArguments = append(callArguments, "os.Args[1:]")
+	}
+	generator.line("func main() {")
+	generator.line("value, err := %s(%s)", goFunctionName(main.qualified), strings.Join(callArguments, ", "))
 	generator.line("if err != nil {")
 	generator.line("fmt.Fprintln(os.Stderr, err)")
 	generator.line("os.Exit(1)")
 	generator.line("}")
-	if resultType != "null" {
+	switch {
+	case resultType == stdProcessStatusName:
+		// Output is written before the exit code is validated so a Status always
+		// produces the exact bytes the program asked for.
+		generator.line("os.Stdout.Write(value.%s)", goFieldName("Output"))
+		generator.line("os.Stderr.Write(value.%s)", goFieldName("ErrorOutput"))
+		generator.line("if value.%s < %d || value.%s > %d {", goFieldName("ExitCode"), minExitCode, goFieldName("ExitCode"), maxExitCode)
+		generator.line("fmt.Fprintf(os.Stderr, %s, value.%s)", strconv.Quote(invalidExitCodeMessage+", found %d\n"), goFieldName("ExitCode"))
+		generator.line("os.Exit(1)")
+		generator.line("}")
+		generator.line("os.Exit(int(value.%s))", goFieldName("ExitCode"))
+	case resultType != "null":
 		generator.line("if output := slickFormat(value); output != \"\" {")
 		generator.line("fmt.Println(output)")
 		generator.line("}")
@@ -214,6 +238,9 @@ func (g *goGenerator) emitRuntime() {
 	}
 	if g.program.usesStdFSDirectory {
 		g.emitStdFSRuntime()
+	}
+	if g.program.usesStdProcess {
+		g.emitProcessRuntimeSupport()
 	}
 	g.line("")
 	g.line(`type slickResult[T, E any] struct { ok bool; value T; failure E }`)
@@ -473,6 +500,9 @@ func (g *goGenerator) emitDeclarations() error {
 		if g.skipStdFSDirectory(name) {
 			continue
 		}
+		if !g.program.usesStdProcess && strings.HasPrefix(name, "std.process.") {
+			continue
+		}
 		class := g.program.classes[name]
 		g.line("type %s struct {", goClassName(name))
 		fieldNames := sortedKeys(class.fields)
@@ -536,6 +566,9 @@ func (g *goGenerator) emitFunctions() error {
 		if g.skipStdFSDirectory(name) {
 			continue
 		}
+		if !g.program.usesStdProcess && strings.HasPrefix(name, "std.process.") {
+			continue
+		}
 		if function.native != "" {
 			if err := g.emitNativeFunction(function); err != nil {
 				return err
@@ -556,6 +589,9 @@ func (g *goGenerator) emitFunctions() error {
 			continue
 		}
 		if g.skipStdFSDirectory(className) {
+			continue
+		}
+		if !g.program.usesStdProcess && strings.HasPrefix(className, "std.process.") {
 			continue
 		}
 		methodNames := sortedKeys(class.implementations)

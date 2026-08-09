@@ -378,26 +378,57 @@ func RunPath(path string) (string, []Diagnostic, error) {
 }
 
 func Run(sources []Source) (string, []Diagnostic, error) {
-	program, diagnostics := compile(sources)
-	if len(diagnostics) > 0 {
-		return "", diagnostics, nil
-	}
-	value, err := program.runMain()
-	if err != nil {
-		return "", nil, err
-	}
-	return formatRuntimeValue(value), nil, nil
+	outcome, diagnostics, err := RunArguments(sources, nil)
+	return outcome.Text, diagnostics, err
 }
 
-func (p *program) runMain() (runtimeValue, error) {
+// RunPathArguments interprets the program at path as a command-line tool,
+// passing arguments to a main that accepts them.
+func RunPathArguments(path string, arguments []string) (Outcome, []Diagnostic, error) {
+	sources, err := loadSources(path)
+	if err != nil {
+		return Outcome{}, nil, err
+	}
+	return RunArguments(sources, arguments)
+}
+
+// RunArguments interprets sources with the given command-line arguments. A main
+// returning std.process.Status produces Outcome.Status instead of formatted
+// text; see Outcome for how an out-of-range exit code is reported.
+func RunArguments(sources []Source, arguments []string) (Outcome, []Diagnostic, error) {
+	program, diagnostics := compile(sources)
+	if len(diagnostics) > 0 {
+		return Outcome{}, diagnostics, nil
+	}
+	value, err := program.runMain(arguments)
+	if err != nil {
+		return Outcome{}, nil, err
+	}
+	if value.typ == stdProcessStatusName {
+		status, statusError := processStatusFromRuntime(value)
+		return Outcome{Status: status}, nil, statusError
+	}
+	return Outcome{Text: formatRuntimeValue(value)}, nil, nil
+}
+
+func (p *program) runMain(arguments []string) (runtimeValue, error) {
 	main := p.functions["root.main"]
 	if main == nil {
 		return runtimeValue{}, errors.New("root.main is not defined")
 	}
-	if len(main.params) != 0 {
-		return runtimeValue{}, errors.New("root.main must not accept parameters")
+	acceptsArguments, err := p.mainAcceptsArguments(main)
+	if err != nil {
+		return runtimeValue{}, err
 	}
-	return p.callFunctionContext(context.Background(), main, nil, nil, nil)
+	var args []runtimeValue
+	if acceptsArguments {
+		elements := make([]runtimeValue, len(arguments))
+		for index, argument := range arguments {
+			elements[index] = runtimeValue{typ: "string", scalar: argument}
+		}
+		args = []runtimeValue{{typ: "string[]", elements: elements}}
+	}
+	return p.callFunctionContext(context.Background(), main, args, nil, nil)
 }
 
 func (p *program) callFunction(function *functionDecl, args []runtimeValue, self *runtimeValue, typeArgs []string) (runtimeValue, error) {

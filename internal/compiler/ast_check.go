@@ -660,6 +660,9 @@ func (p *program) checkObjectExpression(node *objectExpression, scope *astScope)
 	if usesStdFSDirectoryName(canonical) {
 		p.usesStdFSDirectory = true
 	}
+	if strings.HasPrefix(canonical, "std.process.") {
+		p.usesStdProcess = true
+	}
 	class := p.classes[canonical]
 	info := expressionInfo{typ: canonical, effects: make(effectSet)}
 	if class == nil {
@@ -845,6 +848,9 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 	}
 	if target.native == nativeStdFSReadDirectory || target.native == nativeStdFSCreateTemporaryDirectory {
 		p.usesStdFSDirectory = true
+	}
+	if target.namespace == "std.process" {
+		p.usesStdProcess = true
 	}
 
 	info := expressionInfo{

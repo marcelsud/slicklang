@@ -149,6 +149,7 @@ type program struct {
 	usesStdIO              bool
 	usesStdHTTP            bool
 	usesStdFSDirectory     bool
+	usesStdProcess         bool
 	usesUsing              bool
 	usesAsync              bool
 }
