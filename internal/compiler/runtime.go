@@ -10,16 +10,17 @@ import (
 )
 
 type runtimeValue struct {
-	typ      string
-	scalar   any
-	fields   map[string]runtimeValue
-	elements []runtimeValue
-	iterable *runtimeIterable
-	mapping  *runtimeMap
-	buffer   *runtimeBuffer
-	result   *runtimeResult
-	optional *runtimeOptional
-	native   *nativeIOResource
+	typ       string
+	scalar    any
+	fields    map[string]runtimeValue
+	elements  []runtimeValue
+	iterable  *runtimeIterable
+	mapping   *runtimeMap
+	buffer    *runtimeBuffer
+	result    *runtimeResult
+	optional  *runtimeOptional
+	native    *nativeIOResource
+	directory *nativeTemporaryDirectory
 }
 
 // runtimeOptional is the tagged representation of a T? value. The complete

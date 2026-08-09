@@ -370,6 +370,8 @@ func (g *goGenerator) emitNativeMethod(function *functionDecl, receiverType stri
 		g.line("return slickIOSnapshot(%s.slickResource), nil", receiver)
 	case nativeStdIOWriterClose:
 		g.line("return struct{}{}, slickIOClose(%s.slickResource, %q)", receiver, "writer")
+	case nativeStdFSTemporaryDirectoryClose:
+		g.line("return struct{}{}, slickFSClose(%s.slickResource, %s.%s)", receiver, receiver, goFieldName("Path"))
 	default:
 		return fmt.Errorf("unknown native Slick method %s", function.native)
 	}

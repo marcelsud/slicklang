@@ -112,6 +112,9 @@ func (p *program) checkASTFunction(function *functionDecl) {
 		if strings.Contains(scope.locals[param.name], "std.io.") {
 			p.usesStdIO = true
 		}
+		if usesStdFSDirectoryName(scope.locals[param.name]) {
+			p.usesStdFSDirectory = true
+		}
 	}
 	if function.receiverCanonical != "" {
 		scope.locals["self"] = function.receiverCanonical
@@ -119,6 +122,9 @@ func (p *program) checkASTFunction(function *functionDecl) {
 	expected := p.resolveType(function.namespace, function.aliases, function.result)
 	if strings.Contains(expected, "std.io.") {
 		p.usesStdIO = true
+	}
+	if usesStdFSDirectoryName(expected) {
+		p.usesStdFSDirectory = true
 	}
 	info := p.checkASTBlock(function.ast, scope, expected)
 	if !p.assignable(info.typ, expected) {
@@ -651,6 +657,9 @@ func (p *program) checkObjectExpression(node *objectExpression, scope *astScope)
 	if strings.HasPrefix(canonical, "std.http.") {
 		p.usesStdHTTP = true
 	}
+	if usesStdFSDirectoryName(canonical) {
+		p.usesStdFSDirectory = true
+	}
 	class := p.classes[canonical]
 	info := expressionInfo{typ: canonical, effects: make(effectSet)}
 	if class == nil {
@@ -833,6 +842,9 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 	}
 	if target.namespace == "std.http" {
 		p.usesStdHTTP = true
+	}
+	if target.native == nativeStdFSReadDirectory || target.native == nativeStdFSCreateTemporaryDirectory {
+		p.usesStdFSDirectory = true
 	}
 
 	info := expressionInfo{
@@ -1625,7 +1637,7 @@ func (p *program) taskSafeType(name string, visiting map[string]bool) bool {
 			return false
 		}
 		class := p.classes[name]
-		if class == nil || class.nativeResource {
+		if class == nil || class.nativeResource != "" {
 			return false
 		}
 		if visiting[name] {
