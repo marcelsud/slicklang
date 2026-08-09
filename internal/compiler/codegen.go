@@ -212,6 +212,9 @@ func (g *goGenerator) emitRuntime() {
 	if g.program.usesStdHTTP {
 		g.emitHTTPRuntimeSupport()
 	}
+	if g.program.usesStdFSDirectory {
+		g.emitStdFSRuntime()
+	}
 	g.line("")
 	g.line(`type slickResult[T, E any] struct { ok bool; value T; failure E }`)
 	g.line(`func (result slickResult[T, E]) String() string {`)
@@ -467,6 +470,9 @@ func (g *goGenerator) emitDeclarations() error {
 		if !g.program.usesStdHTTP && strings.HasPrefix(name, "std.http.") {
 			continue
 		}
+		if g.skipStdFSDirectory(name) {
+			continue
+		}
 		class := g.program.classes[name]
 		g.line("type %s struct {", goClassName(name))
 		fieldNames := sortedKeys(class.fields)
@@ -478,8 +484,8 @@ func (g *goGenerator) emitDeclarations() error {
 			}
 			g.line("%s %s", goFieldName(field.name), g.goType(typ))
 		}
-		if class.nativeResource {
-			g.line("slickResource *slickIOResource")
+		if class.nativeResource != "" {
+			g.line("slickResource %s", class.nativeResource)
 		}
 		if class.isError {
 			g.line("slickMessage string")
@@ -527,6 +533,9 @@ func (g *goGenerator) emitFunctions() error {
 		if !g.program.usesStdHTTP && strings.HasPrefix(name, "std.http.") {
 			continue
 		}
+		if g.skipStdFSDirectory(name) {
+			continue
+		}
 		if function.native != "" {
 			if err := g.emitNativeFunction(function); err != nil {
 				return err
@@ -544,6 +553,9 @@ func (g *goGenerator) emitFunctions() error {
 			continue
 		}
 		if !g.program.usesStdHTTP && strings.HasPrefix(className, "std.http.") {
+			continue
+		}
+		if g.skipStdFSDirectory(className) {
 			continue
 		}
 		methodNames := sortedKeys(class.implementations)

@@ -66,6 +66,9 @@ func (p *program) checkTypeName(pos position, namespace, name string) {
 	if pos.file != "" && strings.Contains(name, "std.http.") {
 		p.usesStdHTTP = true
 	}
+	if pos.file != "" && usesStdFSDirectoryName(name) {
+		p.usesStdFSDirectory = true
+	}
 	parsed := parseTypeName(name)
 	switch parsed.kind {
 	case typeKindOptional, typeKindArray:

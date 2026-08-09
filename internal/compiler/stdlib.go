@@ -46,6 +46,11 @@ const (
 	nativeStdFSExists             nativeFunction = "std.fs.Exists"
 	nativeStdFSCreateDirectoryAll nativeFunction = "std.fs.CreateDirectoryAll"
 	nativeStdFSRemove             nativeFunction = "std.fs.Remove"
+	nativeStdFSReadDirectory      nativeFunction = "std.fs.ReadDirectory"
+
+	nativeStdFSCreateTemporaryDirectory nativeFunction = "std.fs.CreateTemporaryDirectory"
+	nativeStdFSTemporaryDirectoryClose  nativeFunction = "std.fs.TemporaryDirectory.Close"
+
 	nativeStdJsonDecode           nativeFunction = "std.json.Decode"
 	nativeStdJsonEncode           nativeFunction = "std.json.Encode"
 	nativeStdPathJoin             nativeFunction = "std.path.Join"
@@ -79,6 +84,8 @@ const (
 	stdMathArithmeticFailureName    = "std.math.ArithmeticFailure"
 	stdEnvFailureName               = "std.env.Failure"
 	stdFSFailureName                = "std.fs.Failure"
+	stdFSEntryName                  = "std.fs.Entry"
+	stdFSTemporaryDirectoryName     = "std.fs.TemporaryDirectory"
 	stdJsonFailureName              = "std.json.Failure"
 	stdIOFailureName                = "std.io.Failure"
 	stdIOReaderName                 = "std.io.Reader"
@@ -138,7 +145,7 @@ type standardClassDecl struct {
 	name           string
 	documentation  string
 	isError        bool
-	nativeResource bool
+	nativeResource string
 	fields         []standardFieldDecl
 	methods        []standardMethodDecl
 }
@@ -504,6 +511,24 @@ var standardLibraryRegistry = struct {
 			native:        nativeStdFSRemove,
 		},
 		{
+			canonical:     string(nativeStdFSReadDirectory),
+			namespace:     "std.fs",
+			name:          "ReadDirectory",
+			documentation: "Lists the direct children of Path sorted by Name or returns Failure.",
+			params:        []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "Result<" + stdFSEntryName + "[]," + stdFSFailureName + ">"},
+			native:        nativeStdFSReadDirectory,
+		},
+		{
+			canonical:     string(nativeStdFSCreateTemporaryDirectory),
+			namespace:     "std.fs",
+			name:          "CreateTemporaryDirectory",
+			documentation: "Creates a unique directory under the platform temporary root named after Prefix.",
+			params:        []paramDecl{{name: "Prefix", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "Result<" + stdFSTemporaryDirectoryName + "," + stdFSFailureName + ">"},
+			native:        nativeStdFSCreateTemporaryDirectory,
+		},
+		{
 			canonical:     string(nativeStdJsonDecode),
 			namespace:     "std.json",
 			name:          "Decode",
@@ -865,6 +890,36 @@ var standardLibraryRegistry = struct {
 			},
 		},
 		{
+			canonical:     stdFSEntryName,
+			namespace:     "std.fs",
+			name:          "Entry",
+			documentation: "Describes one direct child of a listed directory.",
+			fields: []standardFieldDecl{
+				{name: "Name", typ: typeRef{name: "string"}, documentation: "Provides the child name without any directory component."},
+				{name: "Path", typ: typeRef{name: "string"}, documentation: "Provides the listed directory joined with Name."},
+				{name: "IsDirectory", typ: typeRef{name: "bool"}, documentation: "Reports whether the entry itself is a directory without walking it."},
+			},
+		},
+		{
+			canonical:      stdFSTemporaryDirectoryName,
+			namespace:      "std.fs",
+			name:           "TemporaryDirectory",
+			documentation:  "Owns one temporary directory that Close removes recursively.",
+			nativeResource: "*slickFSTemporary",
+			fields: []standardFieldDecl{
+				{name: "Path", typ: typeRef{name: "string"}, documentation: "Provides the absolute created path, which Close invalidates."},
+			},
+			methods: []standardMethodDecl{
+				{
+					name:          "Close",
+					documentation: "Removes the owned directory tree, does nothing when already closed, and throws Failure otherwise.",
+					result:        typeRef{name: "null"},
+					throws:        []typeRef{{name: stdFSFailureName}},
+					native:        nativeStdFSTemporaryDirectoryClose,
+				},
+			},
+		},
+		{
 			canonical:     stdJsonFailureName,
 			namespace:     "std.json",
 			name:          "Failure",
@@ -932,7 +987,7 @@ var standardLibraryRegistry = struct {
 			namespace:      "std.io",
 			name:           "bytesReader",
 			documentation:  "Implements Reader over an immutable byte snapshot.",
-			nativeResource: true,
+			nativeResource: "*slickIOResource",
 			methods: []standardMethodDecl{
 				{
 					name:          "Read",
@@ -955,7 +1010,7 @@ var standardLibraryRegistry = struct {
 			namespace:      "std.io",
 			name:           "BytesWriter",
 			documentation:  "Collects written bytes in memory and exposes immutable snapshots.",
-			nativeResource: true,
+			nativeResource: "*slickIOResource",
 			methods: []standardMethodDecl{
 				{
 					name:          "Write",
@@ -1179,6 +1234,9 @@ func (p *program) callNativeFunction(function *functionDecl, frame *runtimeFrame
 		return value, err
 	}
 	if value, err, ok := p.callNativeStdHTTP(function, frame); ok {
+		return value, err
+	}
+	if value, err, ok := p.callNativeStdFS(function, frame); ok {
 		return value, err
 	}
 	resultType := p.resolveType(function.namespace, function.aliases, function.result)
@@ -1601,15 +1659,18 @@ func runtimeFSResult(resultType, operation, path string, err error) runtimeValue
 }
 
 func runtimeFSFailure(resultType, operation, path string, err error) runtimeValue {
-	failure := runtimeValue{
+	return runtimeResultValue(resultType, false, runtimeFSFailureValue(operation, path, err.Error()))
+}
+
+func runtimeFSFailureValue(operation, path, message string) runtimeValue {
+	return runtimeValue{
 		typ: stdFSFailureName,
 		fields: map[string]runtimeValue{
 			"Operation": {typ: "string", scalar: operation},
 			"Path":      {typ: "string", scalar: path},
-			"Message":   {typ: "string", scalar: err.Error()},
+			"Message":   {typ: "string", scalar: message},
 		},
 	}
-	return runtimeResultValue(resultType, false, failure)
 }
 
 func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
@@ -1824,6 +1885,8 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 		g.emitNativeFSResult(resultType, "CreateDirectoryAll", arguments[0], fmt.Sprintf("os.MkdirAll(%s, 0o777)", arguments[0]))
 	case nativeStdFSRemove:
 		g.emitNativeFSResult(resultType, "Remove", arguments[0], fmt.Sprintf("os.Remove(%s)", arguments[0]))
+	case nativeStdFSReadDirectory, nativeStdFSCreateTemporaryDirectory:
+		g.emitNativeStdFSFunction(function, resultType, arguments)
 	case nativeStdPathJoin:
 		g.line("return filepath.Join(%s...), nil", arguments[0])
 	case nativeStdPathClean:

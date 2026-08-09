@@ -1,0 +1,54 @@
+// Directory listing inside an owned temporary workspace
+// ====================================================
+//
+// The output is
+// `a.txt:false,b.txt:false,c:true,é.txt:false; removed=true`.
+//
+// ReadDirectory returns direct children only, sorted by Name, so `c/hidden.txt`
+// never appears. The workspace is created under the platform temporary root and
+// the using scope removes it on every exit path.
+
+function Prepare(Root: string) -> Result<null, std.fs.Failure> {
+    std.fs.WriteText(std.path.Join([Root, "b.txt"]), "b")?
+    std.fs.WriteText(std.path.Join([Root, "a.txt"]), "a")?
+    std.fs.WriteText(std.path.Join([Root, "é.txt"]), "e")?
+    std.fs.CreateDirectoryAll(std.path.Join([Root, "c"]))?
+    std.fs.WriteText(std.path.Join([Root, "c", "hidden.txt"]), "hidden")?
+    Ok(null)
+}
+
+function Describe(Entries: std.fs.Entry[]) -> string {
+    let Names = std.buffer.New<string>()
+    for Entry in Entries {
+        std.buffer.Push<string>(Names, `${Entry.Name}:${Entry.IsDirectory}`)
+    }
+    std.text.Join(std.buffer.Freeze<string>(Names), ",")
+}
+
+function Listing() -> Result<string, std.fs.Failure> throws std.fs.Failure {
+    using Workspace = std.fs.CreateTemporaryDirectory("slick-example-")? {
+        Prepare(Workspace.Path)?
+        let Entries = std.fs.ReadDirectory(Workspace.Path)?
+        Ok(Describe(Entries))
+    }
+}
+
+function Removed() -> Result<bool, std.fs.Failure> throws std.fs.Failure {
+    let Path = using Workspace = std.fs.CreateTemporaryDirectory("slick-example-")? {
+        Workspace.Path
+    }
+    let Present = std.fs.Exists(Path)?
+    Ok(!Present)
+}
+
+function main() -> string throws std.fs.Failure {
+    let Entries = match Listing() {
+        Ok(Value) => Value
+        Err(Failure) => `${Failure.Operation}: ${Failure.Message}`
+    }
+    let Cleaned = match Removed() {
+        Ok(Value) => `${Value}`
+        Err(Failure) => `${Failure.Operation}: ${Failure.Message}`
+    }
+    `${Entries}; removed=${Cleaned}`
+}

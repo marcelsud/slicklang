@@ -99,7 +99,7 @@ type classDecl struct {
 	namespace       string
 	aliases         map[string]aliasDecl
 	isError         bool
-	nativeResource  bool
+	nativeResource  string
 	extension       extensionPolicy
 	fields          map[string]fieldDecl
 	methods         map[string]*methodSignature
@@ -148,6 +148,7 @@ type program struct {
 	diags                  []Diagnostic
 	usesStdIO              bool
 	usesStdHTTP            bool
+	usesStdFSDirectory     bool
 	usesUsing              bool
 	usesAsync              bool
 }
