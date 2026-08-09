@@ -30,6 +30,22 @@ func TestHighlightReproducesSource(t *testing.T) {
 	}
 }
 
+func TestHighlightPreservesExactNameUse(t *testing.T) {
+	source := "use root.models.Dog\r\nfunction main() -> null { null }\r\n"
+	var rebuilt strings.Builder
+	foundUse := false
+	for _, token := range compiler.Highlight(source) {
+		rebuilt.WriteString(token.Text)
+		foundUse = foundUse || token.Text == "use" && token.Class == compiler.ClassKeyword
+	}
+	if rebuilt.String() != source {
+		t.Fatalf("exact-name use did not round-trip: %q", rebuilt.String())
+	}
+	if !foundUse {
+		t.Fatal("use was not highlighted as a keyword")
+	}
+}
+
 func TestHighlightClassifiesSlickTokens(t *testing.T) {
 	source := "// note\n" +
 		"/// load docs\n" +

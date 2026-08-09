@@ -1,6 +1,6 @@
-use root.credentials.Credential as Credential
-use root.models.Dog as Dog
-use root.models.Cat as Cat
+use root.credentials.Credential
+use root.models.Dog
+use root.models.Cat
 
 function main() -> string {
     let Credential = Credential {

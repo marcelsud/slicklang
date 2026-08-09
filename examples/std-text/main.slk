@@ -1,4 +1,4 @@
-use std.text.Join as Join
+use std.text.Join
 
 function main() -> string {
     let Trimmed = std.text.Trim("  alpha,beta,gamma  ")

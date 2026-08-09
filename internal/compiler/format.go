@@ -99,7 +99,7 @@ type sourceFormatter struct {
 func newSourceFormatter(source *formatSource) *sourceFormatter {
 	formatter := &sourceFormatter{
 		source:      source,
-		tokens:      mergeFormatTokens(source.tokens),
+		tokens:      canonicalFormatTokens(mergeFormatTokens(source.tokens)),
 		breakBefore: make(map[sourcePoint]struct{}),
 		unaryAt:     make(map[sourcePoint]struct{}),
 		operatorAt:  make(map[sourcePoint]struct{}),
@@ -133,6 +133,50 @@ func mergeFormatTokens(tokens []token) []formatToken {
 		merged = append(merged, formatToken{kind: current.kind, text: text, pos: current.pos})
 	}
 	return merged
+}
+
+func canonicalFormatTokens(tokens []formatToken) []formatToken {
+	for index := range tokens {
+		if tokens[index].text != "use" {
+			continue
+		}
+		current := nextFormatCodeToken(tokens, index+1)
+		if current >= len(tokens) || tokens[current].kind != scanner.Ident {
+			continue
+		}
+		finalName := tokens[current].text
+		current = nextFormatCodeToken(tokens, current+1)
+		for current < len(tokens) && tokens[current].text == "." {
+			current = nextFormatCodeToken(tokens, current+1)
+			if current >= len(tokens) || tokens[current].kind != scanner.Ident {
+				break
+			}
+			finalName = tokens[current].text
+			current = nextFormatCodeToken(tokens, current+1)
+		}
+		if current >= len(tokens) || tokens[current].text != "as" {
+			continue
+		}
+		alias := nextFormatCodeToken(tokens, current+1)
+		if alias < len(tokens) && tokens[alias].text == finalName {
+			tokens[current].text = ""
+			tokens[alias].text = ""
+		}
+	}
+	canonical := tokens[:0]
+	for _, token := range tokens {
+		if token.text != "" {
+			canonical = append(canonical, token)
+		}
+	}
+	return canonical
+}
+
+func nextFormatCodeToken(tokens []formatToken, index int) int {
+	for index < len(tokens) && tokens[index].kind == scanner.Comment {
+		index++
+	}
+	return index
 }
 
 func (f *sourceFormatter) collectBreaks() {

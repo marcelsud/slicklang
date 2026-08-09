@@ -413,19 +413,30 @@ func (p *parser) consumeDocumentation() *string {
 }
 
 func (p *parser) parseUse() {
-	target, next, ok := readQualified(p.tokens, p.index)
+	start := p.index
+	target, next, ok := readQualified(p.tokens, start)
 	if !ok || !isAbsoluteCanonicalName(target.name) {
 		p.error(p.current().pos, "use target must be an absolute root or std namespace path")
 		return
 	}
+	for index := start + 2; index < next; index += 2 {
+		if p.tokens[index-1].pos.line != p.tokens[index].pos.line {
+			p.index = index
+			p.error(p.tokens[index-1].pos, "use target must end in an identifier")
+			return
+		}
+	}
 	p.index = next
-	if !p.accept("as") {
-		p.error(p.current().pos, "expected 'as' in use declaration")
+	if p.current().text == "." {
+		p.error(p.current().pos, "use target must end in an identifier")
 		return
 	}
-	name, ok := p.expectIdent("use alias")
-	if !ok {
-		return
+	name := p.tokens[next-1]
+	if p.accept("as") {
+		name, ok = p.expectIdent("use alias")
+		if !ok {
+			return
+		}
 	}
 	p.accept(";")
 	if previous, exists := p.aliases[name.text]; exists {

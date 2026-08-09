@@ -1,6 +1,8 @@
+use root.models.Dog
+
 /// Builds a dog and returns its greeting.
 function main() -> string {
-    let dog = root.models.Dog {
+    let dog = Dog {
         Name: "Ada"
     }
     dog.Bark()

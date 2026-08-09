@@ -15,7 +15,7 @@ func TestFormatExpandsCompactSyntaxCanonically(t *testing.T) {
 	if err != nil || len(diagnostics) != 0 {
 		t.Fatalf("format compact source: diagnostics=%+v err=%v", diagnostics, err)
 	}
-	const want = `use root.models.User as User
+	const want = `use root.models.User
 
 class Box {
     Value: string
@@ -44,6 +44,17 @@ function main() -> string {
 	second, diagnostics, err := compiler.Format(source)
 	if err != nil || len(diagnostics) != 0 || second != formatted {
 		t.Fatalf("second format changed output: diagnostics=%+v err=%v\n%s", diagnostics, err, second)
+	}
+}
+
+func TestFormatPreservesRenamedUseAlias(t *testing.T) {
+	source := compiler.Source{Name: "main.slk", Namespace: "root", Text: `use root.models.Dog as Animal`}
+	formatted, diagnostics, err := compiler.Format(source)
+	if err != nil || len(diagnostics) != 0 {
+		t.Fatalf("format renamed use: diagnostics=%+v err=%v", diagnostics, err)
+	}
+	if formatted != "use root.models.Dog as Animal\n" {
+		t.Fatalf("formatted renamed use = %q", formatted)
 	}
 }
 
