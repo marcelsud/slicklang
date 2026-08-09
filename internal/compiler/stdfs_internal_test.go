@@ -58,6 +58,20 @@ function main() -> string {
 			t.Fatalf("std.fs.ReadDirectory program missing %q", fragment)
 		}
 	}
+
+	// Naming the gated types without ever calling the gated functions still has
+	// to emit them, or the generated Go references an undeclared type.
+	typed := generateStdFSProgram(t, `
+class Holder { Item: std.fs.Entry }
+class Boxed { Items: std.fs.Entry[]? }
+interface Lister { function Latest() -> std.fs.Entry }
+function main() -> string { "typed" }
+`)
+	for _, fragment := range traversal {
+		if !strings.Contains(typed, fragment) {
+			t.Fatalf("std.fs.Entry type program missing %q", fragment)
+		}
+	}
 }
 
 func TestCreateTemporaryDirectoryUsesPrefixUnderTheTemporaryRoot(t *testing.T) {
