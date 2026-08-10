@@ -98,6 +98,9 @@ const (
 	diagnosticCodeConstantExpression       diagnosticCode = "SLK406"
 	diagnosticCodeConstantAssignment       diagnosticCode = "SLK407"
 	diagnosticCodeConstantCycle            diagnosticCode = "SLK408"
+	diagnosticCodeTypeParameter            diagnosticCode = "SLK409"
+	diagnosticCodeUnboundTypeParameter     diagnosticCode = "SLK410"
+	diagnosticCodeGenericExpansion         diagnosticCode = "SLK411"
 )
 
 var ErrUnknownDiagnostic = errors.New("unknown diagnostic")
@@ -531,6 +534,22 @@ var diagnosticDefinitions = []diagnosticDefinition{
 		"Constants are evaluated once at compile time, so their references must form an acyclic graph; forward references are valid only while they stay acyclic.",
 		"A constant reaches itself through its own initializer, directly or through other constants.",
 		"Break the cycle by giving one constant on the reported chain a value that does not depend on the others."),
+	defineDiagnostic(diagnosticCodeTypeParameter, DiagnosticPhaseParse,
+		"Type parameter declaration is invalid",
+		"A declaration's type parameters are distinct names that do not shadow a compiler-owned type.",
+		"A type parameter list repeats a name or reuses a built-in type name.",
+		"Rename the parameter to a distinct name that no built-in type already uses."),
+	defineDiagnostic(diagnosticCodeUnboundTypeParameter, DiagnosticPhaseNameResolution,
+		"Type name is not bound",
+		"Every type named inside a generic declaration must be a known type or one of the parameters that declaration binds.",
+		"A declared type names something that is neither visible nor a type parameter in scope.",
+		"Declare the missing type parameter on the enclosing declaration.",
+		"Correct the type name or import the namespace that declares it."),
+	defineDiagnostic(diagnosticCodeGenericExpansion, DiagnosticPhaseTypeCheck,
+		"Generic instantiation expands without limit",
+		"A recursive generic may contain itself only at the same type arguments, so the set of instantiations stays finite.",
+		"A declaration instantiates itself with a type argument built from its own parameter.",
+		"Hold the recursive value at the same type arguments, such as Node<T> inside Node<T>."),
 }
 
 var diagnosticRegistry = mustBuildDiagnosticRegistry(diagnosticDefinitions)

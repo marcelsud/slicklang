@@ -244,7 +244,7 @@ func writeHumanDescription(output io.Writer, description compiler.SymbolDescript
 	fmt.Fprintf(output, "Visibility: %s\n", description.Visibility)
 	writeDocumentation(output, description.Documentation)
 
-	if description.Kind == "generic type" {
+	if description.Kind == "generic type" || len(description.TypeParameters) > 0 {
 		fmt.Fprintf(output, "Type parameters: %s\n", strings.Join(description.TypeParameters, ", "))
 	}
 	if description.Kind == "function" {

@@ -1,0 +1,130 @@
+// User-defined generics
+// =====================
+//
+// A generic declaration binds its own type parameters and is used at explicit
+// concrete type arguments. Box<int> and Box<string> are distinct types, and
+// every instantiation substitutes recursively through optionals, arrays,
+// tuples, Map, Result, and checked effects.
+
+class Box<T> {
+    Value: T
+    function Get() -> T {
+        self.Value
+    }
+}
+
+class Pair<K, V> {
+    Key: K
+    Value: V
+    function Describe() -> string
+}
+
+function Pair<K, V>.Describe() -> string {
+    let Name = self.Key
+    let Held = self.Value
+    `${Name}=${Held}`
+}
+
+interface Source<T> {
+    function Read() -> T?
+}
+
+// Tree is recursive: a node holds children at the same instantiation.
+class Tree<T> {
+    Item: T
+    Children: Tree<T>[]
+    function Read() -> T? {
+        self.Item
+    }
+}
+
+class Missing implements Error {
+    Message: string
+}
+
+class Empty<T> implements Error {
+    Message: string
+    Wanted: Box<T>
+}
+
+class Store<V> {
+    Entries: Map<string, V>
+    function Lookup(Key: string) -> Result<V, Missing>
+}
+
+function Store<V>.Lookup(Key: string) -> Result<V, Missing> {
+    let Entries = self.Entries
+    let Found = Entries.Get(Key)
+    if (Found == null) {
+        Err(Missing {
+            Message: "no " + Key
+        })
+    } else {
+        Ok(Found)
+    }
+}
+
+function Identity<T>(Value: T) -> T {
+    Value
+}
+
+function First<T>(From: Source<T>) -> T? {
+    From.Read()
+}
+
+function Both<T>(Value: T, Label: string) -> (T, string) {
+    (Value, Label)
+}
+
+function Demand<T>(From: Box<T>) -> T throws Empty<T> {
+    From.Get()
+}
+
+function main() -> string {
+    let Number = Box<int> {
+        Value: 42
+    }
+    let Word = Box<string> {
+        Value: "slick"
+    }
+    let Entry = Pair<string, int> {
+        Key: "size"
+        Value: 3
+    }
+    let Leaf = Tree<string> {
+        Item: "leaf"
+        Children: []
+    }
+    let Root = Tree<string> {
+        Item: "root"
+        Children: [Leaf]
+    }
+    let Registry = Store<int> {
+        Entries: map {
+            "one": 1
+        }
+    }
+    let Same = Identity<int>(Number.Get())
+    let Text = Word.Get()
+    let Described = Entry.Describe()
+    let Head = First<string>(Root)
+    let Top = if (Head == null) {
+        "none"
+    } else {
+        Head
+    }
+    let Found = match Registry.Lookup("one") {
+        Ok(Value) => Value
+        Err(Failure) => 0
+    }
+    let Absent = match Registry.Lookup("two") {
+        Ok(Value) => "found"
+        Err(Failure) => Failure.Message
+    }
+    let Demanded = Demand<int>(Number) catch {
+        Empty<int> => 0
+    }
+    let Tagged = Both<int>(Same, Text)
+    let (Left, Right) = Tagged
+    `${Same};${Text};${Described};${Top};${Found};${Absent};${Demanded};${Left};${Right}`
+}
