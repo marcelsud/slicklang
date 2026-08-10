@@ -12,11 +12,11 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 `internal/compiler/stdlib.go` holds `standardLibraryRegistry`, the single authoritative public Slick surface. A new declaration must be wired through every backend or one of them fails at runtime:
 
 1. registry entry (namespace, function, class, or interface) plus `documentation` on every symbol and field — `undocumentedStandardLibrarySymbols` fails the build otherwise;
-2. interpreter case in the matching `callNativeStd*` dispatcher (`stdlib.go`, `stdio.go`, `stdhttp.go`, `stdfs.go`, `stdprocess.go`), reached from `callNativeFunction`;
+2. interpreter case in the matching `callNativeStd*` dispatcher (`stdlib.go`, `stdio.go`, `stdhttp.go`, `stdhttpserver.go`, `stdfs.go`, `stdprocess.go`), reached from `callNativeFunction`;
 3. generated-Go case in `emitNativeFunction` (functions) or `emitNativeMethod` in `stdio.go` (methods) — both `default` branches are hard errors;
 4. conditional runtime support: a `uses*` flag on `program`, set in `ast_check.go` (parameter and result types, object expressions, call targets) and `visibility.go` (`checkTypeName`), then honoured in `codegen.go` by `emitRuntime`, `emitDeclarations`, and `emitFunctions`.
 
-`std.io`, `std.http`, `std.process`, and the `std.fs` traversal declarations are gated this way; the rest of `std.fs` is emitted unconditionally. Adding a namespace shifts the `std` child count, so the budget pins in `cmd/slick/describe_test.go` need updating.
+`std.io`, `std.http`, `std.http.server`, `std.process`, and the `std.fs` traversal declarations are gated this way; the rest of `std.fs` is emitted unconditionally. Client `std.http` and inbound `std.http.server` are separate flags — check the more specific `std.http.server` prefix first (`markUsesStdHTTP` / `skipStdHTTP` in `stdhttpserver.go`). Nested namespaces (`std.http.server`) appear as children of their parent in `slick describe`, so only a new top-level `std.*` child shifts the budget pins in `cmd/slick/describe_test.go`.
 
 Native resource classes set `nativeResource` to the Go pointer type of their runtime state, which `emitDeclarations` emits as a `slickResource` field. Object literals of such classes are legal Slick, so their state pointer is nil and every method must survive that.
 

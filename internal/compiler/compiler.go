@@ -171,6 +171,7 @@ type program struct {
 	dedupe             bool
 	usesStdIO          bool
 	usesStdHTTP        bool
+	usesStdHTTPServer  bool
 	usesStdFSDirectory bool
 	usesStdProcess     bool
 	usesUsing          bool

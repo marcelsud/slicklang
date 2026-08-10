@@ -77,6 +77,7 @@ const (
 	nativeStdIOWriterWrite     nativeFunction = "std.io.BytesWriter.Write"
 	nativeStdIOWriterBytes     nativeFunction = "std.io.BytesWriter.Bytes"
 	nativeStdIOWriterClose     nativeFunction = "std.io.BytesWriter.Close"
+	nativeStdHTTPServerServe   nativeFunction = "std.http.server.Serve"
 
 	stdBytesUtf8FailureName         = "std.bytes.Utf8Failure"
 	stdCollectionsBoundsFailureName = "std.collections.BoundsFailure"
@@ -96,6 +97,11 @@ const (
 	stdBytesValueFailureName        = "std.bytes.ValueFailure"
 	stdUTF8DecodedRuneName          = "std.utf8.DecodedRune"
 	stdUTF8FailureName              = "std.utf8.Failure"
+	stdHTTPServerHandlerName        = "std.http.server.Handler"
+	stdHTTPServerConfigName         = "std.http.server.Config"
+	stdHTTPServerRequestName        = "std.http.server.Request"
+	stdHTTPServerResponseName       = "std.http.server.Response"
+	stdHTTPServerFailureName        = "std.http.server.Failure"
 )
 
 func isNativeStdBuffer(native nativeFunction) bool {
@@ -178,6 +184,7 @@ var standardLibraryRegistry = struct {
 		{canonical: "std.fs", documentation: "Performs bounded whole-file and directory operations on platform paths."},
 		{canonical: "std.json", documentation: "Encodes and decodes supported Slick values as JSON."},
 		{canonical: "std.http", documentation: "Performs synchronous fully buffered HTTP requests with typed failures."},
+		{canonical: "std.http.server", documentation: "Serves bounded inbound HTTP requests through one typed Handler with graceful shutdown."},
 		{canonical: "std.path", documentation: "Manipulates platform-dependent filesystem path strings without accessing the filesystem."},
 		{canonical: "std.process", documentation: "Runs child programs directly without a shell and describes command-line results."},
 		{canonical: "std.text", documentation: "Provides deterministic Unicode-aware and substring text operations."},
@@ -592,6 +599,18 @@ var standardLibraryRegistry = struct {
 			params:        []paramDecl{{name: "Status", typ: typeRef{name: "int"}}},
 			result:        typeRef{name: "string?"},
 			native:        nativeStdHTTPStatusText,
+		},
+		{
+			canonical:     string(nativeStdHTTPServerServe),
+			namespace:     "std.http.server",
+			name:          "Serve",
+			documentation: "Binds Config.Address, serves Application concurrently under documented limits and timeouts, and blocks until SIGINT, SIGTERM, or a fatal listener failure.",
+			params: []paramDecl{
+				{name: "Config", typ: typeRef{name: stdHTTPServerConfigName}},
+				{name: "Application", typ: typeRef{name: stdHTTPServerHandlerName}},
+			},
+			result: typeRef{name: "Result<null," + stdHTTPServerFailureName + ">"},
+			native: nativeStdHTTPServerServe,
 		},
 		{
 			canonical:     string(nativeStdPathJoin),
@@ -1021,6 +1040,58 @@ var standardLibraryRegistry = struct {
 			},
 		},
 		{
+			canonical:     stdHTTPServerConfigName,
+			namespace:     "std.http.server",
+			name:          "Config",
+			documentation: "Configures one bounded inbound HTTP listener. Omitted limits and timeouts use fixed defaults; zero or negative values are errors.",
+			fields: []standardFieldDecl{
+				{name: "Address", typ: typeRef{name: "string"}, documentation: "Provides the listen address, such as 127.0.0.1:8080 or :0."},
+				{name: "MaxHeaderBytes", typ: typeRef{name: "int?"}, documentation: "Limits request header size; default 1048576."},
+				{name: "MaxBodyBytes", typ: typeRef{name: "int?"}, documentation: "Limits buffered request body size; default 8388608."},
+				{name: "ReadHeaderTimeoutMilliseconds", typ: typeRef{name: "int?"}, documentation: "Limits time to read request headers; default 10000."},
+				{name: "ReadTimeoutMilliseconds", typ: typeRef{name: "int?"}, documentation: "Limits time to read the full request; default 30000."},
+				{name: "WriteTimeoutMilliseconds", typ: typeRef{name: "int?"}, documentation: "Limits time to write the response; default 30000."},
+				{name: "IdleTimeoutMilliseconds", typ: typeRef{name: "int?"}, documentation: "Limits keep-alive idle time; default 120000."},
+				{name: "ShutdownTimeoutMilliseconds", typ: typeRef{name: "int?"}, documentation: "Limits graceful shutdown after SIGINT or SIGTERM; default 30000."},
+			},
+		},
+		{
+			canonical:     stdHTTPServerRequestName,
+			namespace:     "std.http.server",
+			name:          "Request",
+			documentation: "Describes one fully buffered inbound HTTP request accepted by Serve.",
+			fields: []standardFieldDecl{
+				{name: "Method", typ: typeRef{name: "string"}, documentation: "Provides the exact inbound HTTP method token."},
+				{name: "Path", typ: typeRef{name: "string"}, documentation: "Provides the decoded URL path without query or fragment."},
+				{name: "Query", typ: typeRef{name: "Map<string,string[]>"}, documentation: "Provides query values preserving repeated-value order."},
+				{name: "Headers", typ: typeRef{name: "Map<string,string[]>"}, documentation: "Provides canonical request headers preserving repeated-value order."},
+				{name: "Body", typ: typeRef{name: "bytes"}, documentation: "Provides an immutable snapshot of the buffered request body."},
+			},
+		},
+		{
+			canonical:     stdHTTPServerResponseName,
+			namespace:     "std.http.server",
+			name:          "Response",
+			documentation: "Describes one fully buffered HTTP response returned by a Handler.",
+			fields: []standardFieldDecl{
+				{name: "Status", typ: typeRef{name: "int"}, documentation: "Provides the HTTP status code."},
+				{name: "Headers", typ: typeRef{name: "Map<string,string[]>?"}, documentation: "Provides optional response headers."},
+				{name: "Body", typ: typeRef{name: "bytes"}, documentation: "Provides the immutable response body; suppressed for HEAD and no-content statuses."},
+			},
+		},
+		{
+			canonical:     stdHTTPServerFailureName,
+			namespace:     "std.http.server",
+			name:          "Failure",
+			documentation: "Describes a sanitized listener, configuration, or shutdown failure from Serve.",
+			isError:       true,
+			fields: []standardFieldDecl{
+				{name: "Operation", typ: typeRef{name: "string"}, documentation: "Names the failing step: Config, Bind, Serve, or Shutdown."},
+				{name: "Address", typ: typeRef{name: "string"}, documentation: "Provides the configured listen address."},
+				{name: "Message", typ: typeRef{name: "string"}, documentation: "Explains the failure without exposing request contents or secrets."},
+			},
+		},
+		{
 			canonical:     stdIOFailureName,
 			namespace:     "std.io",
 			name:          "Failure",
@@ -1122,6 +1193,20 @@ var standardLibraryRegistry = struct {
 					documentation: "Closes the writer or throws Failure when cleanup fails.",
 					result:        typeRef{name: "null"},
 					throws:        []typeRef{{name: stdIOFailureName}},
+				},
+			},
+		},
+		{
+			canonical:     stdHTTPServerHandlerName,
+			namespace:     "std.http.server",
+			name:          "Handler",
+			documentation: "Handles one accepted inbound HTTP request and returns a fully buffered Response.",
+			methods: []standardMethodDecl{
+				{
+					name:          "Handle",
+					documentation: "Produces the Response for Request. Domain failures must become explicit Response values; the method does not throw.",
+					params:        []paramDecl{{name: "Request", typ: typeRef{name: stdHTTPServerRequestName}}},
+					result:        typeRef{name: stdHTTPServerResponseName},
 				},
 			},
 		},
@@ -1283,6 +1368,9 @@ func (p *program) callNativeFunction(function *functionDecl, frame *runtimeFrame
 		return value, err
 	}
 	if value, err, ok := p.callNativeStdHTTP(function, frame); ok {
+		return value, err
+	}
+	if value, err, ok := p.callNativeStdHTTPServer(function, frame); ok {
 		return value, err
 	}
 	if value, err, ok := p.callNativeStdFS(function, frame); ok {
@@ -2004,6 +2092,12 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 			g.line("return slickHTTPFetch(slickContext, %s)", arguments[0])
 		} else {
 			g.line("return slickHTTPFetch(%s)", arguments[0])
+		}
+	case nativeStdHTTPServerServe:
+		if g.program.usesAsync {
+			g.line("return slickHTTPServerServe(slickContext, %s, %s)", arguments[0], arguments[1])
+		} else {
+			g.line("return slickHTTPServerServe(%s, %s)", arguments[0], arguments[1])
 		}
 	case nativeStdProcessRun:
 		g.line("return slickProcessRun(%s, %s, %s, %s)", arguments[0], arguments[1], arguments[2], arguments[3])

@@ -127,6 +127,7 @@ func (p *program) checkASTFunction(function *functionDecl) {
 		if strings.Contains(scope.locals[param.name], "std.io.") {
 			p.usesStdIO = true
 		}
+		markUsesStdHTTP(p, scope.locals[param.name])
 		if usesStdFSDirectoryName(scope.locals[param.name]) {
 			p.usesStdFSDirectory = true
 		}
@@ -145,6 +146,7 @@ func (p *program) checkCallableBody(function *functionDecl, scope *astScope) {
 	if strings.Contains(expected, "std.io.") {
 		p.usesStdIO = true
 	}
+	markUsesStdHTTP(p, expected)
 	if usesStdFSDirectoryName(expected) {
 		p.usesStdFSDirectory = true
 	}
@@ -734,9 +736,7 @@ func (p *program) checkObjectExpression(node *objectExpression, scope *astScope)
 	if strings.HasPrefix(canonical, "std.io.") {
 		p.usesStdIO = true
 	}
-	if strings.HasPrefix(canonical, "std.http.") {
-		p.usesStdHTTP = true
-	}
+	markUsesStdHTTP(p, canonical)
 	if usesStdFSDirectoryName(canonical) {
 		p.usesStdFSDirectory = true
 	}
@@ -1040,11 +1040,10 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 // part of the standard library. Reading a function as a value pulls in the same
 // runtime support calling it would.
 func (p *program) markStandardLibraryUse(namespace string, native nativeFunction) {
+	markUsesStdHTTPNamespace(p, namespace)
 	switch namespace {
 	case "std.io":
 		p.usesStdIO = true
-	case "std.http":
-		p.usesStdHTTP = true
 	case "std.process":
 		p.usesStdProcess = true
 	}
