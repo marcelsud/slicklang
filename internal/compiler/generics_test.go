@@ -665,6 +665,34 @@ function main() -> string {
 	}
 }
 
+// TestUnionVariantCarriesGenericInstantiation pins that a union variant payload
+// typed as a concrete instantiation of a user generic seeds monomorphization, so
+// the native backend can emit the payload field. Box<int> appears only in the
+// variant declaration; the Full arm is never constructed, so nothing else
+// registers the instance. Without seeding from p.unions the native build fails.
+func TestUnionVariantCarriesGenericInstantiation(t *testing.T) {
+	source := genericBox + `
+union Holder {
+    Full(Content: Box<int>)
+    Empty
+}
+
+function describe(Value: Holder) -> int {
+    match Value {
+        Holder.Full(Held) => Held.Get()
+        Holder.Empty => 0
+    }
+}
+
+function main() -> int {
+    describe(Holder.Empty)
+}
+`
+	if output := runGenericsEverywhere(t, source); output != "0" {
+		t.Fatalf("expected 0, found %q", output)
+	}
+}
+
 // TestGenericSourceFormatting pins that generic declaration and use syntax is
 // already canonical. The angle brackets sit next to every token that could
 // absorb them: a catch arm whose error type ends in > directly before the

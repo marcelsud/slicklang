@@ -230,6 +230,14 @@ func (p *program) collectInstantiationRoots() []instantiation {
 			p.collectFromSignature(iface.methods[methodName], &found)
 		}
 	}
+	for _, name := range sortedKeys(p.unions) {
+		union := p.unions[name]
+		for _, variantName := range union.order {
+			for _, field := range union.variants[variantName].fields {
+				p.collectFromType(field.typ.pos, union.namespace, union.aliases, field.typ.name, &found)
+			}
+		}
+	}
 	return found
 }
 
