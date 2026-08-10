@@ -20,6 +20,7 @@ var exampleOutputs = map[string]string{
 	"range-loop":         "0:Ada;2:Grace;",
 	"checked-errors":     "Ada: woof",
 	"constants":          "SLK001; 512; 3; true; -256; Strict",
+	"fieldless-union":    "GET /todos; DELETE /todos/42",
 	"generics":           "42;slick;size=3;root;1;no two;42;42;slick",
 	"maps":               "37; 2; Ada=37;Linus=55;; map {Ada: 37, Grace: 36}",
 	"optional":           "missing user",
