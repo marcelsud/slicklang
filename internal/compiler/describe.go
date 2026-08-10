@@ -113,6 +113,9 @@ func (p *program) describeSymbol(name string) (SymbolDescription, bool) {
 	if iface := p.interfaces[name]; iface != nil {
 		return p.describeInterface(iface), true
 	}
+	if union := p.unions[name]; union != nil {
+		return p.describeUnion(union), true
+	}
 	if member, ok := p.describeMember(name); ok {
 		return member, true
 	}
@@ -204,6 +207,40 @@ func (p *program) describeInterface(iface *interfaceDecl) SymbolDescription {
 	return description
 }
 
+// describeUnion reports a union as its documentation plus its variants in
+// declaration order. Each variant is a child symbol whose own description
+// carries the payload fields.
+func (p *program) describeUnion(union *unionDecl) SymbolDescription {
+	description := emptySymbol(union.qualified, "union", visibility(union.name))
+	description.Documentation = union.documentation
+	description.Source = describeSource(union.pos)
+	for _, name := range union.order {
+		variant := union.variants[name]
+		description.Children = append(description.Children, ChildDescription{
+			CanonicalName: union.qualified + "." + variant.name,
+			Kind:          "variant",
+			Visibility:    visibility(variant.name),
+			Documentation: variant.documentation,
+		})
+	}
+	return description
+}
+
+func (p *program) describeVariant(name string, union *unionDecl, variant *unionVariantDecl) SymbolDescription {
+	description := emptySymbol(name, "variant", visibility(variant.name))
+	description.Documentation = variant.documentation
+	description.Type = union.qualified
+	description.Source = describeSource(variant.pos)
+	for _, field := range variant.fields {
+		description.Fields = append(description.Fields, FieldDescription{
+			Name:       field.name,
+			Type:       p.canonicalType(union.namespace, union.aliases, field.typ),
+			Visibility: visibility(field.name),
+		})
+	}
+	return description
+}
+
 func (p *program) describeMethod(owner string, method *methodSignature) MethodDescription {
 	return MethodDescription{
 		CanonicalName: owner + "." + method.name,
@@ -240,6 +277,11 @@ func (p *program) describeMember(name string) (SymbolDescription, bool) {
 	if iface := p.interfaces[owner]; iface != nil {
 		if method := iface.methods[member]; method != nil {
 			return p.describeMethodMember(name, method), true
+		}
+	}
+	if union := p.unions[owner]; union != nil {
+		if variant := union.variants[member]; variant != nil {
+			return p.describeVariant(name, union, variant), true
 		}
 	}
 	return SymbolDescription{}, false
@@ -293,6 +335,11 @@ func (p *program) namespaceExists(namespace string) bool {
 			return true
 		}
 	}
+	for name := range p.unions {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
 	return false
 }
 
@@ -329,6 +376,9 @@ func (p *program) describeChildren(namespace string) []ChildDescription {
 	}
 	for name, iface := range p.interfaces {
 		add(name, "interface", iface.name, iface.documentation)
+	}
+	for name, union := range p.unions {
+		add(name, "union", union.name, union.documentation)
 	}
 	names := sortedKeys(children)
 	descriptions := make([]ChildDescription, 0, len(names))

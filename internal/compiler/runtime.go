@@ -19,6 +19,7 @@ type runtimeValue struct {
 	buffer    *runtimeBuffer
 	result    *runtimeResult
 	optional  *runtimeOptional
+	variant   *runtimeVariant
 	native    *nativeIOResource
 	directory *nativeTemporaryDirectory
 }
@@ -774,6 +775,9 @@ func (p *program) evalName(node *nameExpression, frame *runtimeFrame) (runtimeVa
 	parts := strings.Split(node.name, ".")
 	value, ok := frame.lookup(parts[0])
 	if !ok {
+		if union, variant, named := p.resolveVariant(frame.function.namespace, frame.function.aliases, node.name); named && variant != nil {
+			return p.runtimeVariantValue(union, variant, nil), nil
+		}
 		return runtimeValue{}, runtimeError(node.pos, "unknown value %s", node.name)
 	}
 	for _, fieldName := range parts[1:] {
@@ -899,6 +903,11 @@ func (p *program) evalCall(node *callExpression, frame *runtimeFrame) (runtimeVa
 			typ:      iterableType(elementTypes...),
 			iterable: &runtimeIterable{kind: "zip", sources: args},
 		}, nil
+	}
+	if _, shadowed := frame.lookup(strings.Split(name.name, ".")[0]); !shadowed {
+		if union, variant, named := p.resolveVariant(frame.function.namespace, frame.function.aliases, name.name); named && variant != nil {
+			return p.runtimeVariantValue(union, variant, args), nil
+		}
 	}
 	if errorType, isError := p.resolveErrorIn(frame.function.namespace, frame.function.aliases, name.name); isError && p.classes[errorType] != nil {
 		value := runtimeValue{typ: errorType, fields: make(map[string]runtimeValue)}
@@ -1340,8 +1349,11 @@ func (p *program) evalMatch(node *matchExpression, frame *runtimeFrame) (runtime
 	if err != nil {
 		return runtimeValue{}, err
 	}
+	if value.variant != nil {
+		return p.evalMatchUnion(node, value, frame)
+	}
 	if value.result == nil {
-		return runtimeValue{}, runtimeError(node.pos, "match requires a Result value, found %s", displayName(value.typ))
+		return runtimeValue{}, runtimeError(node.pos, "match requires a Result or union value, found %s", displayName(value.typ))
 	}
 	for _, arm := range node.arms {
 		if arm.pattern == matchPatternOk && !value.result.ok {
@@ -1453,6 +1465,12 @@ func runtimeEqual(left, right runtimeValue) bool {
 		}
 		return left.result.ok == right.result.ok && runtimeEqual(left.result.payload, right.result.payload)
 	}
+	if left.variant != nil || right.variant != nil {
+		if left.variant == nil || right.variant == nil {
+			return false
+		}
+		return runtimeVariantEqual(left.variant, right.variant)
+	}
 	if left.mapping != nil || right.mapping != nil {
 		if left.mapping == nil || right.mapping == nil || len(left.mapping.entries) != len(right.mapping.entries) {
 			return false
@@ -1535,6 +1553,9 @@ func formatRuntimeValue(value runtimeValue) string {
 				open, close = "(", ")"
 			}
 			return open + strings.Join(items, ", ") + close
+		}
+		if value.variant != nil {
+			return formatRuntimeVariant(value.variant)
 		}
 		if value.result != nil {
 			return value.result.label() + "(" + formatRuntimeValue(value.result.payload) + ")"

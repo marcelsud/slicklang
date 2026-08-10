@@ -550,7 +550,7 @@ func (g *goGenerator) emitDeclarations() error {
 		}
 		g.line("")
 	}
-	return nil
+	return g.emitUnionDeclarations()
 }
 
 func (g *goGenerator) emitFunctions() error {
@@ -1293,6 +1293,11 @@ func (g *goGenerator) emitCallExpression(body *strings.Builder, node *callExpres
 		fmt.Fprintf(body, "return slickZip(%s), nil\n", strings.Join(sequences, ", "))
 		return nil
 	}
+	if _, shadowed := scope.locals[strings.Split(name.name, ".")[0]]; !shadowed {
+		if union, variant, named := g.program.resolveVariant(scope.function.namespace, scope.function.aliases, name.name); named && variant != nil {
+			return g.emitVariantConstruction(body, union, variant, arguments, argumentTypes)
+		}
+	}
 	if errorType, isError := g.program.resolveErrorIn(scope.function.namespace, scope.function.aliases, name.name); isError && g.program.classes[errorType] != nil {
 		message := "\"\""
 		if len(arguments) > 0 {
@@ -1606,6 +1611,13 @@ func (g *goGenerator) emitMatchExpression(body *strings.Builder, node *matchExpr
 	if err != nil {
 		return err
 	}
+	if union := g.program.unions[operand]; union != nil {
+		scrutinee, err := g.evalExpression(body, node.value, scope, "matched", typ)
+		if err != nil {
+			return err
+		}
+		return g.emitUnionMatch(body, node, union, scrutinee, scope, typ)
+	}
 	success, failure, ok := resultTypeArgs(operand)
 	if !ok {
 		return fmt.Errorf("generated match on non-Result type %s", operand)
@@ -1678,6 +1690,9 @@ func (g *goGenerator) nameExpression(node *nameExpression, scope *goScope) (stri
 	parts := strings.Split(node.name, ".")
 	binding, ok := scope.locals[parts[0]]
 	if !ok {
+		if union, variant, named := g.program.resolveVariant(scope.function.namespace, scope.function.aliases, node.name); named && variant != nil {
+			return fmt.Sprintf("&%s{slickTag: %d}", goUnionName(union.qualified), variant.tag), nil
+		}
 		return "", fmt.Errorf("unknown generated value %s", node.name)
 	}
 	value := binding.name
@@ -1781,7 +1796,7 @@ func (g *goGenerator) resolveDeclaredType(namespace string, aliases map[string]a
 		return "", fmt.Errorf("Go backend does not support type %s", name)
 	}
 	resolved := g.program.resolveNameIn(namespace, aliases, name)
-	if g.program.classes[resolved] == nil && g.program.interfaces[resolved] == nil {
+	if g.program.classes[resolved] == nil && g.program.interfaces[resolved] == nil && g.program.unions[resolved] == nil {
 		return "", fmt.Errorf("Go backend cannot resolve type %s", name)
 	}
 	return resolved, nil
@@ -1847,6 +1862,11 @@ func (g *goGenerator) goType(typ string) string {
 	}
 	if g.program.interfaces[typ] != nil {
 		return goInterfaceName(typ)
+	}
+	// A union is a pointer so a recursive variant payload stays a legal Go type
+	// and the zero value is never a valid tag.
+	if g.program.unions[typ] != nil {
+		return "*" + goUnionName(typ)
 	}
 	return "any"
 }

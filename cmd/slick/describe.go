@@ -270,7 +270,11 @@ func writeHumanDescription(output io.Writer, description compiler.SymbolDescript
 	if description.Kind == "interface" {
 		writeMethods(output, "Declared methods", description.DeclaredMethods, omittedFrom(budget, "declared_methods"), budget)
 	}
-	if description.Kind == "namespace" {
+	if description.Kind == "variant" {
+		fmt.Fprintf(output, "Union: %s\n", description.Type)
+		writeFields(output, description.Fields, omittedFrom(budget, "fields"), budget)
+	}
+	if description.Kind == "namespace" || description.Kind == "union" {
 		omitted := omittedFrom(budget, "children")
 		fmt.Fprintln(output, "Children:")
 		if len(description.Children) == 0 && omitted == 0 {

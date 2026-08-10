@@ -289,6 +289,7 @@ const (
 	matchPatternOk matchPattern = iota
 	matchPatternErr
 	matchPatternAny
+	matchPatternVariant
 )
 
 func (pattern matchPattern) String() string {
@@ -297,19 +298,29 @@ func (pattern matchPattern) String() string {
 		return "Ok"
 	case matchPatternErr:
 		return "Err"
+	case matchPatternVariant:
+		return "variant"
 	default:
 		return "_"
 	}
 }
 
+// matchArm is one pattern and its value. binding carries the single Result
+// payload name; variant, bindings, and resolvedVariant carry a union pattern
+// such as Expression.Binary(Left, Operator, Right).
 type matchArm struct {
 	pattern matchPattern
 	binding string
-	value   expressionNode
-	pos     position
+	// variant is the pattern as written; resolvedVariant is the variant name
+	// the checker matched it to, which every backend dispatches on.
+	variant         string
+	bindings        []string
+	resolvedVariant string
+	value           expressionNode
+	pos             position
 }
 
-// matchExpression is a Result match.
+// matchExpression is a Result or union match.
 type matchExpression struct {
 	value expressionNode
 	arms  []matchArm
@@ -1234,6 +1245,10 @@ func (p *bodyParser) parseMatch(pos position) expressionNode {
 }
 
 func (p *bodyParser) parseMatchArm() (matchArm, bool) {
+	if ref, next, ok := readQualified(p.tokens, p.index); ok && strings.Contains(ref.name, ".") {
+		p.index = next
+		return p.parseVariantMatchArm(ref)
+	}
 	name, ok := p.expectIdent("match pattern")
 	if !ok {
 		return matchArm{}, false
@@ -1263,9 +1278,41 @@ func (p *bodyParser) parseMatchArm() (matchArm, bool) {
 			return matchArm{}, false
 		}
 	default:
-		p.program.add(name.pos, diagnosticCodeMatchPattern, "match supports only Ok(...), Err(...), and _ patterns, found %s", name.text)
+		p.program.add(name.pos, diagnosticCodeMatchPattern, "match supports only Ok(...), Err(...), Union.Variant patterns, and _, found %s", name.text)
 		return matchArm{}, false
 	}
+	return p.parseMatchArmValue(arm)
+}
+
+// parseVariantMatchArm reads a qualified union pattern. A variant with payload
+// fields binds one name per field, where _ ignores that field; a fieldless
+// variant takes no binding list at all.
+func (p *bodyParser) parseVariantMatchArm(ref qualifiedRef) (matchArm, bool) {
+	arm := matchArm{pattern: matchPatternVariant, variant: ref.name, pos: ref.pos}
+	if p.accept("(") {
+		for !p.atEnd() && p.current().text != ")" {
+			binding, ok := p.expectIdent("payload binding")
+			if !ok {
+				return matchArm{}, false
+			}
+			arm.bindings = append(arm.bindings, binding.text)
+			if !p.accept(",") {
+				break
+			}
+		}
+		if !p.accept(")") {
+			p.error(p.current().pos, "expected ')' after payload bindings")
+			return matchArm{}, false
+		}
+		if len(arm.bindings) == 0 {
+			p.program.add(ref.pos, diagnosticCodeMatchPattern, "%s must bind at least one payload value or omit its parentheses", ref.name)
+			return matchArm{}, false
+		}
+	}
+	return p.parseMatchArmValue(arm)
+}
+
+func (p *bodyParser) parseMatchArmValue(arm matchArm) (matchArm, bool) {
 	if !p.matchPair("=", ">") {
 		p.error(p.current().pos, "expected '=>' after match pattern")
 		return matchArm{}, false

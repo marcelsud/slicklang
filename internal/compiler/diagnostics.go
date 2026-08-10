@@ -93,6 +93,7 @@ const (
 	diagnosticCodePendingPath              diagnosticCode = "SLK401"
 	diagnosticCodeAwaitLoop                diagnosticCode = "SLK402"
 	diagnosticCodeAsyncUnsafeValue         diagnosticCode = "SLK403"
+	diagnosticCodeUnionVariant             diagnosticCode = "SLK404"
 )
 
 var ErrUnknownDiagnostic = errors.New("unknown diagnostic")
@@ -298,23 +299,24 @@ var diagnosticDefinitions = []diagnosticDefinition{
 		"The operand and enclosing function use different Result failure types.",
 		"Convert the error to the enclosing failure type, handle it locally, or align the two Result types."),
 	defineDiagnostic(diagnosticCodeMatchValue, DiagnosticPhaseTypeCheck,
-		"Match requires a Result",
-		"Result match arms destructure only Result<T, E> values.",
-		"A match expression receives a value whose type is not Result.",
-		"Match a Result value, or replace the construct with control flow for the actual type."),
+		"Match requires a Result or union",
+		"Match arms destructure only Result<T, E> values and values of a declared union; an optional is neither, because null is not an implicit variant.",
+		"A match expression receives a value whose type is neither Result nor a union.",
+		"Match a Result or union value, or replace the construct with control flow for the actual type.",
+		"Compare an optional with null first and match the value the branch proved present."),
 	defineDiagnostic(diagnosticCodeMatchExhaustiveness, DiagnosticPhaseTypeCheck,
-		"Result match is not exhaustive",
-		"A Result match must handle both Ok and Err unless a catch-all arm handles the remainder.",
-		"The match omits a reachable Result variant.",
-		"Add the missing Ok or Err arm, or add a catch-all _ arm."),
+		"Match is not exhaustive",
+		"A match must handle both Ok and Err for a Result, and every declared variant of a union, unless a catch-all arm handles the remainder.",
+		"The match omits a reachable Result or union variant.",
+		"Add the missing Ok, Err, or union variant arm, or add a catch-all _ arm."),
 	defineDiagnostic(diagnosticCodeMatchArm, DiagnosticPhaseTypeCheck,
-		"Result match arm is invalid",
-		"Each Result variant can be handled once, and no arm may follow a catch-all or complete set of variants.",
+		"Match arm is invalid",
+		"Each variant can be handled once, and no arm may follow a catch-all or complete set of variants.",
 		"A match arm duplicates an earlier arm or can never be reached.",
 		"Remove or reorder the duplicate or unreachable arm."),
 	defineDiagnostic(diagnosticCodeMatchArmType, DiagnosticPhaseTypeCheck,
-		"Result match arms have incompatible types",
-		"Every reachable arm of a Result match must produce one common result type.",
+		"Match arms have incompatible types",
+		"Every reachable arm of a match must produce one common result type.",
 		"Two reachable match arms produce types that cannot be joined.",
 		"Change the arms to produce the same type."),
 	defineDiagnostic(diagnosticCodeResultConstructorArity, DiagnosticPhaseParse,
@@ -323,10 +325,10 @@ var diagnosticDefinitions = []diagnosticDefinition{
 		"A Result constructor is written with zero or multiple arguments.",
 		"Supply exactly one payload to Ok or Err."),
 	defineDiagnostic(diagnosticCodeMatchPattern, DiagnosticPhaseParse,
-		"Unsupported Result match pattern",
-		"Result matches support only Ok(...), Err(...), and _ patterns.",
-		"A Result match arm starts with another pattern shape.",
-		"Replace the pattern with Ok(binding), Err(binding), or _."),
+		"Unsupported match pattern",
+		"Matches support Ok(...), Err(...), qualified Union.Variant patterns, and _.",
+		"A match arm starts with another pattern shape, or a variant pattern has empty parentheses.",
+		"Replace the pattern with Ok(binding), Err(binding), Union.Variant(bindings), or _."),
 	defineDiagnostic(diagnosticCodeGenericType, DiagnosticPhaseTypeCheck,
 		"Invalid generic type",
 		"A generic type application must name a known generic, use its declared arity, and satisfy its type-argument restrictions.",
@@ -495,6 +497,13 @@ var diagnosticDefinitions = []diagnosticDefinition{
 		"Child receivers and arguments must be immutable structural values without native resources or resource-hiding interfaces.",
 		"An async call captures a native resource, structural resource interface, or unsupported contained type.",
 		"Pass immutable data instead and acquire resources inside the child."),
+	defineDiagnostic(diagnosticCodeUnionVariant, DiagnosticPhaseTypeCheck,
+		"Invalid union variant",
+		"A union declares a closed set of variants, so every construction and every pattern must name one of them and account for exactly its declared payload fields.",
+		"A construction or match pattern names an unknown variant, a variant of another union, or binds the wrong number of payload values.",
+		"Name a variant declared by the union being constructed or matched.",
+		"Bind exactly one name per declared payload field, using _ to ignore one.",
+		"Write a fieldless variant without parentheses and a variant with fields with them."),
 }
 
 var diagnosticRegistry = mustBuildDiagnosticRegistry(diagnosticDefinitions)

@@ -1,0 +1,76 @@
+/// Expression is the closed set of nodes this example compiler understands.
+/// Every phase dispatches through an exhaustive match, so adding a variant
+/// fails compilation until every phase handles it.
+union Expression {
+    /// Number is a literal value.
+    Number(Value: int)
+    /// Add sums its two operands.
+    Add(Left: Expression, Right: Expression)
+    /// Multiply multiplies its two operands.
+    Multiply(Left: Expression, Right: Expression)
+    /// Missing marks a node the parser could not build.
+    Missing
+}
+
+/// Failure explains why a phase could not finish.
+class Failure implements Error {
+    /// Message states what went wrong.
+    Message: string
+}
+
+/// Render is the printing phase.
+function Render(Node: Expression) -> string {
+    match Node {
+        Expression.Number(Value) => `${Value}`
+        Expression.Add(Left, Right) => RenderBinary(Left, "+", Right)
+        Expression.Multiply(Left, Right) => RenderBinary(Left, "*", Right)
+        Expression.Missing => "?"
+    }
+}
+
+function RenderBinary(Left: Expression, Operator: string, Right: Expression) -> string {
+    let Rendered = Render(Left)
+    let Other = Render(Right)
+    `(${Rendered} ${Operator} ${Other})`
+}
+
+/// Evaluate is the evaluation phase.
+function Evaluate(Node: Expression) -> Result<int, Failure> {
+    match Node {
+        Expression.Number(Value) => Ok(Value)
+        Expression.Add(Left, Right) => EvaluateAdd(Left, Right)
+        Expression.Multiply(Left, Right) => EvaluateMultiply(Left, Right)
+        Expression.Missing => Err(Failure {
+            Message: "missing node"
+        })
+    }
+}
+
+function EvaluateAdd(Left: Expression, Right: Expression) -> Result<int, Failure> {
+    let First = Evaluate(Left)?
+    let Second = Evaluate(Right)?
+    Ok(First + Second)
+}
+
+function EvaluateMultiply(Left: Expression, Right: Expression) -> Result<int, Failure> {
+    let First = Evaluate(Left)?
+    let Second = Evaluate(Right)?
+    Ok(First * Second)
+}
+
+/// Describe reports one evaluation outcome. Result keeps its own match shape.
+function Describe(Outcome: Result<int, Failure>) -> string {
+    match Outcome {
+        Ok(Total) => `${Total}`
+        Err(Reason) => Reason.Message
+    }
+}
+
+function main() -> string {
+    let Tree = Expression.Add(Expression.Number(6), Expression.Multiply(Expression.Number(3), Expression.Number(7)))
+    let Broken = Expression.Add(Expression.Number(1), Expression.Missing)
+    let Text = Render(Tree)
+    let Total = Describe(Evaluate(Tree))
+    let Reason = Describe(Evaluate(Broken))
+    `${Text} = ${Total}; ${Reason}`
+}

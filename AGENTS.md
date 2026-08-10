@@ -20,12 +20,24 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 Native resource classes set `nativeResource` to the Go pointer type of their runtime state, which `emitDeclarations` emits as a `slickResource` field. Object literals of such classes are legal Slick, so their state pointer is nil and every method must survive that.
 
+## Adding a top-level declaration form
+
+`internal/compiler/unions.go` is the worked example (`union`): one feature file holding parsing, checking, interpretation, and Go emission, wired into the shared dispatchers. Miss one and a single backend disagrees at runtime instead of failing the build:
+
+1. the `program` map, initialized in both `compile` (`compiler.go`) and `parseFormatSource` (`format.go`);
+2. the `parseSourceTokens` dispatch and the "expected ..." error listing the forms;
+3. name resolution: `canonicalTypeName` (`methods.go`), `checkTypeName` (`visibility.go`), `checkAliases` and `checkDeclaredTypes` (`compiler.go`);
+4. both backends: `evalExpression`, `formatRuntimeValue`, and `runtimeEqual` (`runtime.go`) plus `goType`, `resolveDeclaredType`, and `emitDeclarations` (`codegen.go`) — a type the Go backend cannot map silently becomes `any`;
+5. the surfaces: `describe.go` with `cmd/slick/describe.go`, `isTopDeclaration` and `collectBreaks` (`format.go`), `highlightKeywords` (`highlight.go`);
+6. diagnostics in `diagnostics.go`, whose definitions must stay sorted by code, and an example project pinned in `exampleOutputs`.
+
 ## Slick language sharp edges when writing tests and examples
 
 - String interpolation accepts only names and dotted field access: `${Value}` and `${Entry.Name}` work, `${f(x)}` and `${!Flag}` do not. Bind to a `let` first.
 - `match` arms take a single expression, never a block. Factor multi-statement arms into a function.
 - Arrays expose `.Get(index)` (returns an optional) and `.Length()`; there is no index syntax.
 - `?` requires the enclosing function to return `Result`, including inside a `using` initializer.
+- Union variants are always qualified by their union or its exact alias, in construction and in patterns; payload bindings are positional, and payload fields are readable only through a match arm.
 - Example projects are pinned by observable output in `exampleOutputs` (`internal/compiler/build_test.go`) and must be a `slick fmt` fixed point.
 
 ## Maintaining this file

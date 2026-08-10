@@ -673,7 +673,7 @@ function main() -> int {
     }
 }
 `)
-		assertDiagnostic(t, diagnostics, "SLK355", "match requires a Result value, found int")
+		assertDiagnostic(t, diagnostics, "SLK355", "match requires a Result or union value, found int")
 	})
 	t.Run("missing Ok", func(t *testing.T) {
 		diagnostics := checkResult(t, failure+`
@@ -762,7 +762,7 @@ function main() -> int {
     }
 }
 `)
-		assertDiagnostic(t, diagnostics, "SLK360", "match supports only Ok(...), Err(...), and _ patterns")
+		assertDiagnostic(t, diagnostics, "SLK360", "match supports only Ok(...), Err(...), Union.Variant patterns, and _")
 	})
 }
 
