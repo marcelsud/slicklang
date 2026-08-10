@@ -175,9 +175,13 @@ type objectExpression struct {
 func (n *objectExpression) expressionPos() position { return n.pos }
 
 type callExpression struct {
-	callee                expressionNode
-	typeArgs              []typeRef
-	args                  []expressionNode
+	callee   expressionNode
+	typeArgs []typeRef
+	args     []expressionNode
+	// resolvedCallee names the concrete function a call reaches when the source
+	// named a generic one, so both backends emit the instantiation the checker
+	// selected instead of resolving the open declaration again.
+	resolvedCallee        string
 	resolvedTypeArgs      []string
 	resolvedParams        []string
 	resolvedArgumentTypes []string
@@ -336,6 +340,10 @@ type bodyParser struct {
 	stopObjectLiteral bool
 }
 
+// parseBodies parses every declared body once. An open generic body is parsed
+// too: nothing checks it directly, but the formatter reads its statement
+// positions, and each instantiation parses its own copy to own the resolved
+// types the checker writes back.
 func (p *program) parseBodies() {
 	for _, function := range p.functions {
 		if function.native != "" {
@@ -343,10 +351,16 @@ func (p *program) parseBodies() {
 		}
 		function.ast = p.parseBody(function.body, function.pos)
 	}
+	for _, function := range p.genericFunctions {
+		function.ast = p.parseBody(function.body, function.pos)
+	}
 	for _, implementation := range p.methodImpls {
 		if implementation.native != "" {
 			continue
 		}
+		implementation.ast = p.parseBody(implementation.body, implementation.pos)
+	}
+	for _, implementation := range p.genericMethodImpls {
 		implementation.ast = p.parseBody(implementation.body, implementation.pos)
 	}
 }
@@ -678,10 +692,17 @@ func (p *bodyParser) parsePostfix() expressionNode {
 	}
 	for !p.atEnd() {
 		if !p.stopObjectLiteral {
-			if name, ok := expression.(*nameExpression); ok && p.accept("{") {
-				fields := p.parseObjectFields()
-				expression = &objectExpression{typeName: name.name, fields: fields, pos: name.pos}
-				continue
+			if name, ok := expression.(*nameExpression); ok {
+				if typeName, generic := p.tryParseObjectTypeArguments(name.name); generic {
+					fields := p.parseObjectFields()
+					expression = &objectExpression{typeName: typeName, fields: fields, pos: name.pos}
+					continue
+				}
+				if p.accept("{") {
+					fields := p.parseObjectFields()
+					expression = &objectExpression{typeName: name.name, fields: fields, pos: name.pos}
+					continue
+				}
 			}
 		}
 		if typeArgs, ok := p.tryParseCallTypeArguments(); ok {
@@ -1065,6 +1086,46 @@ func (p *bodyParser) parseArguments() []expressionNode {
 	return args
 }
 
+// tryParseObjectTypeArguments consumes <...>{ only when the angle brackets
+// carry the type arguments of a generic object construction. The closing > must
+// be followed by the opening brace, so an ordinary comparison keeps its meaning.
+func (p *bodyParser) tryParseObjectTypeArguments(name string) (string, bool) {
+	if p.atEnd() || p.current().text != "<" {
+		return "", false
+	}
+	close := matching(p.tokens, p.index, "<", ">")
+	if close < 0 || close+1 >= len(p.tokens) || p.tokens[close+1].text != "{" {
+		return "", false
+	}
+	var text strings.Builder
+	text.WriteString(name)
+	for _, tok := range p.tokens[p.index : close+1] {
+		text.WriteString(tok.text)
+	}
+	p.index = close + 2
+	return text.String(), true
+}
+
+// readTypeArgumentSuffix appends a <...> type argument list to base when one
+// follows, so a caught error type may name a generic instantiation.
+func (p *bodyParser) readTypeArgumentSuffix(base string) (string, bool) {
+	if p.atEnd() || p.current().text != "<" {
+		return base, true
+	}
+	close := matching(p.tokens, p.index, "<", ">")
+	if close < 0 {
+		p.error(p.current().pos, "unterminated generic type")
+		return base, false
+	}
+	var text strings.Builder
+	text.WriteString(base)
+	for _, tok := range p.tokens[p.index : close+1] {
+		text.WriteString(tok.text)
+	}
+	p.index = close + 1
+	return text.String(), true
+}
+
 // tryParseCallTypeArguments consumes <...> only when the angle brackets form
 // type arguments for a call: the closing > must be followed by (. Ordinary
 // comparison expressions that use < or > are left untouched.
@@ -1175,6 +1236,10 @@ func (p *bodyParser) parseCatchExpression(value expressionNode) expressionNode {
 			continue
 		}
 		p.index = next
+		caught, ok := p.readTypeArgumentSuffix(ref.name)
+		if !ok {
+			continue
+		}
 		armBinding := ""
 		if p.accept("as") {
 			name, bindingOK := p.expectIdent("catch binding")
@@ -1192,7 +1257,7 @@ func (p *bodyParser) parseCatchExpression(value expressionNode) expressionNode {
 			p.error(ref.pos, "expected catch arm value")
 			continue
 		}
-		arms = append(arms, catchArm{errorType: typeRef{name: ref.name, pos: ref.pos}, binding: armBinding, value: armValue})
+		arms = append(arms, catchArm{errorType: typeRef{name: caught, pos: ref.pos}, binding: armBinding, value: armValue})
 	}
 	if !p.accept("}") {
 		p.error(pos, "unterminated catch expression")

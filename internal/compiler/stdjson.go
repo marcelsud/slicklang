@@ -69,6 +69,9 @@ func (p *program) jsonTypeSupported(name string, visiting map[string]bool) bool 
 	if isBuiltinType(name) {
 		return true
 	}
+	if _, generic := p.genericTypeParams(name); generic {
+		return false
+	}
 	if base, optional := optionalBase(name); optional {
 		return p.jsonTypeSupported(base, visiting)
 	}
@@ -84,8 +87,10 @@ func (p *program) jsonTypeSupported(name string, visiting map[string]bool) bool 
 	if strings.HasPrefix(name, "(") {
 		return false
 	}
-	if base, _, generic := genericType(name); generic {
-		_ = base
+	// A concrete instantiation of a user-declared generic is an ordinary class
+	// whose fields are already substituted; only an unresolved generic shape is
+	// unsupported.
+	if _, _, generic := genericType(name); generic && p.classes[name] == nil {
 		return false
 	}
 	if p.interfaces[name] != nil {
@@ -147,11 +152,18 @@ func (p *program) jsonUnsupportedReason(name string, visiting map[string]bool) s
 	if strings.HasPrefix(name, "(") {
 		return "tuples cannot be encoded or decoded as JSON"
 	}
-	if base, _, generic := genericType(name); generic {
+	if base, _, generic := genericType(name); generic && p.classes[name] == nil {
+		if p.genericInterfaces[base] != nil {
+			return "interfaces cannot be encoded or decoded as JSON"
+		}
 		return fmt.Sprintf("unknown generic type %s cannot be encoded or decoded as JSON", base)
 	}
 	if p.interfaces[name] != nil {
 		return "interfaces cannot be encoded or decoded as JSON"
+	}
+	if params, generic := p.genericTypeParams(name); generic {
+		return fmt.Sprintf("%s takes %d type arguments; JSON encodes one concrete instantiation, not an open generic declaration",
+			displayName(name), len(params))
 	}
 	class := p.classes[name]
 	if class == nil {

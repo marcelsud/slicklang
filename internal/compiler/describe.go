@@ -104,13 +104,15 @@ func (p *program) describeSymbol(name string) (SymbolDescription, bool) {
 		description.TypeParameters = append(description.TypeParameters, declaration.typeParams...)
 		return description, true
 	}
-	if function := p.functions[name]; function != nil {
+	// A monomorphized instantiation is compiler-owned and is not a declaration
+	// anyone wrote, so describe reports the open declaration instead.
+	if function := p.functionDeclaration(name); function != nil && function.instanceOf == "" {
 		return p.describeFunction(function), true
 	}
-	if class := p.classes[name]; class != nil {
+	if class := p.classDeclaration(name); class != nil && class.instanceOf == "" {
 		return p.describeClass(class), true
 	}
-	if iface := p.interfaces[name]; iface != nil {
+	if iface := p.interfaceDeclaration(name); iface != nil && iface.instanceOf == "" {
 		return p.describeInterface(iface), true
 	}
 	if union := p.unions[name]; union != nil {
@@ -162,6 +164,7 @@ func (p *program) describeFunction(function *functionDecl) SymbolDescription {
 func (p *program) describeClass(class *classDecl) SymbolDescription {
 	description := emptySymbol(class.qualified, "class", visibility(class.name))
 	description.Documentation = class.documentation
+	description.TypeParameters = append(description.TypeParameters, class.typeParams...)
 	description.Source = describeSource(class.pos)
 	for _, name := range sortedKeys(class.fields) {
 		field := class.fields[name]
@@ -192,6 +195,9 @@ func (p *program) describeClass(class *classDecl) SymbolDescription {
 		description.Interfaces = append(description.Interfaces, errorTypeName)
 	}
 	for _, name := range sortedKeys(p.interfaces) {
+		if p.interfaces[name].instanceOf != "" && class.instanceOf == "" {
+			continue
+		}
 		if len(p.classSatisfies(class, p.interfaces[name])) == 0 {
 			description.Interfaces = append(description.Interfaces, name)
 		}
@@ -203,6 +209,7 @@ func (p *program) describeClass(class *classDecl) SymbolDescription {
 func (p *program) describeInterface(iface *interfaceDecl) SymbolDescription {
 	description := emptySymbol(iface.qualified, "interface", visibility(iface.name))
 	description.Documentation = iface.documentation
+	description.TypeParameters = append(description.TypeParameters, iface.typeParams...)
 	description.Source = describeSource(iface.pos)
 	for _, name := range sortedKeys(iface.methods) {
 		description.DeclaredMethods = append(description.DeclaredMethods, p.describeMethod(iface.qualified, iface.methods[name]))
@@ -273,7 +280,7 @@ func (p *program) describeMember(name string) (SymbolDescription, bool) {
 		return SymbolDescription{}, false
 	}
 	owner, member := name[:separator], name[separator+1:]
-	if class := p.classes[owner]; class != nil {
+	if class := p.classDeclaration(owner); class != nil {
 		if field, ok := class.fields[member]; ok {
 			description := emptySymbol(name, "field", visibility(field.name))
 			description.Documentation = field.documentation
@@ -288,7 +295,7 @@ func (p *program) describeMember(name string) (SymbolDescription, bool) {
 			return p.describeMethodMember(name, method), true
 		}
 	}
-	if iface := p.interfaces[owner]; iface != nil {
+	if iface := p.interfaceDeclaration(owner); iface != nil {
 		if method := iface.methods[member]; method != nil {
 			return p.describeMethodMember(name, method), true
 		}
@@ -334,17 +341,7 @@ func (p *program) describeParameters(namespace string, aliases map[string]aliasD
 
 func (p *program) namespaceExists(namespace string) bool {
 	prefix := namespace + "."
-	for name := range p.functions {
-		if strings.HasPrefix(name, prefix) {
-			return true
-		}
-	}
-	for name := range p.classes {
-		if strings.HasPrefix(name, prefix) {
-			return true
-		}
-	}
-	for name := range p.interfaces {
+	for _, name := range p.declaredSymbolNames() {
 		if strings.HasPrefix(name, prefix) {
 			return true
 		}
@@ -360,6 +357,38 @@ func (p *program) namespaceExists(namespace string) bool {
 		}
 	}
 	return false
+}
+
+// declaredSymbolNames lists every symbol a source declared, which excludes the
+// instantiations the compiler monomorphized for it.
+func (p *program) declaredSymbolNames() []string {
+	names := make([]string, 0, len(p.functions)+len(p.classes)+len(p.interfaces))
+	for name, function := range p.functions {
+		if function.instanceOf == "" {
+			names = append(names, name)
+		}
+	}
+	for name, class := range p.classes {
+		if class.instanceOf == "" {
+			names = append(names, name)
+		}
+	}
+	for name, iface := range p.interfaces {
+		if iface.instanceOf == "" {
+			names = append(names, name)
+		}
+	}
+	for name := range p.genericFunctions {
+		names = append(names, name)
+	}
+	for name := range p.genericClasses {
+		names = append(names, name)
+	}
+	for name := range p.genericInterfaces {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func (p *program) describeChildren(namespace string) []ChildDescription {
@@ -387,14 +416,18 @@ func (p *program) describeChildren(namespace string) []ChildDescription {
 			Documentation: documentation,
 		}
 	}
-	for name, function := range p.functions {
-		add(name, "function", function.name, function.documentation)
-	}
-	for name, class := range p.classes {
-		add(name, "class", class.name, class.documentation)
-	}
-	for name, iface := range p.interfaces {
-		add(name, "interface", iface.name, iface.documentation)
+	for _, name := range p.declaredSymbolNames() {
+		switch {
+		case p.functionDeclaration(name) != nil:
+			declaration := p.functionDeclaration(name)
+			add(name, "function", declaration.name, declaration.documentation)
+		case p.classDeclaration(name) != nil:
+			declaration := p.classDeclaration(name)
+			add(name, "class", declaration.name, declaration.documentation)
+		case p.interfaceDeclaration(name) != nil:
+			declaration := p.interfaceDeclaration(name)
+			add(name, "interface", declaration.name, declaration.documentation)
+		}
 	}
 	for name, union := range p.unions {
 		add(name, "union", union.name, union.documentation)

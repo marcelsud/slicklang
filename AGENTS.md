@@ -31,6 +31,15 @@ Native resource classes set `nativeResource` to the Go pointer type of their run
 5. the surfaces: `describe.go` with `cmd/slick/describe.go`, `isTopDeclaration` and `collectBreaks` (`format.go`), `highlightKeywords` (`highlight.go`);
 6. diagnostics in `diagnostics.go`, whose definitions must stay sorted by code, and an example project pinned in `exampleOutputs`.
 
+## User-defined generics
+
+`internal/compiler/generics.go` monomorphizes them: an open declaration lives only in `program.genericClasses`, `genericInterfaces`, `genericFunctions`, or `genericMethodImpls`, and every concrete instantiation a program mentions is registered in the ordinary maps under its canonical name (`root.Box<int>`). Downstream code therefore needs no generic awareness — `goEncodedName` already hex-encodes the whole name, and `p.classes[...]` lookups find instances for free. Two consequences worth knowing before touching this:
+
+- A declaration that must see both forms uses `classDeclaration`, `interfaceDeclaration`, or `functionDeclaration`; anything iterating `p.classes` for output must skip `instanceOf != ""`.
+- Instance-derived checks run inside `checkingInstance`, which deduplicates a diagnostic already reported, so one mistake in a generic is reported once instead of once per instantiation.
+
+A class that reaches itself by value — `Node { Next: Node? }`, generic or not — checks and interprets but fails `go build` with `invalid recursive type`. That predates generics; recursion through an array or Map compiles.
+
 ## Slick language sharp edges when writing tests and examples
 
 - String interpolation accepts only names and dotted field access: `${Value}` and `${Entry.Name}` work, `${f(x)}` and `${!Flag}` do not. Bind to a `let` first.

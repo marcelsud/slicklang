@@ -805,7 +805,7 @@ func (p *program) evalName(node *nameExpression, frame *runtimeFrame) (runtimeVa
 }
 
 func (p *program) evalObject(node *objectExpression, frame *runtimeFrame) (runtimeValue, error) {
-	canonical := p.resolveNameIn(frame.function.namespace, frame.function.aliases, node.typeName)
+	canonical := p.canonicalTypeName(frame.function.namespace, frame.function.aliases, node.typeName)
 	class := p.classes[canonical]
 	if class == nil {
 		return runtimeValue{}, runtimeError(node.pos, "unknown class %s", node.typeName)
@@ -855,7 +855,7 @@ func (p *program) prepareAsyncCall(node *callExpression, frame *runtimeFrame) (f
 		}
 		receiver = &value
 	} else {
-		function = p.resolveFunction(frame.function, name.name)
+		function = p.callTarget(frame.function, node, name.name)
 		if function == nil {
 			return nil, runtimeError(node.pos, "unknown async function %s", name.name)
 		}
@@ -950,8 +950,7 @@ func (p *program) evalCall(node *callExpression, frame *runtimeFrame) (runtimeVa
 			return p.callFunctionContext(frame.ctx, implementation, args, &receiver, nil)
 		}
 	}
-	canonical := p.resolveNameIn(frame.function.namespace, frame.function.aliases, name.name)
-	function := p.functions[canonical]
+	function := p.callTarget(frame.function, node, name.name)
 	if function == nil {
 		return runtimeValue{}, runtimeError(node.pos, "unknown function %s", name.name)
 	}

@@ -7,21 +7,34 @@ import (
 )
 
 func (p *program) resolveThrowSets() {
-	for _, function := range p.functions {
-		function.throwSet = p.resolveThrows(function.namespace, function.aliases, function.throws)
+	for _, name := range sortedKeys(p.functions) {
+		function := p.functions[name]
+		p.checkingInstance(function.instanceOf != "", func() {
+			function.throwSet = p.resolveThrows(function.namespace, function.aliases, function.throws)
+		})
 	}
 	for _, implementation := range p.methodImpls {
-		implementation.throwSet = p.resolveThrows(implementation.namespace, implementation.aliases, implementation.throws)
+		p.checkingInstance(implementation.instanceOf != "", func() {
+			implementation.throwSet = p.resolveThrows(implementation.namespace, implementation.aliases, implementation.throws)
+		})
 	}
-	for _, class := range p.classes {
-		for _, method := range class.methods {
-			method.throwSet = p.resolveThrows(method.namespace, method.aliases, method.throws)
-		}
+	for _, name := range sortedKeys(p.classes) {
+		class := p.classes[name]
+		p.checkingInstance(class.instanceOf != "", func() {
+			for _, methodName := range sortedKeys(class.methods) {
+				method := class.methods[methodName]
+				method.throwSet = p.resolveThrows(method.namespace, method.aliases, method.throws)
+			}
+		})
 	}
-	for _, iface := range p.interfaces {
-		for _, method := range iface.methods {
-			method.throwSet = p.resolveThrows(method.namespace, method.aliases, method.throws)
-		}
+	for _, name := range sortedKeys(p.interfaces) {
+		iface := p.interfaces[name]
+		p.checkingInstance(iface.instanceOf != "", func() {
+			for _, methodName := range sortedKeys(iface.methods) {
+				method := iface.methods[methodName]
+				method.throwSet = p.resolveThrows(method.namespace, method.aliases, method.throws)
+			}
+		})
 	}
 }
 
@@ -44,73 +57,86 @@ func (p *program) resolveThrows(namespace string, aliases map[string]aliasDecl, 
 
 func (p *program) linkMethods() {
 	for _, implementation := range p.methodImpls {
-		receiver := implementation.receiverCanonical
-		if receiver == "" {
-			if _, alias := implementation.aliases[implementation.receiver.name]; alias {
-				p.add(implementation.receiver.pos, diagnosticCodeAliasedMethodReceiver, "method receivers must use a local or absolute class name, not alias %s", implementation.receiver.name)
-				continue
-			}
-			receiver = implementation.receiver.name
-			if !isAbsoluteCanonicalName(receiver) {
-				receiver = qualify(implementation.namespace, receiver)
-			}
-		}
-		class := p.classes[receiver]
-		if class == nil {
-			p.add(implementation.receiver.pos, diagnosticCodeMethodReceiver, "method receiver %s is not a class", implementation.receiver.name)
-			continue
-		}
-		if !p.requireAccess(implementation.receiver.pos, implementation.namespace, class.namespace, class.name, "class") {
-			continue
-		}
-		implementation.receiverCanonical = receiver
-		implementation.qualified = receiver + "." + implementation.name
+		p.checkingInstance(implementation.instanceOf != "", func() { p.linkMethod(implementation) })
+	}
 
-		if !isPublic(implementation.name) && implementation.namespace != class.namespace {
-			p.add(implementation.pos, diagnosticCodePrivateAccess, "method %s is private to %s; capitalize it to implement it from %s", implementation.name, class.namespace, implementation.namespace)
-			continue
-		}
-		if !implementation.inline {
-			switch class.extension {
-			case extensionNone:
-				p.add(implementation.pos, diagnosticCodeDetachedMethod, "%s does not allow detached method implementations", class.qualified)
-				continue
-			case extensionNamespace:
-				if implementation.namespace != class.namespace {
-					p.add(implementation.pos, diagnosticCodeDetachedMethod, "%s allows method implementations only from %s, not %s", class.qualified, class.namespace, implementation.namespace)
-					continue
+	for _, name := range sortedKeys(p.classes) {
+		class := p.classes[name]
+		p.checkingInstance(class.instanceOf != "", func() {
+			for _, methodName := range sortedKeys(class.methods) {
+				contract := class.methods[methodName]
+				class.effective[methodName] = contract
+				if class.implementations[methodName] == nil {
+					p.add(contract.pos, diagnosticCodeMissingMethod, "%s.%s has no implementation; implement it or remove its declaration", class.qualified, methodName)
 				}
 			}
-		}
+		})
+	}
+}
 
-		contract := class.methods[implementation.name]
-		if contract == nil {
-			p.add(implementation.pos, diagnosticCodeMethodReceiver, "%s.%s is not declared by %s", class.qualified, implementation.name, class.qualified)
-			continue
+func (p *program) linkMethod(implementation *functionDecl) {
+	receiver := implementation.receiverCanonical
+	if receiver == "" {
+		if _, alias := implementation.aliases[implementation.receiver.name]; alias {
+			p.add(implementation.receiver.pos, diagnosticCodeAliasedMethodReceiver, "method receivers must use a local or absolute class name, not alias %s", implementation.receiver.name)
+			return
 		}
+		receiver = implementation.receiver.name
+		if !isAbsoluteCanonicalName(receiver) {
+			receiver = qualify(implementation.namespace, receiver)
+		}
+	}
+	class := p.classes[receiver]
+	if class == nil {
+		// A generic class is only ever extended at its declared parameters, so
+		// naming it bare is a missing type argument list, not a missing class.
+		if p.reportGenericMisuse(implementation.receiver.pos, receiver) {
+			return
+		}
+		p.add(implementation.receiver.pos, diagnosticCodeMethodReceiver, "method receiver %s is not a class", implementation.receiver.name)
+		return
+	}
+	if !p.requireAccess(implementation.receiver.pos, implementation.namespace, class.namespace, class.name, "class") {
+		return
+	}
+	implementation.receiverCanonical = receiver
+	implementation.qualified = receiver + "." + implementation.name
 
-		if previous := class.implementations[implementation.name]; previous != nil {
-			if previous.documentation != nil && implementation.documentation != nil {
-				p.add(implementation.pos, diagnosticCodeConflictingDocumentation, "competing documentation for %s.%s", class.qualified, implementation.name)
+	if !isPublic(implementation.name) && implementation.namespace != class.namespace {
+		p.add(implementation.pos, diagnosticCodePrivateAccess, "method %s is private to %s; capitalize it to implement it from %s", implementation.name, class.namespace, implementation.namespace)
+		return
+	}
+	if !implementation.inline {
+		switch class.extension {
+		case extensionNone:
+			p.add(implementation.pos, diagnosticCodeDetachedMethod, "%s does not allow detached method implementations", class.qualified)
+			return
+		case extensionNamespace:
+			if implementation.namespace != class.namespace {
+				p.add(implementation.pos, diagnosticCodeDetachedMethod, "%s allows method implementations only from %s, not %s", class.qualified, class.namespace, implementation.namespace)
+				return
 			}
-			p.add(implementation.pos, diagnosticCodeDuplicateMethod, "duplicate implementation of %s.%s; first implemented at %s:%d:%d", class.qualified, implementation.name, previous.pos.file, previous.pos.line, previous.pos.column)
-			continue
-		}
-		class.implementations[implementation.name] = implementation
-
-		class.effective[implementation.name] = contract
-		if mismatch := p.signatureMismatch(contract, implementation); mismatch != "" {
-			p.add(implementation.pos, diagnosticCodeMethodSignature, "implementation of %s.%s does not match its declaration: %s", class.qualified, implementation.name, mismatch)
 		}
 	}
 
-	for _, class := range p.classes {
-		for name, contract := range class.methods {
-			class.effective[name] = contract
-			if class.implementations[name] == nil {
-				p.add(contract.pos, diagnosticCodeMissingMethod, "%s.%s has no implementation; implement it or remove its declaration", class.qualified, name)
-			}
+	contract := class.methods[implementation.name]
+	if contract == nil {
+		p.add(implementation.pos, diagnosticCodeMethodReceiver, "%s.%s is not declared by %s", class.qualified, implementation.name, class.qualified)
+		return
+	}
+
+	if previous := class.implementations[implementation.name]; previous != nil {
+		if previous.documentation != nil && implementation.documentation != nil {
+			p.add(implementation.pos, diagnosticCodeConflictingDocumentation, "competing documentation for %s.%s", class.qualified, implementation.name)
 		}
+		p.add(implementation.pos, diagnosticCodeDuplicateMethod, "duplicate implementation of %s.%s; first implemented at %s:%d:%d", class.qualified, implementation.name, previous.pos.file, previous.pos.line, previous.pos.column)
+		return
+	}
+	class.implementations[implementation.name] = implementation
+
+	class.effective[implementation.name] = contract
+	if mismatch := p.signatureMismatch(contract, implementation); mismatch != "" {
+		p.add(implementation.pos, diagnosticCodeMethodSignature, "implementation of %s.%s does not match its declaration: %s", class.qualified, implementation.name, mismatch)
 	}
 }
 
@@ -209,7 +235,7 @@ func (p *program) canonicalTypeName(namespace string, aliases map[string]aliasDe
 		for index, arg := range parsed.args {
 			canonical[index] = p.canonicalTypeName(namespace, aliases, arg)
 		}
-		return parsed.base + "<" + strings.Join(canonical, ",") + ">"
+		return p.canonicalGenericBase(namespace, aliases, parsed.base) + "<" + strings.Join(canonical, ",") + ">"
 	}
 	if isBuiltinType(name) || strings.ContainsAny(name, "<>()[]?|,") {
 		return name
@@ -221,10 +247,31 @@ func (p *program) canonicalTypeName(namespace string, aliases map[string]aliasDe
 		return alias.target
 	}
 	qualified := qualify(namespace, name)
-	if p.classes[qualified] != nil || p.interfaces[qualified] != nil || p.unions[qualified] != nil {
+	if p.classDeclaration(qualified) != nil || p.interfaceDeclaration(qualified) != nil || p.unions[qualified] != nil {
 		return qualified
 	}
 	return name
+}
+
+// canonicalGenericBase resolves the declaration a generic application names.
+// Compiler-owned generics keep their bare names; a user-declared one is
+// qualified or resolved through an alias exactly as a plain type is, so
+// Box<int> and root.Box<int> are one type.
+func (p *program) canonicalGenericBase(namespace string, aliases map[string]aliasDecl, base string) string {
+	if _, core := coreGenericType(base); core {
+		return base
+	}
+	if isAbsoluteCanonicalName(base) {
+		return base
+	}
+	if alias, ok := aliases[base]; ok {
+		return alias.target
+	}
+	qualified := qualify(namespace, base)
+	if p.classDeclaration(qualified) != nil || p.interfaceDeclaration(qualified) != nil || p.unions[qualified] != nil {
+		return qualified
+	}
+	return base
 }
 
 func (p *program) resolveType(namespace string, aliases map[string]aliasDecl, ref typeRef) string {
@@ -299,6 +346,13 @@ func (p *program) methodForType(typeName, methodName string) (*methodSignature, 
 func (p *program) resolveErrorIn(namespace string, aliases map[string]aliasDecl, name string) (string, bool) {
 	if name == errorTypeName {
 		return errorTypeName, true
+	}
+	// A generic error type names one concrete instantiation, which is an
+	// ordinary class once the program mentions it.
+	if strings.ContainsRune(name, '<') {
+		canonical := p.canonicalTypeName(namespace, aliases, name)
+		decl := p.classes[canonical]
+		return canonical, decl != nil && decl.isError
 	}
 	if !isAbsoluteCanonicalName(name) {
 		if alias, ok := aliases[name]; ok {

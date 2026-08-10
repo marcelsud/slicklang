@@ -11,9 +11,12 @@ const (
 )
 
 type callableTarget struct {
-	name       string
-	namespace  string
-	aliases    map[string]aliasDecl
+	name      string
+	namespace string
+	aliases   map[string]aliasDecl
+	// generic is true when the target is one instantiation of a user-declared
+	// generic function, whose type arguments the call already supplied.
+	generic    bool
 	typeParams []string
 	params     []paramDecl
 	result     typeRef
@@ -670,7 +673,7 @@ func (p *program) checkRangeExpression(node *rangeExpression, scope *astScope) e
 }
 
 func (p *program) checkObjectExpression(node *objectExpression, scope *astScope) expressionInfo {
-	canonical := p.resolveNameIn(scope.function.namespace, scope.function.aliases, node.typeName)
+	canonical := p.canonicalTypeName(scope.function.namespace, scope.function.aliases, node.typeName)
 	if strings.HasPrefix(canonical, "std.io.") {
 		p.usesStdIO = true
 	}
@@ -683,10 +686,19 @@ func (p *program) checkObjectExpression(node *objectExpression, scope *astScope)
 	if strings.HasPrefix(canonical, "std.process.") {
 		p.usesStdProcess = true
 	}
+	// A construction names its type arguments directly, so an argument that
+	// names nothing is reported here rather than becoming a field mismatch.
+	if parsed := parseTypeName(canonical); parsed.kind == typeKindGeneric {
+		for _, arg := range parsed.args {
+			p.checkTypeNameScoped(node.pos, scope.function.namespace, nil, true, arg)
+		}
+	}
 	class := p.classes[canonical]
 	info := expressionInfo{typ: canonical, effects: make(effectSet)}
 	if class == nil {
-		p.add(node.pos, diagnosticCodeUnknownClass, "unknown class %s", node.typeName)
+		if !p.reportGenericMisuse(node.pos, canonical) {
+			p.add(node.pos, diagnosticCodeUnknownClass, "unknown class %s", node.typeName)
+		}
 		info.typ = typeUnknown
 		return info
 	}
@@ -849,7 +861,7 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 		return info
 	}
 
-	target, reported := p.resolveASTCall(scope.function, name, scope)
+	target, reported := p.resolveASTCall(scope.function, node, name, scope)
 	if len(parts) == 2 {
 		if receiver, exists := scope.lookup(parts[0]); exists {
 			node.resolvedReceiver = receiver
@@ -893,7 +905,7 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 	typeArgs := make([]string, 0, len(node.typeArgs))
 
 	if len(target.typeParams) == 0 {
-		if len(node.typeArgs) > 0 {
+		if len(node.typeArgs) > 0 && !target.generic {
 			p.add(node.pos, diagnosticCodeTypeArguments, "%s does not take type arguments", target.name)
 		}
 	} else {
@@ -1008,10 +1020,45 @@ func (p *program) checkIterableCall(node *callExpression, scope *astScope, name 
 	return info, true
 }
 
+// resolveGenericCall selects the monomorphized function a generic call names.
+// The type arguments are explicit and exact, so the call resolves to exactly
+// one concrete declaration and everything downstream sees an ordinary call.
+func (p *program) resolveGenericCall(function *functionDecl, node *callExpression, name *nameExpression, generic *functionDecl) (*callableTarget, bool) {
+	if !p.requireAccess(name.pos, function.namespace, generic.namespace, generic.name, "function") {
+		return nil, true
+	}
+	if len(node.typeArgs) != len(generic.typeParams) {
+		p.add(node.pos, diagnosticCodeTypeArguments, "%s expects %d type arguments, found %d", name.name, len(generic.typeParams), len(node.typeArgs))
+		return nil, true
+	}
+	args := make([]string, len(node.typeArgs))
+	for index, typeArg := range node.typeArgs {
+		args[index] = p.canonicalType(function.namespace, function.aliases, typeArg)
+		p.checkTypeNameScoped(typeArg.pos, function.namespace, nil, true, args[index])
+	}
+	instance := p.functions[genericInstanceName(generic.qualified, args)]
+	if instance == nil {
+		// A type argument that does not name a type was reported above.
+		return nil, true
+	}
+	node.resolvedCallee = instance.qualified
+	node.resolvedTypeArgs = args
+	return &callableTarget{
+		name:      name.name,
+		namespace: instance.namespace,
+		aliases:   instance.aliases,
+		generic:   true,
+		params:    instance.params,
+		result:    instance.result,
+		throwSet:  instance.throwSet,
+		function:  instance,
+	}, false
+}
+
 // resolveASTCall finds the function or method a call names. reported is true
 // when it already explained the failure, so the caller adds no second cascade
 // diagnostic for the same call.
-func (p *program) resolveASTCall(function *functionDecl, name *nameExpression, scope *astScope) (*callableTarget, bool) {
+func (p *program) resolveASTCall(function *functionDecl, node *callExpression, name *nameExpression, scope *astScope) (*callableTarget, bool) {
 	parts := strings.Split(name.name, ".")
 	if len(parts) == 2 {
 		if receiverType, exists := scope.lookup(parts[0]); exists {
@@ -1036,6 +1083,9 @@ func (p *program) resolveASTCall(function *functionDecl, name *nameExpression, s
 	}
 	callee := p.resolveFunction(function, name.name)
 	if callee == nil {
+		if generic := p.genericFunctions[p.resolveName(function, name.name)]; generic != nil {
+			return p.resolveGenericCall(function, node, name, generic)
+		}
 		return nil, false
 	}
 	if !p.requireAccess(name.pos, function.namespace, callee.namespace, callee.name, "function") {
@@ -1665,6 +1715,11 @@ func (p *program) taskSafeType(name string, visiting map[string]bool) bool {
 		}
 		return true
 	case typeKindGeneric:
+		// A monomorphized user generic is an ordinary class, so its safety is
+		// decided by the fields it actually holds.
+		if p.classes[name] != nil {
+			return p.taskSafeClass(name, visiting)
+		}
 		if parsed.base != "Result" && parsed.base != mapTypeName {
 			return false
 		}
@@ -1697,24 +1752,28 @@ func (p *program) taskSafeType(name string, visiting map[string]bool) bool {
 			}
 			return true
 		}
-		class := p.classes[name]
-		if class == nil || class.nativeResource != "" {
-			return false
-		}
-		if visiting[name] {
-			return true
-		}
-		visiting[name] = true
-		defer delete(visiting, name)
-		for _, field := range class.fields {
-			if !p.taskSafeType(p.resolveType(class.namespace, class.aliases, field.typ), visiting) {
-				return false
-			}
-		}
-		return true
+		return p.taskSafeClass(name, visiting)
 	default:
 		return false
 	}
+}
+
+func (p *program) taskSafeClass(name string, visiting map[string]bool) bool {
+	class := p.classes[name]
+	if class == nil || class.nativeResource != "" {
+		return false
+	}
+	if visiting[name] {
+		return true
+	}
+	visiting[name] = true
+	defer delete(visiting, name)
+	for _, field := range class.fields {
+		if !p.taskSafeType(p.resolveType(class.namespace, class.aliases, field.typ), visiting) {
+			return false
+		}
+	}
+	return true
 }
 func mergeEffects(target, source effectSet) {
 	for name, origin := range source {

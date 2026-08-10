@@ -855,7 +855,7 @@ func (g *goGenerator) emitAsyncLet(body *strings.Builder, node *asyncLetStatemen
 		}
 		callName = goJSONHelperName(operation, call.resolvedTypeArgs[0])
 	} else {
-		function := g.program.resolveFunction(scope.function, name.name)
+		function := g.program.callTarget(scope.function, call, name.name)
 		if function == nil {
 			return fmt.Errorf("unknown generated async function %s", name.name)
 		}
@@ -1344,7 +1344,7 @@ func (g *goGenerator) emitCallExpression(body *strings.Builder, node *callExpres
 		namespace, aliases = owner.namespace, owner.aliases
 	}
 	if call == "" {
-		function := g.program.resolveFunction(scope.function, name.name)
+		function := g.program.callTarget(scope.function, node, name.name)
 		if function == nil {
 			return fmt.Errorf("unknown generated function %s", name.name)
 		}
@@ -1782,7 +1782,16 @@ func (g *goGenerator) resolveDeclaredType(namespace string, aliases map[string]a
 	// checker and in generated Go.
 	if base, args, generic := genericType(name); generic {
 		declaration, supported := coreGenericType(base)
-		if !supported || len(args) != len(declaration.typeParams) {
+		if !supported {
+			// A user-declared generic reaches Go as the monomorphized
+			// declaration its canonical name already identifies.
+			canonical := g.program.canonicalTypeName(namespace, aliases, name)
+			if g.program.classes[canonical] != nil || g.program.interfaces[canonical] != nil {
+				return canonical, nil
+			}
+			return "", fmt.Errorf("Go backend does not support type %s", name)
+		}
+		if len(args) != len(declaration.typeParams) {
 			return "", fmt.Errorf("Go backend does not support type %s", name)
 		}
 		resolved := make([]string, len(args))

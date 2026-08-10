@@ -94,13 +94,17 @@ type methodSignature struct {
 }
 
 type classDecl struct {
-	name            string
-	qualified       string
-	namespace       string
-	aliases         map[string]aliasDecl
-	isError         bool
-	nativeResource  string
-	extension       extensionPolicy
+	name           string
+	qualified      string
+	namespace      string
+	aliases        map[string]aliasDecl
+	isError        bool
+	nativeResource string
+	extension      extensionPolicy
+	typeParams     []string
+	// instanceOf names the open generic declaration this class was
+	// monomorphized from; it is empty for ordinary declarations.
+	instanceOf      string
 	fields          map[string]fieldDecl
 	methods         map[string]*methodSignature
 	effective       map[string]*methodSignature
@@ -113,6 +117,8 @@ type interfaceDecl struct {
 	name          string
 	qualified     string
 	namespace     string
+	typeParams    []string
+	instanceOf    string
 	methods       map[string]*methodSignature
 	documentation *string
 	pos           position
@@ -133,6 +139,7 @@ type functionDecl struct {
 	receiver          typeRef
 	receiverCanonical string
 	inline            bool
+	instanceOf        string
 	native            nativeFunction
 	documentation     *string
 	pos               position
@@ -145,15 +152,38 @@ type program struct {
 	unions                 map[string]*unionDecl
 	functions              map[string]*functionDecl
 	constants              map[string]*constDecl
+	genericClasses         map[string]*classDecl
+	genericInterfaces      map[string]*interfaceDecl
+	genericFunctions       map[string]*functionDecl
+	genericMethodImpls     []*functionDecl
 	namespaceDocumentation map[string]*string
 	methodImpls            []*functionDecl
 	diags                  []Diagnostic
-	usesStdIO              bool
-	usesStdHTTP            bool
-	usesStdFSDirectory     bool
-	usesStdProcess         bool
-	usesUsing              bool
-	usesAsync              bool
+	// emitted deduplicates diagnostics while dedupe is on, so one mistake in a
+	// generic declaration is reported once instead of once per instantiation.
+	emitted            map[Diagnostic]struct{}
+	dedupe             bool
+	usesStdIO          bool
+	usesStdHTTP        bool
+	usesStdFSDirectory bool
+	usesStdProcess     bool
+	usesUsing          bool
+	usesAsync          bool
+}
+
+func newProgram() *program {
+	return &program{
+		classes:                make(map[string]*classDecl),
+		interfaces:             make(map[string]*interfaceDecl),
+		unions:                 make(map[string]*unionDecl),
+		functions:              make(map[string]*functionDecl),
+		constants:              make(map[string]*constDecl),
+		genericClasses:         make(map[string]*classDecl),
+		genericInterfaces:      make(map[string]*interfaceDecl),
+		genericFunctions:       make(map[string]*functionDecl),
+		namespaceDocumentation: make(map[string]*string),
+		emitted:                make(map[Diagnostic]struct{}),
+	}
 }
 
 func CheckPath(path string) ([]Diagnostic, error) {
@@ -227,14 +257,7 @@ func Check(sources []Source) []Diagnostic {
 }
 
 func compile(sources []Source) (*program, []Diagnostic) {
-	prog := &program{
-		classes:                make(map[string]*classDecl),
-		interfaces:             make(map[string]*interfaceDecl),
-		unions:                 make(map[string]*unionDecl),
-		functions:              make(map[string]*functionDecl),
-		constants:              make(map[string]*constDecl),
-		namespaceDocumentation: make(map[string]*string),
-	}
+	prog := newProgram()
 	registerStandardLibrary(prog)
 	for _, source := range sources {
 		if !validNamespace(source.Namespace) {
@@ -459,6 +482,48 @@ func (p *parser) parseUse() {
 	p.prog.aliases = append(p.prog.aliases, alias)
 }
 
+// parseTypeParameters reads a <T, U> declaration list. Names are unique and
+// may not shadow a compiler-owned type, so a parameter never silently hides
+// int or Result inside the declaration that binds it.
+func (p *parser) parseTypeParameters(owner string) ([]string, bool) {
+	if p.current().text != "<" {
+		return nil, true
+	}
+	p.advance()
+	var params []string
+	for {
+		name, ok := p.expectIdent("type parameter name")
+		if !ok {
+			return nil, false
+		}
+		switch {
+		case isReservedTypeName(name.text):
+			p.prog.add(name.pos, diagnosticCodeTypeParameter, "type parameter %s shadows the built-in type %s", name.text, name.text)
+		case containsName(params, name.text):
+			p.prog.add(name.pos, diagnosticCodeTypeParameter, "duplicate type parameter %s on %s", name.text, owner)
+		default:
+			params = append(params, name.text)
+		}
+		if !p.accept(",") {
+			break
+		}
+	}
+	if !p.accept(">") {
+		p.error(p.current().pos, "expected '>' after type parameters")
+		return nil, false
+	}
+	return params, true
+}
+
+func containsName(names []string, name string) bool {
+	for _, candidate := range names {
+		if candidate == name {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *parser) parseClass() {
 	name, ok := p.expectIdent("class name")
 	if !ok {
@@ -467,11 +532,16 @@ func (p *parser) parseClass() {
 	if isReservedTypeName(name.text) {
 		p.error(name.pos, "class name %s is reserved by the compiler", name.text)
 	}
+	typeParams, ok := p.parseTypeParameters(name.text)
+	if !ok {
+		return
+	}
 	class := &classDecl{
 		name:            name.text,
 		qualified:       qualify(p.source.Namespace, name.text),
 		namespace:       p.source.Namespace,
 		extension:       extensionNamespace,
+		typeParams:      typeParams,
 		aliases:         p.aliases,
 		fields:          make(map[string]fieldDecl),
 		methods:         make(map[string]*methodSignature),
@@ -508,6 +578,16 @@ func (p *parser) parseClass() {
 					break
 				}
 				p.index = next
+				// An implemented generic carries type arguments; conformance is
+				// checked structurally at each concrete instantiation.
+				if p.current().text == "<" {
+					close := matching(p.tokens, p.index, "<", ">")
+					if close < 0 {
+						p.error(p.current().pos, "unterminated generic type")
+						return
+					}
+					p.index = close + 1
+				}
 				if implemented.name == "Error" {
 					class.isError = true
 				}
@@ -526,10 +606,12 @@ func (p *parser) parseClass() {
 	}
 
 	registered := true
-	if previous, exists := p.prog.classes[class.qualified]; exists {
+	if previous := p.prog.classDeclaration(class.qualified); previous != nil {
 		p.reportDocumentationConflict(name.pos, class.qualified, previous.documentation, class.documentation)
 		p.error(name.pos, "duplicate class %s; first declared at %s:%d:%d", class.qualified, previous.pos.file, previous.pos.line, previous.pos.column)
 		registered = false
+	} else if len(class.typeParams) > 0 {
+		p.prog.genericClasses[class.qualified] = class
 	} else {
 		p.prog.classes[class.qualified] = class
 	}
@@ -574,11 +656,12 @@ func (p *parser) parseClassMethod(class *classDecl, registered bool) {
 	}
 	class.methods[name.text] = signature
 	if registered && hasBody {
-		p.prog.methodImpls = append(p.prog.methodImpls, &functionDecl{
+		implementation := &functionDecl{
 			name:              name.text,
 			qualified:         class.qualified + "." + name.text,
 			namespace:         class.namespace,
 			aliases:           p.aliases,
+			typeParams:        class.typeParams,
 			params:            params,
 			result:            result,
 			throws:            throws,
@@ -588,7 +671,12 @@ func (p *parser) parseClassMethod(class *classDecl, registered bool) {
 			inline:            true,
 			documentation:     signature.documentation,
 			pos:               name.pos,
-		})
+		}
+		if len(class.typeParams) > 0 {
+			p.prog.genericMethodImpls = append(p.prog.genericMethodImpls, implementation)
+			return
+		}
+		p.prog.methodImpls = append(p.prog.methodImpls, implementation)
 	}
 }
 
@@ -625,6 +713,10 @@ func (p *parser) parseInterface() {
 	if isReservedTypeName(name.text) {
 		p.error(name.pos, "interface name %s is reserved by the compiler", name.text)
 	}
+	typeParams, ok := p.parseTypeParameters(name.text)
+	if !ok {
+		return
+	}
 	if !p.accept("{") {
 		p.error(p.current().pos, "expected interface body")
 		return
@@ -633,15 +725,18 @@ func (p *parser) parseInterface() {
 		name:          name.text,
 		qualified:     qualify(p.source.Namespace, name.text),
 		namespace:     p.source.Namespace,
+		typeParams:    typeParams,
 		methods:       make(map[string]*methodSignature),
 		documentation: p.consumeDocumentation(),
 		pos:           name.pos,
 	}
 	registered := true
-	if previous, exists := p.prog.interfaces[decl.qualified]; exists {
+	if previous := p.prog.interfaceDeclaration(decl.qualified); previous != nil {
 		p.reportDocumentationConflict(name.pos, decl.qualified, previous.documentation, decl.documentation)
 		p.error(name.pos, "duplicate interface %s; first declared at %s:%d:%d", decl.qualified, previous.pos.file, previous.pos.line, previous.pos.column)
 		registered = false
+	} else if len(decl.typeParams) > 0 {
+		p.prog.genericInterfaces[decl.qualified] = decl
 	} else {
 		p.prog.interfaces[decl.qualified] = decl
 	}
@@ -693,6 +788,26 @@ func (p *parser) parseFunction() {
 		return
 	}
 	p.index = next
+	// A generic receiver interrupts the dotted name, so Box<T>.Get arrives as
+	// the base name, its parameters, and the method name in three steps.
+	typeParams, ok := p.parseTypeParameters(ref.name)
+	if !ok {
+		return
+	}
+	genericReceiver := ""
+	if len(typeParams) > 0 && p.current().text == "." {
+		p.advance()
+		method, methodOK := p.expectIdent("method name")
+		if !methodOK {
+			return
+		}
+		if p.current().text == "<" {
+			p.error(p.current().pos, "methods do not declare their own type parameters; %s uses the parameters of %s", method.text, ref.name)
+			return
+		}
+		genericReceiver = ref.name
+		ref = qualifiedRef{name: ref.name + "." + method.text, pos: ref.pos}
+	}
 	params, result, throws, body, hasBody, ok := p.parseCallableTail()
 	if !ok {
 		return
@@ -718,16 +833,17 @@ func (p *parser) parseFunction() {
 	}
 	if len(parts) == 1 {
 		qualified := qualify(p.source.Namespace, ref.name)
-		if previous, exists := p.prog.functions[qualified]; exists {
+		if previous := p.prog.functionDeclaration(qualified); previous != nil {
 			p.reportDocumentationConflict(ref.pos, qualified, previous.documentation, p.pendingDocumentation)
 			p.error(ref.pos, "duplicate function %s; first declared at %s:%d:%d", qualified, previous.pos.file, previous.pos.line, previous.pos.column)
 			return
 		}
-		p.prog.functions[qualified] = &functionDecl{
+		declaration := &functionDecl{
 			name:          ref.name,
 			qualified:     qualified,
 			namespace:     p.source.Namespace,
 			aliases:       p.aliases,
+			typeParams:    typeParams,
 			params:        params,
 			result:        result,
 			throws:        throws,
@@ -735,16 +851,25 @@ func (p *parser) parseFunction() {
 			documentation: p.consumeDocumentation(),
 			pos:           ref.pos,
 		}
+		if len(typeParams) > 0 {
+			p.prog.genericFunctions[qualified] = declaration
+			return
+		}
+		p.prog.functions[qualified] = declaration
 		return
 	}
 
 	methodName := parts[len(parts)-1]
 	receiverName := strings.Join(parts[:len(parts)-1], ".")
-	p.prog.methodImpls = append(p.prog.methodImpls, &functionDecl{
+	if genericReceiver != "" {
+		receiverName = genericReceiver
+	}
+	implementation := &functionDecl{
 		name:          methodName,
 		qualified:     receiverName + "." + methodName,
 		namespace:     p.source.Namespace,
 		aliases:       p.aliases,
+		typeParams:    typeParams,
 		params:        params,
 		result:        result,
 		throws:        throws,
@@ -752,7 +877,12 @@ func (p *parser) parseFunction() {
 		receiver:      typeRef{name: receiverName, pos: ref.pos},
 		documentation: p.consumeDocumentation(),
 		pos:           ref.pos,
-	})
+	}
+	if len(typeParams) > 0 {
+		p.prog.genericMethodImpls = append(p.prog.genericMethodImpls, implementation)
+		return
+	}
+	p.prog.methodImpls = append(p.prog.methodImpls, implementation)
 }
 
 func (p *parser) parseCallableTail() ([]paramDecl, typeRef, []typeRef, []token, bool, bool) {
@@ -868,12 +998,36 @@ func (p *parser) parseThrows() []typeRef {
 			p.error(p.current().pos, "expected error type after 'throws'")
 			return throws
 		}
-		throws = append(throws, typeRef{name: ref.name, pos: ref.pos})
 		p.index = next
+		name, ok := p.readTypeArgumentSuffix(ref.name)
+		if !ok {
+			return throws
+		}
+		throws = append(throws, typeRef{name: name, pos: ref.pos})
 		if !p.accept("|") {
 			return throws
 		}
 	}
+}
+
+// readTypeArgumentSuffix appends a <...> type argument list to base when one
+// follows, so a checked effect or caught type may name a generic instantiation.
+func (p *parser) readTypeArgumentSuffix(base string) (string, bool) {
+	if p.current().text != "<" {
+		return base, true
+	}
+	close := matching(p.tokens, p.index, "<", ">")
+	if close < 0 {
+		p.error(p.current().pos, "unterminated generic type")
+		return base, false
+	}
+	var text strings.Builder
+	text.WriteString(base)
+	for _, tok := range p.tokens[p.index : close+1] {
+		text.WriteString(tok.text)
+	}
+	p.index = close + 1
+	return text.String(), true
 }
 
 func (p *parser) skipBlock() {
@@ -961,28 +1115,55 @@ func readQualified(tokens []token, start int) (qualifiedRef, int, bool) {
 	return qualifiedRef{name: strings.Join(parts, "."), pos: tokens[start].pos}, end, true
 }
 
+// classDeclaration finds a class by canonical name whether it is an ordinary
+// declaration or an open generic one. Only name collision and documentation
+// care about both at once; everything downstream works on concrete classes.
+func (p *program) classDeclaration(name string) *classDecl {
+	if class := p.classes[name]; class != nil {
+		return class
+	}
+	return p.genericClasses[name]
+}
+
+func (p *program) interfaceDeclaration(name string) *interfaceDecl {
+	if iface := p.interfaces[name]; iface != nil {
+		return iface
+	}
+	return p.genericInterfaces[name]
+}
+
+func (p *program) functionDeclaration(name string) *functionDecl {
+	if function := p.functions[name]; function != nil {
+		return function
+	}
+	return p.genericFunctions[name]
+}
+
 func (p *program) check() {
 	p.parseBodies()
 	p.checkAliases()
 	p.checkConstants()
+	p.checkGenericDeclarations()
+	p.instantiateGenerics()
 	p.checkDeclaredTypes()
 	p.checkVisibility()
 	p.resolveThrowSets()
 	p.linkMethods()
-	for _, function := range p.functions {
-		p.checkFunction(function)
+	for _, name := range sortedKeys(p.functions) {
+		function := p.functions[name]
+		p.checkingInstance(function.instanceOf != "", func() { p.checkFunction(function) })
 	}
 	for _, implementation := range p.methodImpls {
-		p.checkFunction(implementation)
+		p.checkingInstance(implementation.instanceOf != "", func() { p.checkFunction(implementation) })
 	}
 }
 
 func (p *program) checkAliases() {
 	for _, alias := range p.aliases {
-		class := p.classes[alias.target]
-		iface := p.interfaces[alias.target]
+		class := p.classDeclaration(alias.target)
+		iface := p.interfaceDeclaration(alias.target)
 		union := p.unions[alias.target]
-		function := p.functions[alias.target]
+		function := p.functionDeclaration(alias.target)
 		constant := p.constants[alias.target]
 		if class == nil && iface == nil && union == nil && function == nil && constant == nil {
 			p.add(alias.pos, diagnosticCodeAlias, "alias target %s does not exist", alias.target)
@@ -998,11 +1179,11 @@ func (p *program) checkAliases() {
 			p.requireAccess(alias.pos, alias.namespace, function.namespace, function.name, "function")
 		}
 		local := qualify(alias.namespace, alias.name)
-		_, localClassExists := p.classes[local]
-		_, localInterfaceExists := p.interfaces[local]
-		_, localUnionExists := p.unions[local]
-		_, localFunctionExists := p.functions[local]
-		_, localConstantExists := p.constants[local]
+		localClassExists := p.classDeclaration(local) != nil
+		localInterfaceExists := p.interfaceDeclaration(local) != nil
+		localUnionExists := p.unions[local] != nil
+		localFunctionExists := p.functionDeclaration(local) != nil
+		localConstantExists := p.constants[local] != nil
 		if alias.target != local && (localClassExists || localInterfaceExists || localUnionExists || localFunctionExists || localConstantExists) {
 			p.add(alias.pos, diagnosticCodeAlias, "alias %s conflicts with a declaration in %s", alias.name, alias.namespace)
 		}
@@ -1016,30 +1197,38 @@ func (p *program) checkAliases() {
 func (p *program) checkDeclaredTypes() {
 	for _, name := range sortedKeys(p.functions) {
 		function := p.functions[name]
-		p.checkCallableTypes(function.params, function.result)
+		p.checkingInstance(function.instanceOf != "", func() {
+			p.checkCallableTypes(function.params, function.result)
+		})
 	}
 	for _, implementation := range p.methodImpls {
 		if implementation.inline {
 			continue
 		}
-		p.checkCallableTypes(implementation.params, implementation.result)
+		p.checkingInstance(implementation.instanceOf != "", func() {
+			p.checkCallableTypes(implementation.params, implementation.result)
+		})
 	}
 	for _, name := range sortedKeys(p.classes) {
 		class := p.classes[name]
-		for _, fieldName := range sortedKeys(class.fields) {
-			p.checkTypeRef(class.fields[fieldName].typ)
-		}
-		for _, methodName := range sortedKeys(class.methods) {
-			method := class.methods[methodName]
-			p.checkCallableTypes(method.params, method.result)
-		}
+		p.checkingInstance(class.instanceOf != "", func() {
+			for _, fieldName := range sortedKeys(class.fields) {
+				p.checkTypeRef(class.fields[fieldName].typ)
+			}
+			for _, methodName := range sortedKeys(class.methods) {
+				method := class.methods[methodName]
+				p.checkCallableTypes(method.params, method.result)
+			}
+		})
 	}
 	for _, name := range sortedKeys(p.interfaces) {
 		iface := p.interfaces[name]
-		for _, methodName := range sortedKeys(iface.methods) {
-			method := iface.methods[methodName]
-			p.checkCallableTypes(method.params, method.result)
-		}
+		p.checkingInstance(iface.instanceOf != "", func() {
+			for _, methodName := range sortedKeys(iface.methods) {
+				method := iface.methods[methodName]
+				p.checkCallableTypes(method.params, method.result)
+			}
+		})
 	}
 	for _, name := range sortedKeys(p.unions) {
 		union := p.unions[name]
@@ -1091,6 +1280,16 @@ func (p *program) resolveFunction(function *functionDecl, name string) *function
 	return p.functions[p.resolveName(function, name)]
 }
 
+// callTarget is the function a checked call reaches. A generic call already
+// selected one instantiation, so both backends follow that decision instead of
+// resolving the open declaration a second time.
+func (p *program) callTarget(function *functionDecl, node *callExpression, name string) *functionDecl {
+	if node.resolvedCallee != "" {
+		return p.functions[node.resolvedCallee]
+	}
+	return p.resolveFunction(function, name)
+}
+
 func (p *program) resolveName(function *functionDecl, name string) string {
 	if isAbsoluteCanonicalName(name) {
 		return name
@@ -1101,8 +1300,28 @@ func (p *program) resolveName(function *functionDecl, name string) string {
 	return qualify(function.namespace, name)
 }
 
+// add records one diagnostic. While dedupe is on the caller is re-checking a
+// declaration the compiler synthesized, so a diagnostic identical to one
+// already reported describes the same source mistake and is dropped.
 func (p *program) add(pos position, code diagnosticCode, format string, args ...any) {
-	p.diags = append(p.diags, newDiagnostic(pos, code, format, args...))
+	diagnostic := newDiagnostic(pos, code, format, args...)
+	if p.emitted == nil {
+		p.emitted = make(map[Diagnostic]struct{})
+	}
+	if _, seen := p.emitted[diagnostic]; seen && p.dedupe {
+		return
+	}
+	p.emitted[diagnostic] = struct{}{}
+	p.diags = append(p.diags, diagnostic)
+}
+
+// checkingInstance runs check while diagnostics from a monomorphized
+// declaration are deduplicated against everything already reported.
+func (p *program) checkingInstance(instance bool, check func()) {
+	previous := p.dedupe
+	p.dedupe = instance
+	check()
+	p.dedupe = previous
 }
 
 func qualify(namespace, name string) string {

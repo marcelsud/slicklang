@@ -24,24 +24,40 @@ func (p *program) requireAccess(pos position, fromNamespace, ownerNamespace, nam
 }
 
 func (p *program) checkVisibility() {
-	for _, function := range p.functions {
-		p.checkCallableTypeVisibility(function.namespace, function.aliases, function.params, function.result)
+	for _, name := range sortedKeys(p.functions) {
+		function := p.functions[name]
+		p.checkingInstance(function.instanceOf != "", func() {
+			// A native declaration may keep private type parameters, which are
+			// bound for its own signature exactly as a source generic's are.
+			p.checkCallableTypeVisibilityScoped(function.namespace, function.aliases,
+				newTypeParamScope(function.qualified, function.typeParams), function.params, function.result)
+		})
 	}
 	for _, implementation := range p.methodImpls {
-		p.checkCallableTypeVisibility(implementation.namespace, implementation.aliases, implementation.params, implementation.result)
+		p.checkingInstance(implementation.instanceOf != "", func() {
+			p.checkCallableTypeVisibility(implementation.namespace, implementation.aliases, implementation.params, implementation.result)
+		})
 	}
-	for _, class := range p.classes {
-		for _, field := range class.fields {
-			p.checkTypeVisibility(class.namespace, class.aliases, field.typ)
-		}
-		for _, method := range class.methods {
-			p.checkCallableTypeVisibility(method.namespace, method.aliases, method.params, method.result)
-		}
+	for _, name := range sortedKeys(p.classes) {
+		class := p.classes[name]
+		p.checkingInstance(class.instanceOf != "", func() {
+			for _, fieldName := range sortedKeys(class.fields) {
+				p.checkTypeVisibility(class.namespace, class.aliases, class.fields[fieldName].typ)
+			}
+			for _, methodName := range sortedKeys(class.methods) {
+				method := class.methods[methodName]
+				p.checkCallableTypeVisibility(method.namespace, method.aliases, method.params, method.result)
+			}
+		})
 	}
-	for _, iface := range p.interfaces {
-		for _, method := range iface.methods {
-			p.checkCallableTypeVisibility(method.namespace, method.aliases, method.params, method.result)
-		}
+	for _, name := range sortedKeys(p.interfaces) {
+		iface := p.interfaces[name]
+		p.checkingInstance(iface.instanceOf != "", func() {
+			for _, methodName := range sortedKeys(iface.methods) {
+				method := iface.methods[methodName]
+				p.checkCallableTypeVisibility(method.namespace, method.aliases, method.params, method.result)
+			}
+		})
 	}
 	for _, union := range p.unions {
 		for _, variantName := range union.order {
@@ -63,10 +79,26 @@ func (p *program) checkTypeVisibility(namespace string, aliases map[string]alias
 	p.checkTypeName(ref.pos, namespace, p.canonicalType(namespace, aliases, ref))
 }
 
+func (p *program) checkCallableTypeVisibilityScoped(namespace string, aliases map[string]aliasDecl, scope *typeParamScope, params []paramDecl, result typeRef) {
+	for _, param := range params {
+		p.checkTypeNameScoped(param.typ.pos, namespace, scope, false, p.canonicalType(namespace, aliases, param.typ))
+	}
+	p.checkTypeNameScoped(result.pos, namespace, scope, false, p.canonicalType(namespace, aliases, result))
+}
+
 // checkTypeName walks a canonical type and validates every component: the base
 // and arity of each generic application, Map key restrictions, and namespace
 // access for each named class or interface.
 func (p *program) checkTypeName(pos position, namespace, name string) {
+	p.checkTypeNameScoped(pos, namespace, nil, false, name)
+}
+
+// checkTypeNameScoped is checkTypeName with the type parameters a generic
+// declaration binds. scope is nil outside such a declaration. named reports an
+// unresolvable plain name, which is only meaningful where a type is required
+// to already exist: inside a generic declaration, and as the argument of a
+// generic application.
+func (p *program) checkTypeNameScoped(pos position, namespace string, scope *typeParamScope, named bool, name string) {
 	if pos.file != "" && strings.Contains(name, "std.io.") {
 		p.usesStdIO = true
 	}
@@ -82,7 +114,7 @@ func (p *program) checkTypeName(pos position, namespace, name string) {
 	parsed := parseTypeName(name)
 	switch parsed.kind {
 	case typeKindOptional, typeKindArray:
-		p.checkTypeName(pos, namespace, parsed.base)
+		p.checkTypeNameScoped(pos, namespace, scope, named, parsed.base)
 		return
 	case typeKindTuple:
 		if len(parsed.args) < 2 {
@@ -90,25 +122,24 @@ func (p *program) checkTypeName(pos position, namespace, name string) {
 			return
 		}
 		for _, element := range parsed.args {
-			p.checkTypeName(pos, namespace, element)
+			p.checkTypeNameScoped(pos, namespace, scope, named, element)
 		}
 		return
 	case typeKindGeneric:
-		declaration, known := coreGenericType(parsed.base)
-		if !known {
-			p.add(pos, diagnosticCodeGenericType, "unknown generic type %s", parsed.base)
-		} else if len(parsed.args) != len(declaration.typeParams) {
-			p.addTypeArityDiagnostic(pos, parsed.base, len(declaration.typeParams), len(parsed.args))
-		} else if parsed.base == mapTypeName && !isMapKeyType(parsed.args[0]) {
-			p.add(pos, diagnosticCodeGenericType, "Map key type must be string, int, or bool; found %s", displayName(parsed.args[0]))
-		}
+		p.checkGenericApplication(pos, namespace, parsed)
 		for _, arg := range parsed.args {
-			p.checkTypeName(pos, namespace, arg)
+			// A type argument names a type that must already exist, so an
+			// unresolvable one is reported rather than read as a forward use.
+			p.checkTypeNameScoped(pos, namespace, scope, true, arg)
 		}
 		return
 	}
 	if declaration, generic := coreGenericType(name); generic {
 		p.addTypeArityDiagnostic(pos, name, len(declaration.typeParams), 0)
+		return
+	}
+	if params, generic := p.genericTypeParams(name); generic {
+		p.addTypeArityDiagnostic(pos, name, len(params), 0)
 		return
 	}
 	if strings.ContainsRune(name, '<') {
@@ -125,7 +156,94 @@ func (p *program) checkTypeName(pos position, namespace, name string) {
 	}
 	if union := p.unions[name]; union != nil {
 		p.requireAccess(pos, namespace, union.namespace, union.name, "union")
+		return
 	}
+	p.reportUnboundTypeName(pos, scope, named, name)
+}
+
+// checkGenericApplication validates the base and arity of one generic
+// application. A declaration that takes no parameters and an unknown base each
+// get their own message so the mistake is named rather than described.
+func (p *program) checkGenericApplication(pos position, namespace string, parsed parsedType) {
+	if declaration, known := coreGenericType(parsed.base); known {
+		switch {
+		case len(parsed.args) != len(declaration.typeParams):
+			p.addTypeArityDiagnostic(pos, parsed.base, len(declaration.typeParams), len(parsed.args))
+		case parsed.base == mapTypeName && !isMapKeyType(parsed.args[0]):
+			p.add(pos, diagnosticCodeGenericType, "Map key type must be string, int, or bool; found %s", displayName(parsed.args[0]))
+		}
+		return
+	}
+	if params, generic := p.genericTypeParams(parsed.base); generic {
+		if len(parsed.args) != len(params) {
+			p.addTypeArityDiagnostic(pos, parsed.base, len(params), len(parsed.args))
+			return
+		}
+		if class := p.genericClasses[parsed.base]; class != nil {
+			p.requireAccess(pos, namespace, class.namespace, class.name, "class")
+			return
+		}
+		iface := p.genericInterfaces[parsed.base]
+		p.requireAccess(pos, namespace, iface.namespace, iface.name, "interface")
+		return
+	}
+	if p.classes[parsed.base] != nil || p.interfaces[parsed.base] != nil {
+		p.add(pos, diagnosticCodeGenericType, "%s takes no type arguments", parsed.base)
+		return
+	}
+	p.add(pos, diagnosticCodeGenericType, "unknown generic type %s", parsed.base)
+}
+
+// reportUnboundTypeName names the two ways a plain type can fail to resolve
+// where one is required: a missing declaration, and a type parameter the
+// enclosing generic never declared.
+func (p *program) reportUnboundTypeName(pos position, scope *typeParamScope, named bool, name string) {
+	if scope.binds(name) || isBuiltinType(name) || name == errorTypeName {
+		return
+	}
+	switch {
+	case scope != nil:
+		p.add(pos, diagnosticCodeUnboundTypeParameter, "%s is not a known type or a type parameter of %s", name, scope.owner)
+	case named:
+		p.add(pos, diagnosticCodeUnboundTypeParameter, "%s is not a known type", name)
+	}
+}
+
+// reportGenericMisuse names a type that uses a declaration's type parameters
+// wrongly: a bare generic name, the wrong arity, or type arguments on a
+// declaration that takes none. It reports whether it named a mistake.
+func (p *program) reportGenericMisuse(pos position, name string) bool {
+	parsed := parseTypeName(name)
+	if parsed.kind == typeKindGeneric {
+		if params, generic := p.genericTypeParams(parsed.base); generic {
+			if len(parsed.args) == len(params) {
+				return false
+			}
+			p.addTypeArityDiagnostic(pos, parsed.base, len(params), len(parsed.args))
+			return true
+		}
+		if p.classes[parsed.base] != nil || p.interfaces[parsed.base] != nil {
+			p.add(pos, diagnosticCodeGenericType, "%s takes no type arguments", parsed.base)
+			return true
+		}
+		return false
+	}
+	if params, generic := p.genericTypeParams(name); generic {
+		p.addTypeArityDiagnostic(pos, name, len(params), 0)
+		return true
+	}
+	return false
+}
+
+// genericTypeParams reports the parameters of an open generic declaration.
+func (p *program) genericTypeParams(name string) ([]string, bool) {
+	if class := p.genericClasses[name]; class != nil {
+		return class.typeParams, true
+	}
+	if iface := p.genericInterfaces[name]; iface != nil {
+		return iface.typeParams, true
+	}
+	return nil, false
 }
 
 func (p *program) addTypeArityDiagnostic(pos position, name string, expected, actual int) {

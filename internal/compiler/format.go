@@ -37,13 +37,7 @@ type formatSource struct {
 
 func parseFormatSource(source Source) (*formatSource, []Diagnostic) {
 	tokens, diagnostics := scanTokens(source, true)
-	prog := &program{
-		classes:    make(map[string]*classDecl),
-		interfaces: make(map[string]*interfaceDecl),
-		unions:     make(map[string]*unionDecl),
-		functions:  make(map[string]*functionDecl),
-		constants:  make(map[string]*constDecl),
-	}
+	prog := newProgram()
 	parsed := &formatSource{source: source, prog: prog, tokens: tokens}
 	if len(diagnostics) > 0 {
 		return parsed, diagnostics
@@ -127,7 +121,15 @@ func mergeFormatTokens(tokens []token) []formatToken {
 		if index+1 < len(tokens) {
 			pair := text + tokens[index+1].text
 			switch pair {
-			case "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "..":
+			// A > that closes a type argument list stands alone: in
+			// "Broken<string> => ..." the arrow owns the = and the >, so
+			// merging >= first would split the arrow apart.
+			case ">=":
+				if index+2 >= len(tokens) || tokens[index+2].text != ">" {
+					text = pair
+					index++
+				}
+			case "->", "=>", "==", "!=", "<=", "&&", "||", "..":
 				text = pair
 				index++
 			}
@@ -182,9 +184,11 @@ func nextFormatCodeToken(tokens []formatToken, index int) int {
 }
 
 func (f *sourceFormatter) collectBreaks() {
-	for _, class := range f.source.prog.classes {
-		for _, field := range class.fields {
-			f.addBreak(field.pos)
+	for _, classes := range []map[string]*classDecl{f.source.prog.classes, f.source.prog.genericClasses} {
+		for _, class := range classes {
+			for _, field := range class.fields {
+				f.addBreak(field.pos)
+			}
 		}
 	}
 	for _, union := range f.source.prog.unions {
@@ -195,11 +199,15 @@ func (f *sourceFormatter) collectBreaks() {
 	for _, constant := range f.source.prog.constants {
 		f.collectExpression(constant.ast)
 	}
-	for _, function := range f.source.prog.functions {
-		f.collectBlock(function.ast)
+	for _, functions := range []map[string]*functionDecl{f.source.prog.functions, f.source.prog.genericFunctions} {
+		for _, function := range functions {
+			f.collectBlock(function.ast)
+		}
 	}
-	for _, function := range f.source.prog.methodImpls {
-		f.collectBlock(function.ast)
+	for _, implementations := range [][]*functionDecl{f.source.prog.methodImpls, f.source.prog.genericMethodImpls} {
+		for _, implementation := range implementations {
+			f.collectBlock(implementation.ast)
+		}
 	}
 }
 
