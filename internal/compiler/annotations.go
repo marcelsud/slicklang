@@ -21,10 +21,12 @@ const (
 // compiler-owned terminal reached after alias expansion so describe consumers
 // do not have to reproduce name resolution or substitution.
 type annotationUse struct {
-	name     string
-	args     []expressionNode
-	resolved []resolvedAnnotation
-	pos      position
+	name      string
+	args      []expressionNode
+	resolved  []resolvedAnnotation
+	namespace string
+	aliases   map[string]aliasDecl
+	pos       position
 }
 
 // annotationDecl is either a source alias or a compiler-owned terminal.
@@ -130,7 +132,7 @@ func (p *parser) parseAnnotationUse() *annotationUse {
 		return nil
 	}
 	p.index = next
-	application := &annotationUse{name: ref.name, pos: at.pos}
+	application := &annotationUse{name: ref.name, namespace: p.source.Namespace, aliases: p.aliases, pos: at.pos}
 	if !p.accept("(") {
 		return application
 	}
@@ -235,7 +237,11 @@ func (p *program) checkAnnotations() {
 func (p *program) checkAnnotationTarget(target annotationTargetRef, pending *[]pendingTerminalApplication) {
 	seen := make(map[string]position)
 	for _, authored := range target.annotations {
-		resolved, ok := p.expandAnnotation(target, authored, target.namespace, target.aliases, nil, nil)
+		namespace, aliases := authored.namespace, authored.aliases
+		if namespace == "" {
+			namespace, aliases = target.namespace, target.aliases
+		}
+		resolved, ok := p.expandAnnotation(target, authored, namespace, aliases, nil, nil)
 		if !ok {
 			continue
 		}
@@ -356,6 +362,14 @@ func (p *program) validateAnnotationAlias(decl *annotationDecl, states map[strin
 	if !p.validateAnnotationAlias(target, states, append(chain, decl.qualified)) {
 		valid = false
 	}
+	if valid {
+		resolved, ok := p.expandAnnotation(annotationTargetRef{}, decl.target, decl.namespace, decl.aliases, substitutions, nil)
+		if ok {
+			decl.target.resolved = []resolvedAnnotation{resolved}
+		} else {
+			valid = false
+		}
+	}
 	decl.invalid = !valid
 	states[decl.qualified] = 2
 	return valid
@@ -462,6 +476,9 @@ func (p *program) annotationArgument(namespace string, aliases map[string]aliasD
 			return value, true
 		}
 		if constant := p.constantFor(namespace, aliases, node.name); constant != nil {
+			if !p.requireAccess(node.pos, namespace, constant.namespace, constant.name, "constant") {
+				return annotationValue{}, false
+			}
 			value, ok := p.evaluateConstant(constant)
 			if !ok {
 				p.add(node.pos, diagnosticCodeAnnotationArgument, "constant %s has no valid compile-time value", node.name)
@@ -470,8 +487,8 @@ func (p *program) annotationArgument(namespace string, aliases map[string]aliasD
 			return annotationValue{typ: constant.resolved, display: annotationConstantDisplay(value), value: value}, true
 		}
 		if union, variant, named := p.resolveVariant(namespace, aliases, node.name); named {
+			variant = p.requireVariant(node.pos, namespace, node.name, union, variant)
 			if variant == nil {
-				p.add(node.pos, diagnosticCodeAnnotationArgument, "%s is not a visible fieldless union variant", node.name)
 				return annotationValue{}, false
 			}
 			if len(variant.fields) != 0 {
@@ -558,9 +575,13 @@ func (p *program) annotationTargets() []annotationTargetRef {
 				method := class.methods[methodName]
 				function := class.implementations[method.name]
 				if function == nil {
-					function = p.genericMethodImplementation(class.qualified, method.name)
+					function = p.methodImplementation(class.qualified, method.name)
 				}
-				targets = append(targets, annotationTargetRef{kind: annotationTargetMethod, name: class.qualified + "." + method.name, pos: method.pos, namespace: method.namespace, aliases: method.aliases, annotations: method.annotations, instance: instance, class: class, method: method, function: function})
+				annotations := method.annotations
+				if function != nil && !function.inline && len(function.annotations) > 0 {
+					annotations = append(append([]*annotationUse(nil), annotations...), function.annotations...)
+				}
+				targets = append(targets, annotationTargetRef{kind: annotationTargetMethod, name: class.qualified + "." + method.name, pos: method.pos, namespace: method.namespace, aliases: method.aliases, annotations: annotations, instance: instance, class: class, method: method, function: function})
 				targets = append(targets, parameterAnnotationTargets(class.qualified+"."+method.name, method.namespace, method.aliases, method.params, instance)...)
 			}
 		}
@@ -590,7 +611,7 @@ func (p *program) annotationTargets() []annotationTargetRef {
 	}
 	for _, implementations := range [][]*functionDecl{p.genericMethodImpls, p.methodImpls} {
 		for _, function := range implementations {
-			if function.inline || len(function.annotations) == 0 {
+			if function.inline || len(function.annotations) == 0 || p.methodDeclaration(function) != nil {
 				continue
 			}
 			instance := function.instanceOf != ""
@@ -601,15 +622,40 @@ func (p *program) annotationTargets() []annotationTargetRef {
 	return targets
 }
 
-func (p *program) genericMethodImplementation(owner, method string) *functionDecl {
-	for _, implementation := range p.genericMethodImpls {
-		receiver := implementation.receiverCanonical
-		if receiver == "" {
-			receiver = p.resolveNameIn(implementation.namespace, implementation.aliases, implementation.receiver.name)
+func (p *program) methodImplementation(owner, method string) *functionDecl {
+	for _, implementations := range [][]*functionDecl{p.genericMethodImpls, p.methodImpls} {
+		for _, implementation := range implementations {
+			receiver := implementation.receiverCanonical
+			if receiver == "" {
+				if _, alias := implementation.aliases[implementation.receiver.name]; alias {
+					continue
+				}
+				receiver = implementation.receiver.name
+				if !isAbsoluteCanonicalName(receiver) {
+					receiver = qualify(implementation.namespace, receiver)
+				}
+			}
+			if receiver == owner && implementation.name == method {
+				return implementation
+			}
 		}
-		if receiver == owner && implementation.name == method {
-			return implementation
+	}
+	return nil
+}
+
+func (p *program) methodDeclaration(implementation *functionDecl) *methodSignature {
+	receiver := implementation.receiverCanonical
+	if receiver == "" {
+		if _, alias := implementation.aliases[implementation.receiver.name]; alias {
+			return nil
 		}
+		receiver = implementation.receiver.name
+		if !isAbsoluteCanonicalName(receiver) {
+			receiver = qualify(implementation.namespace, receiver)
+		}
+	}
+	if class := p.classDeclaration(receiver); class != nil {
+		return class.methods[implementation.name]
 	}
 	return nil
 }

@@ -1,6 +1,9 @@
 package compiler
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // User-defined generics are monomorphized. Every concrete instantiation a
 // program mentions becomes an ordinary declaration keyed by its canonical name,
@@ -278,6 +281,14 @@ func (p *program) collectFromBody(function *functionDecl, found *[]instantiation
 			for _, arm := range value.arms {
 				p.collectFromType(arm.errorType.pos, function.namespace, function.aliases, arm.errorType.name, found)
 			}
+		case *lambdaExpression:
+			for _, param := range value.params {
+				p.collectFromType(param.typ.pos, function.namespace, function.aliases, param.typ.name, found)
+			}
+			p.collectFromType(value.result.pos, function.namespace, function.aliases, value.result.name, found)
+			for _, thrown := range value.throws {
+				p.collectFromType(thrown.pos, function.namespace, function.aliases, thrown.name, found)
+			}
 		}
 	})
 }
@@ -315,6 +326,14 @@ func (p *program) collectFromCanonicalType(pos position, canonical string, found
 	case typeKindTuple:
 		for _, element := range parsed.args {
 			p.collectFromCanonicalType(pos, element, found)
+		}
+	case typeKindCallable:
+		for _, param := range parsed.args {
+			p.collectFromCanonicalType(pos, param, found)
+		}
+		p.collectFromCanonicalType(pos, parsed.base, found)
+		for _, thrown := range parsed.throws {
+			p.collectFromCanonicalType(pos, thrown, found)
 		}
 	case typeKindGeneric:
 		for _, arg := range parsed.args {
@@ -423,8 +442,6 @@ func (p *program) instantiateFunction(request instantiation) []instantiation {
 }
 
 // substitutedFunction clones one generic callable at concrete type arguments.
-// The body is parsed again so the clone owns the resolved types the checker
-// writes into it, which differ at every instantiation.
 func (p *program) substitutedFunction(generic *functionDecl, substitutions map[string]string, qualified string, found *[]instantiation) *functionDecl {
 	clone := &functionDecl{
 		name:          generic.name,
@@ -440,16 +457,203 @@ func (p *program) substitutedFunction(generic *functionDecl, substitutions map[s
 		pos:           generic.pos,
 		annotations:   generic.annotations,
 	}
-	clone.ast = p.parseBody(generic.body, generic.pos)
+	clone.ast = cloneBlock(generic.ast)
 	substituteASTTypes(clone.ast, substitutions)
 	p.collectFromCanonicalType(generic.result.pos, clone.result.name, found)
 	p.collectFromBody(clone, found)
 	return clone
 }
 
-// substituteASTTypes rewrites the types a body spells out. A body names a type
-// only as a construction, a type argument, or a caught error, so those three
-// are the whole of what an instantiation has to substitute.
+func cloneBlock(block *blockNode) *blockNode {
+	if block == nil {
+		return nil
+	}
+	clone := *block
+	clone.statements = make([]statementNode, len(block.statements))
+	for index, statement := range block.statements {
+		clone.statements[index] = cloneStatement(statement)
+	}
+	return &clone
+}
+
+func cloneStatement(statement statementNode) statementNode {
+	switch node := statement.(type) {
+	case *letStatement:
+		clone := *node
+		clone.names = append([]string(nil), node.names...)
+		clone.value = cloneExpression(node.value)
+		return &clone
+	case *asyncLetStatement:
+		clone := *node
+		clone.call = cloneExpression(node.call).(*callExpression)
+		return &clone
+	case *assignmentStatement:
+		clone := *node
+		clone.value = cloneExpression(node.value)
+		return &clone
+	case *forStatement:
+		clone := *node
+		clone.bindings = append([]string(nil), node.bindings...)
+		clone.iterable = cloneExpression(node.iterable)
+		clone.body = cloneBlock(node.body)
+		return &clone
+	case *breakStatement:
+		clone := *node
+		return &clone
+	case *continueStatement:
+		clone := *node
+		return &clone
+	case *throwStatement:
+		clone := *node
+		clone.value = cloneExpression(node.value)
+		return &clone
+	case *returnStatement:
+		clone := *node
+		clone.value = cloneExpression(node.value)
+		return &clone
+	case *expressionStatement:
+		clone := *node
+		clone.value = cloneExpression(node.value)
+		return &clone
+	default:
+		panic(fmt.Sprintf("cannot clone statement %T", statement))
+	}
+}
+
+func cloneExpression(expression expressionNode) expressionNode {
+	if expression == nil {
+		return nil
+	}
+	switch node := expression.(type) {
+	case *invalidExpression:
+		clone := *node
+		return &clone
+	case *literalExpression:
+		clone := *node
+		return &clone
+	case *tupleExpression:
+		clone := *node
+		clone.elements = cloneExpressions(node.elements)
+		return &clone
+	case *arrayExpression:
+		clone := *node
+		clone.elements = cloneExpressions(node.elements)
+		return &clone
+	case *mapExpression:
+		clone := *node
+		clone.entries = make([]mapEntryExpression, len(node.entries))
+		for index, entry := range node.entries {
+			clone.entries[index] = entry
+			clone.entries[index].key = cloneExpression(entry.key)
+			clone.entries[index].value = cloneExpression(entry.value)
+		}
+		return &clone
+	case *rangeExpression:
+		clone := *node
+		clone.start = cloneExpression(node.start)
+		clone.end = cloneExpression(node.end)
+		return &clone
+	case *templateExpression:
+		clone := *node
+		return &clone
+	case *nameExpression:
+		clone := *node
+		return &clone
+	case *lambdaExpression:
+		clone := *node
+		clone.params = append([]paramDecl(nil), node.params...)
+		clone.throws = append([]typeRef(nil), node.throws...)
+		clone.body = cloneBlock(node.body)
+		clone.fn = nil
+		clone.captures = nil
+		clone.resolved = ""
+		return &clone
+	case *objectExpression:
+		clone := *node
+		clone.fields = make([]objectFieldExpression, len(node.fields))
+		for index, field := range node.fields {
+			clone.fields[index] = field
+			clone.fields[index].value = cloneExpression(field.value)
+		}
+		return &clone
+	case *callExpression:
+		clone := *node
+		clone.callee = cloneExpression(node.callee)
+		clone.typeArgs = append([]typeRef(nil), node.typeArgs...)
+		clone.args = cloneExpressions(node.args)
+		clone.resolvedCallee = ""
+		clone.resolvedTypeArgs = nil
+		clone.resolvedParams = nil
+		clone.resolvedArgumentTypes = nil
+		clone.resolvedResult = ""
+		clone.resolvedReceiver = ""
+		clone.resolvedThrows = nil
+		clone.resolvedNative = ""
+		clone.resolvedCallable = false
+		return &clone
+	case *awaitExpression:
+		clone := *node
+		return &clone
+	case *unaryExpression:
+		clone := *node
+		clone.value = cloneExpression(node.value)
+		return &clone
+	case *binaryExpression:
+		clone := *node
+		clone.left = cloneExpression(node.left)
+		clone.right = cloneExpression(node.right)
+		return &clone
+	case *ifExpression:
+		clone := *node
+		clone.condition = cloneExpression(node.condition)
+		clone.thenBlock = cloneBlock(node.thenBlock)
+		clone.elseBlock = cloneBlock(node.elseBlock)
+		return &clone
+	case *catchExpression:
+		clone := *node
+		clone.value = cloneExpression(node.value)
+		clone.arms = make([]catchArm, len(node.arms))
+		for index, arm := range node.arms {
+			clone.arms[index] = arm
+			clone.arms[index].value = cloneExpression(arm.value)
+		}
+		return &clone
+	case *resultExpression:
+		clone := *node
+		clone.value = cloneExpression(node.value)
+		return &clone
+	case *propagateExpression:
+		clone := *node
+		clone.value = cloneExpression(node.value)
+		return &clone
+	case *usingExpression:
+		clone := *node
+		clone.initializer = cloneExpression(node.initializer)
+		clone.body = cloneBlock(node.body)
+		return &clone
+	case *matchExpression:
+		clone := *node
+		clone.value = cloneExpression(node.value)
+		clone.arms = make([]matchArm, len(node.arms))
+		for index, arm := range node.arms {
+			clone.arms[index] = arm
+			clone.arms[index].bindings = append([]string(nil), arm.bindings...)
+			clone.arms[index].value = cloneExpression(arm.value)
+		}
+		return &clone
+	default:
+		panic(fmt.Sprintf("cannot clone expression %T", expression))
+	}
+}
+
+func cloneExpressions(expressions []expressionNode) []expressionNode {
+	clones := make([]expressionNode, len(expressions))
+	for index, expression := range expressions {
+		clones[index] = cloneExpression(expression)
+	}
+	return clones
+}
+
 func substituteASTTypes(block *blockNode, substitutions map[string]string) {
 	walkAST(block, func(node any) {
 		switch value := node.(type) {
@@ -462,6 +666,14 @@ func substituteASTTypes(block *blockNode, substitutions map[string]string) {
 		case *catchExpression:
 			for index := range value.arms {
 				value.arms[index].errorType.name = substituteTypeParams(value.arms[index].errorType.name, substitutions)
+			}
+		case *lambdaExpression:
+			for index := range value.params {
+				value.params[index].typ.name = substituteTypeParams(value.params[index].typ.name, substitutions)
+			}
+			value.result.name = substituteTypeParams(value.result.name, substitutions)
+			for index := range value.throws {
+				value.throws[index].name = substituteTypeParams(value.throws[index].name, substitutions)
 			}
 		}
 	})
@@ -612,6 +824,9 @@ func walkAST(node any, visit func(any)) {
 		for _, arm := range value.arms {
 			walkAST(arm.value, visit)
 		}
+	case *lambdaExpression:
+		visit(value)
+		walkAST(value.body, visit)
 	default:
 		visit(node)
 	}

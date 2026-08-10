@@ -955,12 +955,12 @@ func (p *bodyParser) parseLambdaThrows() []typeRef {
 	}
 	var throws []typeRef
 	for {
-		ref, next, ok := readQualified(p.tokens, p.index)
-		if !ok {
-			p.error(p.current().pos, "expected error type after 'throws'")
+		thrown, next, message, errorPos := parseThrownTypeTokens(p.tokens, p.index)
+		if message != "" {
+			p.error(errorPos, "%s", message)
 			return throws
 		}
-		throws = append(throws, typeRef{name: ref.name, pos: ref.pos})
+		throws = append(throws, thrown)
 		p.index = next
 		if !p.accept("|") {
 			return throws

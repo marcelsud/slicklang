@@ -14,7 +14,11 @@ func (p *program) functionCallableType(function *functionDecl) string {
 		params[index] = p.resolveType(function.namespace, function.aliases, param.typ)
 	}
 	result := p.resolveType(function.namespace, function.aliases, function.result)
-	return callableType(params, result, sortedSet(function.throwSet))
+	throws := make(map[string]struct{}, len(function.throws))
+	for _, thrown := range function.throws {
+		throws[p.canonicalTypeName(function.namespace, function.aliases, thrown.name)] = struct{}{}
+	}
+	return callableType(params, result, sortedSet(throws))
 }
 
 // checkFunctionValue types a named function used without call parentheses. It
@@ -103,6 +107,9 @@ func (p *program) checkLambdaExpression(node *lambdaExpression, scope *astScope)
 func (p *program) bindLambdaCaptures(node *lambdaExpression, scope, lambdaScope *astScope) []string {
 	referenced := make(map[string]struct{})
 	collectReferencedNames(node.body, referenced)
+	for _, param := range node.params {
+		delete(referenced, param.name)
+	}
 	captures := make([]string, 0, len(referenced))
 	for _, name := range sortedKeys(referenced) {
 		if _, pending := scope.pending[name]; pending {

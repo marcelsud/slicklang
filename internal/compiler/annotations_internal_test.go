@@ -146,6 +146,82 @@ function main() -> string throws std.io.Failure {
 	}
 }
 
+func TestAnnotationHookRunsBeforeGenericInstantiation(t *testing.T) {
+	applied := 0
+	terminals := append(testAnnotationTerminals(), terminalAnnotationDecl{
+		canonical: "std.test.MakeBox",
+		targets:   []annotationTarget{annotationTargetMethod},
+		apply: func(_ *program, target annotationTargetRef, _ resolvedAnnotation) {
+			applied++
+			result := typeRef{name: "Box<int>", pos: target.pos}
+			target.method.result = result
+			target.function.result = result
+		},
+	})
+	program, diagnostics := compileWithTerminals([]Source{{Name: "main.slk", Namespace: "root", Text: `
+class Box<T> {
+    Value: T
+}
+
+class Factory<T> {
+    @std.test.MakeBox
+    function Make() -> null {
+        Box<int> { Value: 42 }
+    }
+}
+
+function main() -> int {
+    let Factory = Factory<string> {}
+    let Box = Factory.Make()
+    Box.Value
+}
+`}}, terminals)
+	if len(diagnostics) > 0 {
+		t.Fatalf("compile annotations: %+v", diagnostics)
+	}
+	if applied != 1 {
+		t.Fatalf("terminal applied %d times, want 1", applied)
+	}
+	value, err := program.runMain(nil)
+	if err != nil || formatRuntimeValue(value) != "42" {
+		t.Fatalf("interpreter value=%v err=%v", value, err)
+	}
+	if output := runGeneratedAnnotationProgram(t, program); output != "42\n" {
+		t.Fatalf("native output %q, want 42\\n", output)
+	}
+}
+
+func TestDetachedMethodAnnotationsShareOneTarget(t *testing.T) {
+	applied := 0
+	terminals := append(testAnnotationTerminals(), terminalAnnotationDecl{
+		canonical: "std.test.Once",
+		targets:   []annotationTarget{annotationTargetMethod},
+		apply: func(_ *program, _ annotationTargetRef, _ resolvedAnnotation) {
+			applied++
+		},
+	})
+	_, diagnostics := compileWithTerminals([]Source{{Name: "main.slk", Namespace: "root", Text: `
+class Service {
+    @std.test.Once
+    function Run() -> int
+}
+
+@std.test.Once
+function Service.Run() -> int {
+    1
+}
+
+function main() -> int {
+    let App = Service {}
+    App.Run()
+}
+`}}, terminals)
+	requireAnnotationDiagnostic(t, diagnostics, "SLK416", "cannot repeat")
+	if applied != 1 {
+		t.Fatalf("terminal applied %d times, want 1", applied)
+	}
+}
+
 func TestAnnotationApplicationsResolveAcrossTargetsAndAliases(t *testing.T) {
 	program := compileAnnotationProgram(t, Source{Name: "main.slk", Namespace: "root", Text: `
 use std.test.Marker
@@ -153,9 +229,12 @@ use std.test.Marker
 annotation Label(Name: string) =
     @std.test.Tag(Name)
 
+annotation Nested(Name: string) =
+    @Label(Name)
+
 /// Service documentation survives its annotation prefix.
 @Marker
-@Label("one")
+@Nested("one")
 @std.test.Tag("two")
 class Service {
     /// Run documentation survives its annotation prefix.
@@ -192,8 +271,12 @@ function main() -> int {
 		t.Fatalf("parameter annotations: %+v", params)
 	}
 	alias, ok := program.describeSymbol("root.Label")
-	if !ok || alias.Kind != "annotation" || len(alias.Parameters) != 1 || alias.Annotations[0].ResolvedName != "std.test.Tag" {
+	if !ok || alias.Kind != "annotation" || len(alias.Parameters) != 1 || alias.Annotations[0].ResolvedName != "std.test.Tag" || alias.Annotations[0].ResolvedArguments[0] != "Name" {
 		t.Fatalf("annotation alias description: %+v, found=%t", alias, ok)
+	}
+	nested, ok := program.describeSymbol("root.Nested")
+	if !ok || nested.Annotations[0].ResolvedName != "std.test.Tag" || nested.Annotations[0].ResolvedArguments[0] != "Name" {
+		t.Fatalf("nested annotation alias description: %+v, found=%t", nested, ok)
 	}
 }
 
@@ -278,6 +361,41 @@ function main() -> null {
     null
 }
 `})
+}
+
+func TestAnnotationCompileTimeValuesFollowVisibility(t *testing.T) {
+	meta := Source{Name: "meta.slk", Namespace: "root.meta", Text: `
+const hidden: string = "private"
+
+union Method {
+    hidden
+}
+`}
+	t.Run("constant", func(t *testing.T) {
+		diagnostics := checkAnnotationProgram(meta, Source{Name: "main.slk", Namespace: "root", Text: `
+@std.test.Tag(root.meta.hidden)
+class Service {}
+
+function main() -> null { null }
+`})
+		requireAnnotationDiagnostic(t, diagnostics, "SLK330", "constant hidden is private")
+	})
+	t.Run("variant", func(t *testing.T) {
+		terminals := append(testAnnotationTerminals(), terminalAnnotationDecl{
+			canonical: "std.test.MetaChoice",
+			params:    []string{"root.meta.Method"},
+			targets:   []annotationTarget{annotationTargetClass},
+		})
+		_, diagnostics := compileWithTerminals([]Source{meta, {
+			Name: "main.slk", Namespace: "root", Text: `
+@std.test.MetaChoice(root.meta.Method.hidden)
+class Service {}
+
+function main() -> null { null }
+`,
+		}}, terminals)
+		requireAnnotationDiagnostic(t, diagnostics, "SLK330", "variant hidden is private")
+	})
 }
 
 func TestAnnotationDiagnostics(t *testing.T) {

@@ -560,31 +560,8 @@ func (p *program) describeAnnotation(annotation *annotationDecl) SymbolDescripti
 	description.Source = describeSource(annotation.pos)
 	if annotation.target != nil {
 		description.Annotations = p.describeAnnotations([]*annotationUse{annotation.target})
-		if terminal := p.annotationTerminalName(annotation, nil); terminal != "" && len(description.Annotations) > 0 {
-			description.Annotations[0].ResolvedName = terminal
-		}
 	}
 	return description
-}
-
-func (p *program) annotationTerminalName(annotation *annotationDecl, seen map[string]struct{}) string {
-	if annotation == nil {
-		return ""
-	}
-	if annotation.terminal != nil {
-		return annotation.terminal.canonical
-	}
-	if seen == nil {
-		seen = make(map[string]struct{})
-	}
-	if _, duplicate := seen[annotation.qualified]; duplicate {
-		return ""
-	}
-	seen[annotation.qualified] = struct{}{}
-	if annotation.target == nil {
-		return ""
-	}
-	return p.annotationTerminalName(p.annotationFor(annotation.namespace, annotation.aliases, annotation.target.name), seen)
 }
 
 func (p *program) describeAnnotations(annotations []*annotationUse) []AnnotationDescription {

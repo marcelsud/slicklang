@@ -746,6 +746,74 @@ function main() -> int {
 	}
 }
 
+func TestGenericTypesInsideLambdasAreInstantiated(t *testing.T) {
+	output := runResultEverywhere(t, `
+class Box<T> {
+    Value: T
+}
+
+function Read<T>(Input: Box<T>) -> T {
+    let Unbox = (Value: Box<T>) -> T {
+        Value.Value
+    }
+    Unbox(Input)
+}
+
+function main() -> int {
+    Read<int>(Box<int> { Value: 42 })
+}
+`)
+	if output != "42" {
+		t.Fatalf("program produced %q, want 42", output)
+	}
+}
+
+func TestLambdaParameterShadowsUsingBinding(t *testing.T) {
+	output := runResultEverywhere(t, `
+class Handle {
+    function Close() -> null {
+        null
+    }
+}
+
+function main() -> int {
+    using Resource = Handle {} {
+        let Identity = (Resource: int) -> int {
+            Resource
+        }
+        Identity(42)
+    }
+}
+`)
+	if output != "42" {
+		t.Fatalf("program produced %q, want 42", output)
+	}
+}
+
+func TestCallableAndLambdaThrowsAcceptGenericErrors(t *testing.T) {
+	output := runResultEverywhere(t, `
+class Empty<T> implements Error {
+    Message: string
+}
+
+function Apply(Operation: () -> int throws Empty<int>) -> int throws Empty<int> {
+    Operation()
+}
+
+function main() -> int {
+    let Operation = () -> int throws Empty<int> {
+        42
+    }
+    Apply(Operation) catch {
+        Empty<int> => 0
+    }
+}
+`)
+	if output != "42" {
+		t.Fatalf("program produced %q, want 42", output)
+	}
+}
+
 // TestCallableDiagnostics states the rules as the errors a program gets when it
 // breaks them. Diagnostics are the observable behaviour here.
 func TestCallableDiagnostics(t *testing.T) {

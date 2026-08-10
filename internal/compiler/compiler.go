@@ -1092,11 +1092,11 @@ func parseCallableTypeTail(tokens []token, params []string, index int, allowThro
 	if allowThrows && next < len(tokens) && tokens[next].text == "throws" {
 		next++
 		for {
-			ref, after, ok := readQualified(tokens, next)
-			if !ok {
-				return "", next, "expected error type after 'throws'", typeTokenPos(tokens, next)
+			thrown, after, message, errorPos := parseThrownTypeTokens(tokens, next)
+			if message != "" {
+				return "", next, message, errorPos
 			}
-			throws = append(throws, ref.name)
+			throws = append(throws, thrown.name)
 			next = after
 			if next >= len(tokens) || tokens[next].text != "|" {
 				break
@@ -1158,41 +1158,28 @@ func (p *parser) parseThrows() []typeRef {
 	}
 	var throws []typeRef
 	for {
-		ref, next, ok := readQualified(p.tokens, p.index)
-		if !ok {
-			p.error(p.current().pos, "expected error type after 'throws'")
+		thrown, next, message, errorPos := parseThrownTypeTokens(p.tokens, p.index)
+		if message != "" {
+			p.error(errorPos, "%s", message)
 			return throws
 		}
 		p.index = next
-		name, ok := p.readTypeArgumentSuffix(ref.name)
-		if !ok {
-			return throws
-		}
-		throws = append(throws, typeRef{name: name, pos: ref.pos})
+		throws = append(throws, thrown)
 		if !p.accept("|") {
 			return throws
 		}
 	}
 }
 
-// readTypeArgumentSuffix appends a <...> type argument list to base when one
-// follows, so a checked effect or caught type may name a generic instantiation.
-func (p *parser) readTypeArgumentSuffix(base string) (string, bool) {
-	if p.current().text != "<" {
-		return base, true
+func parseThrownTypeTokens(tokens []token, index int) (typeRef, int, string, position) {
+	if index >= len(tokens) || tokens[index].kind != scanner.Ident {
+		return typeRef{}, index, "expected error type after 'throws'", typeTokenPos(tokens, index)
 	}
-	close := matching(p.tokens, p.index, "<", ">")
-	if close < 0 {
-		p.error(p.current().pos, "unterminated generic type")
-		return base, false
+	name, next, message, errorPos := parseTypePrimary(tokens, index, false)
+	if message != "" {
+		return typeRef{}, next, message, errorPos
 	}
-	var text strings.Builder
-	text.WriteString(base)
-	for _, tok := range p.tokens[p.index : close+1] {
-		text.WriteString(tok.text)
-	}
-	p.index = close + 1
-	return text.String(), true
+	return typeRef{name: name, pos: tokens[index].pos}, next, "", position{}
 }
 
 func (p *parser) skipBlock() {
@@ -1308,13 +1295,13 @@ func (p *program) check() {
 	p.parseBodies()
 	p.checkAliases()
 	p.checkConstants()
+	p.checkAnnotations()
 	p.checkGenericDeclarations()
 	p.instantiateGenerics()
 	p.checkDeclaredTypes()
 	p.checkVisibility()
 	p.resolveThrowSets()
 	p.linkMethods()
-	p.checkAnnotations()
 	for _, name := range sortedKeys(p.functions) {
 		function := p.functions[name]
 		p.checkingInstance(function.instanceOf != "", func() { p.checkFunction(function) })
