@@ -58,7 +58,7 @@ A Slick type is its canonical spelling; `types.go` owns the decomposition and `p
 - Arrays expose `.Get(index)` (returns an optional) and `.Length()`; there is no index syntax.
 - `?` requires the enclosing function to return `Result`, including inside a `using` initializer.
 - Union variants are always qualified by their union or its exact alias, in construction and in patterns; payload bindings are positional, and payload fields are readable only through a match arm.
-- `text/scanner` skips newlines, so a declaration whose tail is an expression has no terminator token. `const` bounds its initializer by line: the value must sit on the `const` line, and a formatter or parser change there must keep that rule. For the same reason a call's `(` must begin on its callee's line, or the next statement would be swallowed as an argument list.
+- `text/scanner` skips newlines, so a declaration whose tail is an expression has no terminator token. `const` bounds its initializer by line: the value must sit on the `const` line, and a formatter or parser change there must keep that rule. `parsePostfix` refuses to read a lambda's `(` as an argument list for the same reason.
 - A lambda is an expression: `let Name = (A: int) -> int { ... }`. Every parameter and result type is explicit, captures are by value and read-only, and a callable is neither comparable nor a Map key.
 - Example projects are pinned by observable output in `exampleOutputs` (`internal/compiler/build_test.go`) and must be a `slick fmt` fixed point.
 

@@ -740,11 +740,11 @@ func (p *bodyParser) parsePostfix() expressionNode {
 			}
 			continue
 		}
-		// A call's parentheses sit on the callee's own line. The scanner drops
-		// newlines, so without this a statement that ends in an expression would
-		// swallow a following statement that starts with '(' — which is exactly
-		// how a lambda begins.
-		if p.current().text == "(" && p.startsOnPreviousLine() {
+		// A '(' that opens a lambda starts a new expression rather than an
+		// argument list. The scanner drops newlines, so without this a statement
+		// whose tail is an expression would swallow a following lambda; every
+		// other '(' keeps its existing meaning.
+		if p.current().text == "(" && !p.lambdaAhead() {
 			p.index++
 			args := p.parseArguments()
 			expression = &callExpression{callee: expression, args: args, pos: expression.expressionPos()}
@@ -887,12 +887,6 @@ func (p *bodyParser) parsePrimary() expressionNode {
 	default:
 		return nil
 	}
-}
-
-// startsOnPreviousLine reports whether the current token continues the line the
-// previous token ended on.
-func (p *bodyParser) startsOnPreviousLine() bool {
-	return p.index > 0 && p.tokens[p.index-1].pos.line == p.current().pos.line
 }
 
 func (p *bodyParser) lambdaAhead() bool {

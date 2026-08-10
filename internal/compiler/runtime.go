@@ -1602,13 +1602,16 @@ func formatRuntimeValue(value runtimeValue) string {
 			}
 			return "map {" + strings.Join(items, ", ") + "}"
 		}
-		if strings.HasSuffix(value.typ, "[]") || strings.HasPrefix(value.typ, "(") {
+		// The shape decides the brackets, not the first character: an array of
+		// callables spells its element in parentheses and would otherwise read
+		// as a tuple.
+		if kind := parseTypeName(value.typ).kind; kind == typeKindArray || kind == typeKindTuple {
 			items := make([]string, 0, len(value.elements))
 			for _, element := range value.elements {
 				items = append(items, formatRuntimeValue(element))
 			}
 			open, close := "[", "]"
-			if strings.HasPrefix(value.typ, "(") {
+			if kind == typeKindTuple {
 				open, close = "(", ")"
 			}
 			return open + strings.Join(items, ", ") + close

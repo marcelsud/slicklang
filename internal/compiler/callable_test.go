@@ -588,6 +588,90 @@ function main() -> string {
 `,
 			want: "<callable>",
 		},
+		{
+			name: "a collection of callables prints the same marker",
+			source: `
+function main() -> ((int) -> int)[] {
+    [
+        (Value: int) -> int {
+            Value
+        },
+        (Value: int) -> int {
+            Value
+        },
+    ]
+}
+`,
+			want: "[<callable>, <callable>]",
+		},
+		{
+			name: "a class holding a callable prints its own name",
+			source: `
+class Record {
+    Transform: (int) -> int
+}
+
+function main() -> Record {
+    Record {
+        Transform: (Value: int) -> int {
+            Value
+        },
+    }
+}
+`,
+			want: "root.Record",
+		},
+		{
+			name: "classes holding callables compare unequal in both backends",
+			source: `
+class Record {
+    Transform: (int) -> int
+}
+
+function main() -> bool {
+    let Operation = (Value: int) -> int {
+        Value
+    }
+    let Left = Record { Transform: Operation }
+    let Right = Record { Transform: Operation }
+    Left == Right
+}
+`,
+			want: "false",
+		},
+		{
+			name: "a call keeps its argument list across a line break",
+			source: `
+function Apply(Operation: (int, int) -> int, A: int, B: int) -> int {
+    Operation(A, B)
+}
+
+function main() -> int {
+    let SumIt = (A: int, B: int) -> int {
+        A + B
+    }
+    Apply
+        (SumIt, 20, 22)
+}
+`,
+			want: "42",
+		},
+		{
+			name: "a lambda statement is not swallowed as an argument list",
+			source: `
+function Make() -> ((int) -> int) {
+    let Offset = 2
+    (Value: int) -> int {
+        Value + Offset
+    }
+}
+
+function main() -> int {
+    Make()(40)
+}
+`,
+			want: "42",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := runResultEverywhere(t, test.source); got != test.want {

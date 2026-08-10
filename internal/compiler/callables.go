@@ -316,7 +316,9 @@ func (p *program) checkCallableInvocation(node *callExpression, scope *astScope,
 		node.resolvedArgumentTypes[index] = argumentInfo.typ
 		mergeEffects(info.effects, argumentInfo.effects)
 		if index < len(params) {
-			p.checkAssignable(argument.expressionPos(), argumentInfo.typ, expected, label, index+1)
+			// The position matches a named call's, so both call forms report an
+			// argument mismatch the same way.
+			p.checkAssignable(node.pos, argumentInfo.typ, expected, label, index+1)
 		}
 	}
 	if includeThrows {
