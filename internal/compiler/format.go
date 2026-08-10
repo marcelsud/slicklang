@@ -276,6 +276,8 @@ func (f *sourceFormatter) collectExpression(expression expressionNode) {
 			f.addBreak(field.pos)
 			f.collectExpression(field.value)
 		}
+	case *lambdaExpression:
+		f.collectBlock(node.body)
 	case *callExpression:
 		f.collectExpression(node.callee)
 		for _, argument := range node.args {

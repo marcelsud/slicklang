@@ -7,7 +7,9 @@ import (
 	"strings"
 )
 
-const DescriptionSchemaVersion = 4
+// DescriptionSchemaVersion is 5 because callable types added the structured
+// Callable fields; a consumer pinned to 4 has no shape for them.
+const DescriptionSchemaVersion = 5
 
 var ErrUnknownSymbol = errors.New("unknown symbol")
 
@@ -17,45 +19,76 @@ type Description struct {
 }
 
 type SymbolDescription struct {
-	CanonicalName      string                 `json:"canonical_name"`
-	Kind               string                 `json:"kind"`
-	Visibility         string                 `json:"visibility"`
-	Documentation      *string                `json:"documentation"`
-	Type               string                 `json:"type"`
-	TypeParameters     []string               `json:"type_parameters"`
-	Parameters         []ParameterDescription `json:"parameters"`
-	ReturnType         string                 `json:"return_type"`
-	Throws             []string               `json:"throws"`
-	Native             bool                   `json:"native"`
-	Fields             []FieldDescription     `json:"fields"`
-	DeclaredMethods    []MethodDescription    `json:"declared_methods"`
-	ImplementedMethods []MethodDescription    `json:"implemented_methods"`
-	Interfaces         []string               `json:"interfaces"`
-	Children           []ChildDescription     `json:"children"`
-	Source             *SourceDescription     `json:"source"`
+	CanonicalName      string                   `json:"canonical_name"`
+	Kind               string                   `json:"kind"`
+	Visibility         string                   `json:"visibility"`
+	Documentation      *string                  `json:"documentation"`
+	Type               string                   `json:"type"`
+	TypeCallable       *CallableTypeDescription `json:"type_callable"`
+	TypeParameters     []string                 `json:"type_parameters"`
+	Parameters         []ParameterDescription   `json:"parameters"`
+	ReturnType         string                   `json:"return_type"`
+	ReturnCallable     *CallableTypeDescription `json:"return_callable"`
+	Throws             []string                 `json:"throws"`
+	Native             bool                     `json:"native"`
+	Fields             []FieldDescription       `json:"fields"`
+	DeclaredMethods    []MethodDescription      `json:"declared_methods"`
+	ImplementedMethods []MethodDescription      `json:"implemented_methods"`
+	Interfaces         []string                 `json:"interfaces"`
+	Children           []ChildDescription       `json:"children"`
+	Source             *SourceDescription       `json:"source"`
+}
+
+// CallableTypeDescription is the structure of a callable type, so a consumer
+// reads its parameter types, result, and checked effects directly instead of
+// parsing the display spelling.
+type CallableTypeDescription struct {
+	ParameterTypes []string `json:"parameter_types"`
+	ReturnType     string   `json:"return_type"`
+	Throws         []string `json:"throws"`
 }
 
 type ParameterDescription struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
+	Name     string                   `json:"name"`
+	Type     string                   `json:"type"`
+	Callable *CallableTypeDescription `json:"callable"`
 }
 
 type FieldDescription struct {
-	Name          string             `json:"name"`
-	Type          string             `json:"type"`
-	Visibility    string             `json:"visibility"`
-	Documentation *string            `json:"documentation"`
-	Source        *SourceDescription `json:"source"`
+	Name          string                   `json:"name"`
+	Type          string                   `json:"type"`
+	Callable      *CallableTypeDescription `json:"callable"`
+	Visibility    string                   `json:"visibility"`
+	Documentation *string                  `json:"documentation"`
+	Source        *SourceDescription       `json:"source"`
 }
 
 type MethodDescription struct {
-	CanonicalName string                 `json:"canonical_name"`
-	Visibility    string                 `json:"visibility"`
-	Documentation *string                `json:"documentation"`
-	Parameters    []ParameterDescription `json:"parameters"`
-	ReturnType    string                 `json:"return_type"`
-	Throws        []string               `json:"throws"`
-	Source        *SourceDescription     `json:"source"`
+	CanonicalName  string                   `json:"canonical_name"`
+	Visibility     string                   `json:"visibility"`
+	Documentation  *string                  `json:"documentation"`
+	Parameters     []ParameterDescription   `json:"parameters"`
+	ReturnType     string                   `json:"return_type"`
+	ReturnCallable *CallableTypeDescription `json:"return_callable"`
+	Throws         []string                 `json:"throws"`
+	Source         *SourceDescription       `json:"source"`
+}
+
+// describeCallable reports the structure of name when it is a callable type,
+// and nothing otherwise. Nested types keep their canonical spelling.
+func describeCallable(name string) *CallableTypeDescription {
+	params, result, throws, callable := callableTypeParts(name)
+	if !callable {
+		return nil
+	}
+	description := &CallableTypeDescription{
+		ParameterTypes: make([]string, 0, len(params)),
+		ReturnType:     result,
+		Throws:         make([]string, 0, len(throws)),
+	}
+	description.ParameterTypes = append(description.ParameterTypes, params...)
+	description.Throws = append(description.Throws, throws...)
+	return description
 }
 
 type ChildDescription struct {
@@ -155,6 +188,7 @@ func (p *program) describeFunction(function *functionDecl) SymbolDescription {
 	description.TypeParameters = append(description.TypeParameters, function.typeParams...)
 	description.Parameters = p.describeParameters(function.namespace, function.aliases, function.params)
 	description.ReturnType = p.canonicalType(function.namespace, function.aliases, function.result)
+	description.ReturnCallable = describeCallable(description.ReturnType)
 	description.Throws = sortedSet(function.throwSet)
 	description.Native = function.native != ""
 	description.Source = describeSource(function.pos)
@@ -168,9 +202,11 @@ func (p *program) describeClass(class *classDecl) SymbolDescription {
 	description.Source = describeSource(class.pos)
 	for _, name := range sortedKeys(class.fields) {
 		field := class.fields[name]
+		fieldType := p.canonicalType(class.namespace, class.aliases, field.typ)
 		description.Fields = append(description.Fields, FieldDescription{
 			Name:          field.name,
-			Type:          p.canonicalType(class.namespace, class.aliases, field.typ),
+			Type:          fieldType,
+			Callable:      describeCallable(fieldType),
 			Visibility:    visibility(field.name),
 			Documentation: field.documentation,
 			Source:        describeSource(field.pos),
@@ -181,14 +217,16 @@ func (p *program) describeClass(class *classDecl) SymbolDescription {
 	}
 	for _, name := range sortedKeys(class.implementations) {
 		implementation := class.implementations[name]
+		implementationResult := p.canonicalType(implementation.namespace, implementation.aliases, implementation.result)
 		description.ImplementedMethods = append(description.ImplementedMethods, MethodDescription{
-			CanonicalName: class.qualified + "." + implementation.name,
-			Documentation: implementation.documentation,
-			Visibility:    visibility(implementation.name),
-			Parameters:    p.describeParameters(implementation.namespace, implementation.aliases, implementation.params),
-			ReturnType:    p.canonicalType(implementation.namespace, implementation.aliases, implementation.result),
-			Throws:        sortedSet(implementation.throwSet),
-			Source:        describeSource(implementation.pos),
+			CanonicalName:  class.qualified + "." + implementation.name,
+			Documentation:  implementation.documentation,
+			Visibility:     visibility(implementation.name),
+			Parameters:     p.describeParameters(implementation.namespace, implementation.aliases, implementation.params),
+			ReturnType:     implementationResult,
+			ReturnCallable: describeCallable(implementationResult),
+			Throws:         sortedSet(implementation.throwSet),
+			Source:         describeSource(implementation.pos),
 		})
 	}
 	if class.isError {
@@ -243,6 +281,7 @@ func (p *program) describeConstant(constant *constDecl) SymbolDescription {
 	description := emptySymbol(constant.qualified, "constant", visibility(constant.name))
 	description.Documentation = constant.documentation
 	description.Type = p.canonicalType(constant.namespace, constant.aliases, constant.typ)
+	description.TypeCallable = describeCallable(description.Type)
 	description.Source = describeSource(constant.pos)
 	return description
 }
@@ -253,9 +292,11 @@ func (p *program) describeVariant(name string, union *unionDecl, variant *unionV
 	description.Type = union.qualified
 	description.Source = describeSource(variant.pos)
 	for _, field := range variant.fields {
+		fieldType := p.canonicalType(union.namespace, union.aliases, field.typ)
 		description.Fields = append(description.Fields, FieldDescription{
 			Name:       field.name,
-			Type:       p.canonicalType(union.namespace, union.aliases, field.typ),
+			Type:       fieldType,
+			Callable:   describeCallable(fieldType),
 			Visibility: visibility(field.name),
 		})
 	}
@@ -263,14 +304,16 @@ func (p *program) describeVariant(name string, union *unionDecl, variant *unionV
 }
 
 func (p *program) describeMethod(owner string, method *methodSignature) MethodDescription {
+	result := p.canonicalType(method.namespace, method.aliases, method.result)
 	return MethodDescription{
-		CanonicalName: owner + "." + method.name,
-		Documentation: method.documentation,
-		Visibility:    visibility(method.name),
-		Parameters:    p.describeParameters(method.namespace, method.aliases, method.params),
-		ReturnType:    p.canonicalType(method.namespace, method.aliases, method.result),
-		Throws:        sortedSet(method.throwSet),
-		Source:        describeSource(method.pos),
+		CanonicalName:  owner + "." + method.name,
+		Documentation:  method.documentation,
+		Visibility:     visibility(method.name),
+		Parameters:     p.describeParameters(method.namespace, method.aliases, method.params),
+		ReturnType:     result,
+		ReturnCallable: describeCallable(result),
+		Throws:         sortedSet(method.throwSet),
+		Source:         describeSource(method.pos),
 	}
 }
 
@@ -285,6 +328,7 @@ func (p *program) describeMember(name string) (SymbolDescription, bool) {
 			description := emptySymbol(name, "field", visibility(field.name))
 			description.Documentation = field.documentation
 			description.Type = p.canonicalType(class.namespace, class.aliases, field.typ)
+			description.TypeCallable = describeCallable(description.Type)
 			description.Source = describeSource(field.pos)
 			return description, true
 		}
@@ -313,6 +357,7 @@ func (p *program) describeFunctionMember(name string, function *functionDecl) Sy
 	description.Documentation = function.documentation
 	description.Parameters = p.describeParameters(function.namespace, function.aliases, function.params)
 	description.ReturnType = p.canonicalType(function.namespace, function.aliases, function.result)
+	description.ReturnCallable = describeCallable(description.ReturnType)
 	description.Throws = sortedSet(function.throwSet)
 	description.Source = describeSource(function.pos)
 	return description
@@ -323,6 +368,7 @@ func (p *program) describeMethodMember(name string, method *methodSignature) Sym
 	description.Documentation = method.documentation
 	description.Parameters = p.describeParameters(method.namespace, method.aliases, method.params)
 	description.ReturnType = p.canonicalType(method.namespace, method.aliases, method.result)
+	description.ReturnCallable = describeCallable(description.ReturnType)
 	description.Throws = sortedSet(method.throwSet)
 	description.Source = describeSource(method.pos)
 	return description
@@ -331,9 +377,11 @@ func (p *program) describeMethodMember(name string, method *methodSignature) Sym
 func (p *program) describeParameters(namespace string, aliases map[string]aliasDecl, params []paramDecl) []ParameterDescription {
 	descriptions := make([]ParameterDescription, 0, len(params))
 	for _, param := range params {
+		typ := p.canonicalType(namespace, aliases, param.typ)
 		descriptions = append(descriptions, ParameterDescription{
-			Name: param.name,
-			Type: p.canonicalType(namespace, aliases, param.typ),
+			Name:     param.name,
+			Type:     typ,
+			Callable: describeCallable(typ),
 		})
 	}
 	return descriptions

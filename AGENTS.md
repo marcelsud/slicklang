@@ -39,6 +39,17 @@ Native resource classes set `nativeResource` to the Go pointer type of their run
 - Instance-derived checks run inside `checkingInstance`, which deduplicates a diagnostic already reported, so one mistake in a generic is reported once instead of once per instantiation.
 
 A class that reaches itself by value — `Node { Next: Node? }`, generic or not — checks and interprets but fails `go build` with `invalid recursive type`. That predates generics; recursion through an array or Map compiles.
+## Adding an expression form
+
+`internal/compiler/callables.go` is the worked example (lambdas and callable values). An expression node has to reach every dispatcher or one backend disagrees at runtime: `parsePrimary` and the node type (`ast.go`), `checkASTExpressionExpecting` and `expressionLabel` (`ast_check.go`), `evalExpression` (`runtime.go`), `expression` and `expressionType` (`codegen.go`), and `collectExpression` (`format.go`). A node that caches a resolved type must return it unchanged on a second visit, because `codegen.go`'s `expressionType` re-runs the checker over sub-expressions.
+
+## Types are strings, and every scanner over them shares one grammar
+
+A Slick type is its canonical spelling; `types.go` owns the decomposition and `parseTypeTokens` (`compiler.go`) is the one parser that builds it, shared by declarations and call type arguments. Three rules keep the spelling unique:
+
+- `->` collides with the `<`/`>` scan, so every depth-tracking helper skips it through `isTypeArrow`, and tokens use `matchingAngle` rather than `matching(..., "<", ">")`.
+- `->` binds more weakly than postfix `?` and `[]`, so build those types with `optionalOf` and `arrayOf`, never by appending the suffix. Parentheses that only group a callable are normalized away by `ungroupType`, and `goType`/`resolveDeclaredType` ungroup before reading a spelling.
+- A callable's throw set is sorted by `callableType`, because `throwSet` is a map and generation must be deterministic.
 
 ## Slick language sharp edges when writing tests and examples
 
@@ -47,7 +58,8 @@ A class that reaches itself by value — `Node { Next: Node? }`, generic or not 
 - Arrays expose `.Get(index)` (returns an optional) and `.Length()`; there is no index syntax.
 - `?` requires the enclosing function to return `Result`, including inside a `using` initializer.
 - Union variants are always qualified by their union or its exact alias, in construction and in patterns; payload bindings are positional, and payload fields are readable only through a match arm.
-- `text/scanner` skips newlines, so a declaration whose tail is an expression has no terminator token. `const` bounds its initializer by line: the value must sit on the `const` line, and a formatter or parser change there must keep that rule.
+- `text/scanner` skips newlines, so a declaration whose tail is an expression has no terminator token. `const` bounds its initializer by line: the value must sit on the `const` line, and a formatter or parser change there must keep that rule. For the same reason a call's `(` must begin on its callee's line, or the next statement would be swallowed as an argument list.
+- A lambda is an expression: `let Name = (A: int) -> int { ... }`. Every parameter and result type is explicit, captures are by value and read-only, and a callable is neither comparable nor a Map key.
 - Example projects are pinned by observable output in `exampleOutputs` (`internal/compiler/build_test.go`) and must be a `slick fmt` fixed point.
 
 ## Maintaining this file

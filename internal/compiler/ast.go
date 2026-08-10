@@ -160,6 +160,24 @@ type nameExpression struct {
 
 func (n *nameExpression) expressionPos() position { return n.pos }
 
+// lambdaExpression is an anonymous callable written with explicit parameter and
+// result types. fn is the synthetic declaration the checker builds so both
+// backends run the body exactly the way they run a named function, and captures
+// names the surrounding bindings the body reads, copied by value when the
+// callable is created.
+type lambdaExpression struct {
+	params   []paramDecl
+	result   typeRef
+	throws   []typeRef
+	body     *blockNode
+	fn       *functionDecl
+	captures []string
+	resolved string
+	pos      position
+}
+
+func (n *lambdaExpression) expressionPos() position { return n.pos }
+
 type objectFieldExpression struct {
 	name  string
 	value expressionNode
@@ -189,7 +207,10 @@ type callExpression struct {
 	resolvedReceiver      string
 	resolvedThrows        effectSet
 	resolvedNative        nativeFunction
-	pos                   position
+	// resolvedCallable marks a call that goes through a callable value rather
+	// than a statically resolved function or method.
+	resolvedCallable bool
+	pos              position
 }
 
 func (n *callExpression) expressionPos() position { return n.pos }
@@ -719,7 +740,12 @@ func (p *bodyParser) parsePostfix() expressionNode {
 			}
 			continue
 		}
-		if p.accept("(") {
+		// A call's parentheses sit on the callee's own line. The scanner drops
+		// newlines, so without this a statement that ends in an expression would
+		// swallow a following statement that starts with '(' — which is exactly
+		// how a lambda begins.
+		if p.current().text == "(" && p.startsOnPreviousLine() {
+			p.index++
 			args := p.parseArguments()
 			expression = &callExpression{callee: expression, args: args, pos: expression.expressionPos()}
 			continue
@@ -767,6 +793,12 @@ func (p *bodyParser) parsePrimary() expressionNode {
 	}
 	if p.accept("[") {
 		return p.parseArray(tok.pos)
+	}
+	// A parenthesized expression is grouping or a tuple; only a parameter list
+	// followed by -> opens a lambda, and -> appears nowhere else in an
+	// expression, so the shape is unambiguous before anything is consumed.
+	if p.current().text == "(" && p.lambdaAhead() {
+		return p.parseLambda(tok.pos)
 	}
 	if p.accept("(") {
 		first := p.parseExpression()
@@ -854,6 +886,91 @@ func (p *bodyParser) parsePrimary() expressionNode {
 		}
 	default:
 		return nil
+	}
+}
+
+// startsOnPreviousLine reports whether the current token continues the line the
+// previous token ended on.
+func (p *bodyParser) startsOnPreviousLine() bool {
+	return p.index > 0 && p.tokens[p.index-1].pos.line == p.current().pos.line
+}
+
+func (p *bodyParser) lambdaAhead() bool {
+	close := matching(p.tokens, p.index, "(", ")")
+	return close >= 0 && close+2 < len(p.tokens) && p.tokens[close+1].text == "-" && p.tokens[close+2].text == ">"
+}
+
+func (p *bodyParser) parseLambda(pos position) expressionNode {
+	params, ok := p.parseLambdaParams()
+	if !ok {
+		return &invalidExpression{pos: pos}
+	}
+	if !p.matchPair("-", ">") {
+		p.error(p.current().pos, "expected '->' and a lambda result type")
+		return &invalidExpression{pos: pos}
+	}
+	// The lambda owns the throws clause that follows its result, so a returned
+	// callable declaring effects of its own is parenthesized.
+	result, ok := p.parseTypeAllowing(false)
+	if !ok {
+		return &invalidExpression{pos: pos}
+	}
+	throws := p.parseLambdaThrows()
+	if !p.accept("{") {
+		p.error(p.current().pos, "expected lambda body")
+		return &invalidExpression{pos: pos}
+	}
+	body := p.parseBlock(true, pos)
+	return &lambdaExpression{params: params, result: result, throws: throws, body: body, pos: pos}
+}
+
+func (p *bodyParser) parseLambdaParams() ([]paramDecl, bool) {
+	if !p.accept("(") {
+		p.error(p.current().pos, "expected lambda parameter list")
+		return nil, false
+	}
+	var params []paramDecl
+	for !p.atEnd() && p.current().text != ")" {
+		name, ok := p.expectIdent("lambda parameter name")
+		if !ok {
+			return nil, false
+		}
+		if !p.accept(":") {
+			p.error(p.current().pos, "expected ':' and a type after lambda parameter name")
+			return nil, false
+		}
+		typ, ok := p.parseTypeAllowing(true)
+		if !ok {
+			return nil, false
+		}
+		params = append(params, paramDecl{name: name.text, typ: typ})
+		if !p.accept(",") {
+			break
+		}
+	}
+	if !p.accept(")") {
+		p.error(p.current().pos, "expected ')' after lambda parameters")
+		return nil, false
+	}
+	return params, true
+}
+
+func (p *bodyParser) parseLambdaThrows() []typeRef {
+	if !p.accept("throws") {
+		return nil
+	}
+	var throws []typeRef
+	for {
+		ref, next, ok := readQualified(p.tokens, p.index)
+		if !ok {
+			p.error(p.current().pos, "expected error type after 'throws'")
+			return throws
+		}
+		throws = append(throws, typeRef{name: ref.name, pos: ref.pos})
+		p.index = next
+		if !p.accept("|") {
+			return throws
+		}
 	}
 }
 
@@ -1133,7 +1250,7 @@ func (p *bodyParser) tryParseCallTypeArguments() ([]typeRef, bool) {
 	if p.atEnd() || p.current().text != "<" {
 		return nil, false
 	}
-	close := matching(p.tokens, p.index, "<", ">")
+	close := matchingAngle(p.tokens, p.index)
 	if close < 0 || close+1 >= len(p.tokens) || p.tokens[close+1].text != "(" {
 		return nil, false
 	}
@@ -1170,42 +1287,18 @@ func (p *bodyParser) tryParseCallTypeArguments() ([]typeRef, bool) {
 }
 
 func (p *bodyParser) parseTypeArgument() (typeRef, bool) {
-	start := p.index
+	return p.parseTypeAllowing(true)
+}
+
+func (p *bodyParser) parseTypeAllowing(allowThrows bool) (typeRef, bool) {
 	pos := p.current().pos
-	if p.current().text == "(" {
-		close := matching(p.tokens, p.index, "(", ")")
-		if close < 0 {
-			p.error(pos, "unterminated tuple type")
-			return typeRef{}, false
-		}
-		p.index = close + 1
-	} else {
-		_, next, ok := readQualified(p.tokens, p.index)
-		if !ok {
-			p.error(pos, "expected type")
-			return typeRef{}, false
-		}
-		p.index = next
+	text, next, message, errorPos := parseTypeTokensAllowing(p.tokens, p.index, allowThrows)
+	if message != "" {
+		p.error(errorPos, "%s", message)
+		return typeRef{}, false
 	}
-	if p.current().text == "<" {
-		close := matching(p.tokens, p.index, "<", ">")
-		if close < 0 {
-			p.error(p.current().pos, "unterminated generic type")
-			return typeRef{}, false
-		}
-		p.index = close + 1
-	}
-	for p.current().text == "?" || (p.current().text == "[" && p.index+1 < len(p.tokens) && p.tokens[p.index+1].text == "]") {
-		if p.accept("?") {
-			continue
-		}
-		p.index += 2
-	}
-	var text strings.Builder
-	for _, tok := range p.tokens[start:p.index] {
-		text.WriteString(tok.text)
-	}
-	return typeRef{name: text.String(), pos: pos}, true
+	p.index = next
+	return typeRef{name: text, pos: pos}, true
 }
 
 func (p *bodyParser) parseCatchExpression(value expressionNode) expressionNode {

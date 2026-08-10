@@ -377,6 +377,9 @@ func (g *goGenerator) emitRuntime() {
 	g.line(`if mapping, ok := value.(interface{ slickFormatMap() string }); ok { return mapping.slickFormatMap() }`)
 	g.line(`if named, ok := value.(slickNamed); ok { return named.slickTypeName() }`)
 	g.line(`reflection := reflect.ValueOf(value)`)
+	// A Go function value has no Slick type to recover and no stable address, so
+	// it prints the marker the interpreter prints.
+	g.line(`if reflection.Kind() == reflect.Func { return %s }`, strconv.Quote(callableDisplayValue))
 	g.line(`if reflection.Kind() == reflect.Slice || reflection.Kind() == reflect.Array {`)
 	g.line(`items := make([]string, reflection.Len())`)
 	g.line(`for index := range items { items[index] = slickFormat(reflection.Index(index).Interface()) }`)
@@ -639,8 +642,22 @@ func (g *goGenerator) emitFunction(function *functionDecl, receiver string) erro
 	} else {
 		g.line("func %s(%s) (%s, error) {", functionName, strings.Join(parameters, ", "), g.goType(resultType))
 	}
+	var callableBody strings.Builder
+	if err := g.emitCallableBody(&callableBody, function, scope, resultType); err != nil {
+		return err
+	}
+	g.line("%s", callableBody.String())
+	g.line("}")
+	g.line("")
+	return nil
+}
+
+// emitCallableBody writes one callable body: the cancellation check, the block
+// itself, and the early-return unwrap. A lambda emits the same shape as a named
+// function, so a return inside a lambda leaves the lambda and nothing else.
+func (g *goGenerator) emitCallableBody(out *strings.Builder, function *functionDecl, scope *goScope, resultType string) error {
 	if g.program.usesAsync {
-		g.line("if err := slickCheckCancellation(slickContext); err != nil { return %s, err }", g.zero(resultType))
+		fmt.Fprintf(out, "if err := slickCheckCancellation(slickContext); err != nil { return %s, err }\n", g.zero(resultType))
 	}
 	body, err := g.blockExpression(function.ast, scope, resultType, "")
 	if err != nil {
@@ -649,14 +666,12 @@ func (g *goGenerator) emitFunction(function *functionDecl, receiver string) erro
 	value := g.unique("value")
 	callError := g.unique("error")
 	returned := g.unique("returned")
-	g.line("%s, %s := %s", value, callError, body)
-	g.line("if %s != nil {", callError)
-	g.line("var %s *slickReturn", returned)
-	g.line("if errors.As(%s, &%s) { return %s.value.(%s), nil }", callError, returned, returned, g.goType(resultType))
-	g.line("}")
-	g.line("return %s, %s", value, callError)
-	g.line("}")
-	g.line("")
+	fmt.Fprintf(out, "%s, %s := %s\n", value, callError, body)
+	fmt.Fprintf(out, "if %s != nil {\n", callError)
+	fmt.Fprintf(out, "var %s *slickReturn\n", returned)
+	fmt.Fprintf(out, "if errors.As(%s, &%s) { return %s.value.(%s), nil }\n", callError, returned, returned, g.goType(resultType))
+	fmt.Fprintf(out, "}\n")
+	fmt.Fprintf(out, "return %s, %s\n", value, callError)
 	return nil
 }
 
@@ -1046,6 +1061,10 @@ func (g *goGenerator) expression(expression expressionNode, scope *goScope) (str
 			return "", err
 		}
 		fmt.Fprintf(&body, "return %s, nil\n", name)
+	case *lambdaExpression:
+		if err := g.emitLambdaExpression(&body, node, scope); err != nil {
+			return "", err
+		}
 	case *objectExpression:
 		if err := g.emitObjectExpression(&body, node, scope, typ); err != nil {
 			return "", err
@@ -1250,7 +1269,90 @@ func (g *goGenerator) emitUsingExpression(body *strings.Builder, node *usingExpr
 	return nil
 }
 
+// emitLambdaExpression writes a lambda as a Go closure. Every capture is copied
+// into its own variable first, so the closure reads the value the lambda was
+// created with and a later write to the outer binding cannot reach it.
+func (g *goGenerator) emitLambdaExpression(body *strings.Builder, node *lambdaExpression, scope *goScope) error {
+	if node.fn == nil {
+		return fmt.Errorf("generated lambda has no checked signature")
+	}
+	lambdaScope := &goScope{
+		function: node.fn,
+		locals:   make(map[string]goBinding, len(node.captures)+len(node.params)),
+		pending:  make(map[string]string),
+	}
+	for _, name := range node.captures {
+		binding, exists := scope.locals[name]
+		if !exists {
+			return fmt.Errorf("unknown generated capture %s", name)
+		}
+		captured := g.unique("capture")
+		// The narrowed read is captured when a branch proved one, matching what
+		// the body was checked against.
+		fmt.Fprintf(body, "%s := %s\n_ = %s\n", captured, binding.name, captured)
+		lambdaScope.locals[name] = newGoBinding(captured, binding.typ)
+	}
+	parameters := make([]string, 0, len(node.params)+1)
+	if g.program.usesAsync {
+		parameters = append(parameters, "slickContext context.Context")
+	}
+	for _, param := range node.params {
+		declared, err := g.declaredType(node.fn.namespace, node.fn.aliases, param.typ)
+		if err != nil {
+			return err
+		}
+		variable := g.unique("parameter")
+		lambdaScope.locals[param.name] = newGoBinding(variable, declared)
+		parameters = append(parameters, variable+" "+g.goType(declared))
+	}
+	resultType, err := g.declaredType(node.fn.namespace, node.fn.aliases, node.fn.result)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(body, "return func(%s) (%s, error) {\n", strings.Join(parameters, ", "), g.goType(resultType))
+	if err := g.emitCallableBody(body, node.fn, lambdaScope, resultType); err != nil {
+		return err
+	}
+	fmt.Fprintf(body, "}, nil\n")
+	return nil
+}
+
+// emitCallableCall invokes a callable value. The callee is evaluated once and
+// before any argument, matching the interpreter's order exactly.
+func (g *goGenerator) emitCallableCall(body *strings.Builder, node *callExpression, scope *goScope, resultType string) error {
+	if g.program.usesAsync {
+		fmt.Fprintf(body, "if err := slickCheckCancellation(slickContext); err != nil { return %s, err }\n", g.zero(resultType))
+	}
+	callee, err := g.evalExpression(body, node.callee, scope, "callee", resultType)
+	if err != nil {
+		return err
+	}
+	arguments := make([]string, 0, len(node.args)+1)
+	if g.program.usesAsync {
+		arguments = append(arguments, "slickContext")
+	}
+	for index, argument := range node.args {
+		value, err := g.evalExpression(body, argument, scope, "argument", resultType)
+		if err != nil {
+			return err
+		}
+		typ, err := g.expressionType(argument, scope)
+		if err != nil {
+			return err
+		}
+		if index < len(node.resolvedParams) {
+			value = g.convert(value, typ, node.resolvedParams[index])
+		}
+		arguments = append(arguments, value)
+	}
+	fmt.Fprintf(body, "return %s(%s)\n", callee, strings.Join(arguments, ", "))
+	return nil
+}
+
 func (g *goGenerator) emitCallExpression(body *strings.Builder, node *callExpression, scope *goScope, resultType string) error {
+	if node.resolvedCallable {
+		return g.emitCallableCall(body, node, scope, resultType)
+	}
 	name, ok := node.callee.(*nameExpression)
 	if !ok {
 		return fmt.Errorf("generated call target is not a name")
@@ -1699,6 +1801,11 @@ func (g *goGenerator) nameExpression(node *nameExpression, scope *goScope) (stri
 				return literal, nil
 			}
 		}
+		// A named function value is the generated function itself, so a
+		// capture-free callable costs no environment.
+		if function := g.program.resolveFunction(scope.function, node.name); function != nil {
+			return goFunctionName(function.qualified), nil
+		}
 		return "", fmt.Errorf("unknown generated value %s", node.name)
 	}
 	value := binding.name
@@ -1735,6 +1842,9 @@ func (g *goGenerator) expressionType(expression expressionNode, scope *goScope) 
 	if node, ok := expression.(*awaitExpression); ok && node.resolved != "" {
 		return node.resolved, nil
 	}
+	if node, ok := expression.(*lambdaExpression); ok && node.resolved != "" {
+		return node.resolved, nil
+	}
 	locals := make(map[string]string, len(scope.locals))
 	for name, binding := range scope.locals {
 		locals[name] = binding.typ
@@ -1751,6 +1861,28 @@ func (g *goGenerator) declaredType(namespace string, aliases map[string]aliasDec
 }
 
 func (g *goGenerator) resolveDeclaredType(namespace string, aliases map[string]aliasDecl, name string) (string, error) {
+	// Parentheses that only group a callable are not part of the type, so they
+	// are dropped before anything reads the spelling.
+	name = ungroupType(name)
+	if params, result, throws, callable := callableTypeParts(name); callable {
+		resolved := make([]string, len(params))
+		for index, param := range params {
+			declared, err := g.resolveDeclaredType(namespace, aliases, param)
+			if err != nil {
+				return "", err
+			}
+			resolved[index] = declared
+		}
+		declaredResult, err := g.resolveDeclaredType(namespace, aliases, result)
+		if err != nil {
+			return "", err
+		}
+		effects := make([]string, len(throws))
+		for index, thrown := range throws {
+			effects[index], _ = g.program.resolveErrorIn(namespace, aliases, thrown)
+		}
+		return callableType(resolved, declaredResult, effects), nil
+	}
 	if base, optional := optionalBase(name); optional {
 		element, err := g.resolveDeclaredType(namespace, aliases, base)
 		if err != nil {
@@ -1763,7 +1895,7 @@ func (g *goGenerator) resolveDeclaredType(namespace string, aliases map[string]a
 		if err != nil {
 			return "", err
 		}
-		return resolved + "[]", nil
+		return arrayOf(resolved), nil
 	}
 	parsed := parseTypeName(name)
 	if parsed.kind == typeKindTuple {
@@ -1830,6 +1962,7 @@ func (g *goGenerator) parameterTypes(namespace string, aliases map[string]aliasD
 }
 
 func (g *goGenerator) goType(typ string) string {
+	typ = ungroupType(typ)
 	// Optional is checked before array so User[]? maps to an optional slice and
 	// User?[] to a slice of optionals; the two never collapse.
 	if base, optional := optionalBase(typ); optional {
@@ -1837,6 +1970,18 @@ func (g *goGenerator) goType(typ string) string {
 	}
 	if element, isArray := arrayElementType(typ); isArray {
 		return "[]" + g.goType(element)
+	}
+	// A callable is an ordinary Go function value with the same shape every
+	// generated function has, so a named function is already one.
+	if params, result, _, callable := callableTypeParts(typ); callable {
+		types := make([]string, 0, len(params)+1)
+		if g.program.usesAsync {
+			types = append(types, "context.Context")
+		}
+		for _, param := range params {
+			types = append(types, g.goType(param))
+		}
+		return "func(" + strings.Join(types, ", ") + ") (" + g.goType(result) + ", error)"
 	}
 	if key, value, ok := mapTypeArgs(typ); ok {
 		return "slickMap[" + g.goType(key) + ", " + g.goType(value) + "]"
@@ -1900,7 +2045,8 @@ func (g *goGenerator) zero(typ string) string {
 	case "slickSeq", "error", "[]any", "any":
 		return "nil"
 	}
-	if strings.HasPrefix(goType, "[]") || strings.HasPrefix(goType, "*") || g.program.interfaces[typ] != nil {
+	if strings.HasPrefix(goType, "[]") || strings.HasPrefix(goType, "*") || strings.HasPrefix(goType, "func(") ||
+		g.program.interfaces[typ] != nil {
 		return "nil"
 	}
 	return goType + "{}"

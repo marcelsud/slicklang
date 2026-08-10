@@ -101,6 +101,9 @@ const (
 	diagnosticCodeTypeParameter            diagnosticCode = "SLK409"
 	diagnosticCodeUnboundTypeParameter     diagnosticCode = "SLK410"
 	diagnosticCodeGenericExpansion         diagnosticCode = "SLK411"
+	diagnosticCodeNotCallable              diagnosticCode = "SLK412"
+	diagnosticCodeMethodValue              diagnosticCode = "SLK413"
+	diagnosticCodeLambdaCapture            diagnosticCode = "SLK414"
 )
 
 var ErrUnknownDiagnostic = errors.New("unknown diagnostic")
@@ -550,6 +553,29 @@ var diagnosticDefinitions = []diagnosticDefinition{
 		"A recursive generic may contain itself only at the same type arguments, so the set of instantiations stays finite.",
 		"A declaration instantiates itself with a type argument built from its own parameter.",
 		"Hold the recursive value at the same type arguments, such as Node<T> inside Node<T>."),
+	defineDiagnostic(diagnosticCodeNotCallable, DiagnosticPhaseTypeCheck,
+		"Value is not callable",
+		"Call syntax applies to a named function, a method of the receiver's type, or any expression whose static type is a callable.",
+		"A call target names or produces a value that is not a callable type.",
+		"Call a function, a method, or a value declared with a callable type such as (int, int) -> int.",
+		"Remove the call parentheses when the value itself was intended.").
+		withRelated(diagnosticCodeMethodValue, diagnosticCodeUnknownCallable),
+	defineDiagnostic(diagnosticCodeMethodValue, DiagnosticPhaseTypeCheck,
+		"Method is not a value",
+		"Methods are invoked through their receiver; Slick has no bound or unbound method value.",
+		"A method name is read without being called.",
+		"Call the method with its arguments.",
+		"Wrap the call in a lambda when a callable value is required.").
+		withExamples("Record.Transform", "(Value: int) -> int {\n  Record.Transform(Value)\n}").
+		withRelated(diagnosticCodeNotCallable),
+	defineDiagnostic(diagnosticCodeLambdaCapture, DiagnosticPhaseTypeCheck,
+		"Invalid lambda capture",
+		"A lambda copies the surrounding bindings it reads by value when it is created, so a capture is read-only, cannot be a pending or actively managed binding, and cannot be the binding the lambda itself initializes.",
+		"A lambda assigns a captured binding, captures a pending async or active using binding, or refers to the let binding whose initializer it is.",
+		"Bind a separate local instead of assigning the captured value.",
+		"Await the pending binding or consume the resource before creating the lambda.",
+		"Use a named function when the callable has to refer to itself.").
+		withRelated(diagnosticCodePendingUse, diagnosticCodeUsingEscape),
 }
 
 var diagnosticRegistry = mustBuildDiagnosticRegistry(diagnosticDefinitions)

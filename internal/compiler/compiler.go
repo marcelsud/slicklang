@@ -894,7 +894,9 @@ func (p *parser) parseCallableTail() ([]paramDecl, typeRef, []typeRef, []token, 
 		p.error(p.current().pos, "expected '->' and a return type")
 		return nil, typeRef{}, nil, nil, false, false
 	}
-	result, ok := p.parseType()
+	// The declaration owns the throws clause, so a returned callable that
+	// declares effects of its own is parenthesized.
+	result, ok := p.parseTypeAllowing(false)
 	if !ok {
 		return nil, typeRef{}, nil, nil, false, false
 	}
@@ -944,47 +946,174 @@ func (p *parser) parseParams() ([]paramDecl, bool) {
 }
 
 func (p *parser) parseType() (typeRef, bool) {
-	start := p.index
+	return p.parseTypeAllowing(true)
+}
+
+// parseTypeAllowing reads one type. allowThrows is false where a throws clause
+// belongs to the enclosing declaration rather than to the type being read, so a
+// returned callable that declares its own effects is written in parentheses.
+func (p *parser) parseTypeAllowing(allowThrows bool) (typeRef, bool) {
 	pos := p.current().pos
-	if p.current().text == "(" {
-		close := matching(p.tokens, p.index, "(", ")")
-		if close < 0 {
-			p.error(pos, "unterminated tuple type")
-			return typeRef{}, false
-		}
-		p.index = close + 1
-	} else {
-		_, next, ok := readQualified(p.tokens, p.index)
-		if !ok {
-			p.error(pos, "expected type")
-			return typeRef{}, false
-		}
-		p.index = next
+	text, next, message, errorPos := parseTypeTokensAllowing(p.tokens, p.index, allowThrows)
+	if message != "" {
+		p.error(errorPos, "%s", message)
+		return typeRef{}, false
 	}
-	if p.current().text == "<" {
-		close := matching(p.tokens, p.index, "<", ">")
-		if close < 0 {
-			p.error(p.current().pos, "unterminated generic type")
-			return typeRef{}, false
-		}
-		p.index = close + 1
+	p.index = next
+	return typeRef{name: text, pos: pos}, true
+}
+
+// parseTypeTokens reads one type starting at index and returns its canonical
+// spelling. It is shared by every parser so a type has one grammar, and it
+// builds the text structurally rather than by joining tokens: a callable's ->
+// and throws clause need spacing that token text alone cannot supply.
+func parseTypeTokens(tokens []token, index int) (string, int, string, position) {
+	return parseTypeTokensAllowing(tokens, index, true)
+}
+
+func parseTypeTokensAllowing(tokens []token, index int, allowThrows bool) (string, int, string, position) {
+	text, next, message, errorPos := parseTypePrimary(tokens, index, allowThrows)
+	if message != "" {
+		return "", next, message, errorPos
 	}
-	for p.current().text == "?" || (p.current().text == "[" && p.index+1 < len(p.tokens) && p.tokens[p.index+1].text == "]") {
-		if p.accept("?") {
+	for next < len(tokens) {
+		if tokens[next].text == "?" {
+			text = groupType(text) + "?"
+			next++
 			continue
 		}
-		p.index += 2
+		if tokens[next].text == "[" && next+1 < len(tokens) && tokens[next+1].text == "]" {
+			text = arrayOf(text)
+			next += 2
+			continue
+		}
+		break
 	}
-	for p.accept("|") {
-		if _, ok := p.parseType(); !ok {
-			return typeRef{}, false
+	for next < len(tokens) && tokens[next].text == "|" {
+		right, after, message, errorPos := parseTypeTokensAllowing(tokens, next+1, allowThrows)
+		if message != "" {
+			return "", after, message, errorPos
+		}
+		text += "|" + right
+		next = after
+	}
+	return text, next, "", position{}
+}
+
+func parseTypePrimary(tokens []token, index int, allowThrows bool) (string, int, string, position) {
+	if index >= len(tokens) {
+		return "", index, "expected type", typeTokenPos(tokens, index)
+	}
+	if tokens[index].text == "(" {
+		close := matching(tokens, index, "(", ")")
+		if close < 0 {
+			return "", index, "unterminated tuple type", tokens[index].pos
+		}
+		elements, wellFormed := parseTypeTokenList(tokens, index+1, close)
+		if close+2 < len(tokens) && tokens[close+1].text == "-" && tokens[close+2].text == ">" {
+			if !wellFormed {
+				return "", index, "expected type", tokens[index].pos
+			}
+			return parseCallableTypeTail(tokens, elements, close+3, allowThrows)
+		}
+		// A malformed element keeps its written spelling, so the type checker
+		// reports one structural diagnostic instead of a parse cascade.
+		if !wellFormed {
+			return joinTokenText(tokens, index, close+1), close + 1, "", position{}
+		}
+		return "(" + strings.Join(elements, ",") + ")", close + 1, "", position{}
+	}
+	ref, next, ok := readQualified(tokens, index)
+	if !ok {
+		return "", index, "expected type", tokens[index].pos
+	}
+	text := ref.name
+	if next < len(tokens) && tokens[next].text == "<" {
+		close := matchingAngle(tokens, next)
+		if close < 0 {
+			return "", next, "unterminated generic type", tokens[next].pos
+		}
+		args, wellFormed := parseTypeTokenList(tokens, next+1, close)
+		if !wellFormed {
+			return joinTokenText(tokens, index, close+1), close + 1, "", position{}
+		}
+		text += "<" + strings.Join(args, ",") + ">"
+		next = close + 1
+	}
+	return text, next, "", position{}
+}
+
+// parseCallableTypeTail reads the result type and optional throws clause that
+// follow a callable type's parameter list.
+func parseCallableTypeTail(tokens []token, params []string, index int, allowThrows bool) (string, int, string, position) {
+	// The result is read without a throws clause of its own, so throws always
+	// binds to the outermost callable and never becomes ambiguous.
+	result, next, message, errorPos := parseTypeTokensAllowing(tokens, index, false)
+	if message != "" {
+		return "", next, message, errorPos
+	}
+	var throws []string
+	if allowThrows && next < len(tokens) && tokens[next].text == "throws" {
+		next++
+		for {
+			ref, after, ok := readQualified(tokens, next)
+			if !ok {
+				return "", next, "expected error type after 'throws'", typeTokenPos(tokens, next)
+			}
+			throws = append(throws, ref.name)
+			next = after
+			if next >= len(tokens) || tokens[next].text != "|" {
+				break
+			}
+			next++
 		}
 	}
+	return callableType(params, result, throws), next, "", position{}
+}
+
+// parseTypeTokenList reads the comma-separated types between start and end. It
+// reports whether the whole span is a well-formed list, so a caller can keep a
+// malformed spelling intact rather than inventing a shorter type from it.
+func parseTypeTokenList(tokens []token, start, end int) ([]string, bool) {
+	var elements []string
+	index := start
+	for index < end {
+		text, next, message, _ := parseTypeTokens(tokens, index)
+		if message != "" {
+			return nil, false
+		}
+		elements = append(elements, text)
+		index = next
+		if index >= end {
+			break
+		}
+		if tokens[index].text != "," {
+			return nil, false
+		}
+		index++
+		if index >= end {
+			return nil, false
+		}
+	}
+	return elements, index == end
+}
+
+func joinTokenText(tokens []token, start, end int) string {
 	var text strings.Builder
-	for _, tok := range p.tokens[start:p.index] {
+	for _, tok := range tokens[start:end] {
 		text.WriteString(tok.text)
 	}
-	return typeRef{name: text.String(), pos: pos}, true
+	return text.String()
+}
+
+func typeTokenPos(tokens []token, index int) position {
+	if index < len(tokens) {
+		return tokens[index].pos
+	}
+	if len(tokens) > 0 {
+		return tokens[len(tokens)-1].pos
+	}
+	return position{}
 }
 
 func (p *parser) parseThrows() []typeRef {
@@ -1257,6 +1386,30 @@ func (p *program) checkFunction(function *functionDecl) {
 	p.checkASTFunction(function)
 }
 
+// matchingAngle finds the > that closes the < at start. The > of a callable
+// type's -> is skipped, so a generic argument may itself be a callable.
+func matchingAngle(tokens []token, start int) int {
+	if start >= len(tokens) || tokens[start].text != "<" {
+		return -1
+	}
+	depth := 0
+	for index := start; index < len(tokens); index++ {
+		switch tokens[index].text {
+		case "<":
+			depth++
+		case ">":
+			if index > start && tokens[index-1].text == "-" {
+				continue
+			}
+			depth--
+			if depth == 0 {
+				return index
+			}
+		}
+	}
+	return -1
+}
+
 func matching(tokens []token, start int, open, close string) int {
 	if start >= len(tokens) || tokens[start].text != open {
 		return -1
@@ -1344,9 +1497,23 @@ func displayName(name string) string {
 	parsed := parseTypeName(name)
 	switch parsed.kind {
 	case typeKindOptional:
-		return displayName(parsed.base) + "?"
+		return groupDisplayName(parsed.base) + "?"
 	case typeKindArray:
-		return displayName(parsed.base) + "[]"
+		return groupDisplayName(parsed.base) + "[]"
+	case typeKindCallable:
+		short := make([]string, len(parsed.args))
+		for index, arg := range parsed.args {
+			short[index] = displayName(arg)
+		}
+		display := "(" + strings.Join(short, ", ") + ") -> " + displayName(parsed.base)
+		if len(parsed.throws) > 0 {
+			thrown := make([]string, len(parsed.throws))
+			for index, name := range parsed.throws {
+				thrown[index] = displayName(name)
+			}
+			display += " throws " + strings.Join(thrown, " | ")
+		}
+		return display
 	case typeKindTuple:
 		short := make([]string, len(parsed.args))
 		for index, arg := range parsed.args {
@@ -1364,6 +1531,15 @@ func displayName(name string) string {
 		return name[index+1:]
 	}
 	return name
+}
+
+// groupDisplayName keeps the parentheses a callable needs when a ? or []
+// suffix follows it, matching the canonical spelling.
+func groupDisplayName(name string) string {
+	if isCallableType(name) {
+		return "(" + displayName(name) + ")"
+	}
+	return displayName(name)
 }
 
 func validNamespace(namespace string) bool {

@@ -74,8 +74,16 @@ type astScope struct {
 	narrowed      map[string]string
 	usingBindings map[string]usingBinding
 	pending       map[string]pendingBinding
-	currentBlock  *blockNode
-	loopDepth     int
+	// captured names the bindings a lambda copied by value, which its body may
+	// read but never write.
+	captured map[string]struct{}
+	// initializing names the let bindings whose value this scope is currently
+	// checking; recursive carries them into a lambda body, where referring to
+	// one is the rejected directly recursive lambda.
+	initializing []string
+	recursive    map[string]struct{}
+	currentBlock *blockNode
+	loopDepth    int
 }
 
 func newASTScope(function *functionDecl, size int) *astScope {
@@ -85,6 +93,7 @@ func newASTScope(function *functionDecl, size int) *astScope {
 		narrowed:      make(map[string]string),
 		usingBindings: make(map[string]usingBinding),
 		pending:       make(map[string]pendingBinding),
+		captured:      make(map[string]struct{}),
 	}
 }
 
@@ -98,11 +107,14 @@ func (scope *astScope) lookup(name string) (string, bool) {
 	return typ, exists
 }
 
-// bind records a local's storage type and drops any refinement it shadows.
+// bind records a local's storage type and drops any refinement it shadows. A
+// binding declared inside a lambda also stops being a read-only capture: it is
+// the lambda's own storage, whatever the surrounding scope called it.
 func (scope *astScope) bind(name, typ string) {
 	scope.locals[name] = typ
 	delete(scope.narrowed, name)
 	delete(scope.usingBindings, name)
+	delete(scope.captured, name)
 }
 
 func (p *program) checkASTFunction(function *functionDecl) {
@@ -122,6 +134,13 @@ func (p *program) checkASTFunction(function *functionDecl) {
 	if function.receiverCanonical != "" {
 		scope.locals["self"] = function.receiverCanonical
 	}
+	p.checkCallableBody(function, scope)
+}
+
+// checkCallableBody types one callable body against its declared result and
+// checked effects. A named function and a lambda differ only in how their scope
+// was built, so both reach the language's one contract here.
+func (p *program) checkCallableBody(function *functionDecl, scope *astScope) {
 	expected := p.resolveType(function.namespace, function.aliases, function.result)
 	if strings.Contains(expected, "std.io.") {
 		p.usesStdIO = true
@@ -180,7 +199,13 @@ func (p *program) checkASTBlock(block *blockNode, scope *astScope, expected stri
 func (p *program) checkASTStatement(statement statementNode, scope *astScope, expected string) expressionInfo {
 	switch node := statement.(type) {
 	case *letStatement:
+		// The names are not in scope yet, so a lambda in the initializer cannot
+		// call the binding it is producing; remembering them here is what turns
+		// that into one focused diagnostic instead of an unknown value.
+		previous := scope.initializing
+		scope.initializing = node.names
 		info := p.checkASTExpression(node.value, scope)
+		scope.initializing = previous
 		node.resolved = info.typ
 		if len(node.names) == 1 {
 			scope.bind(node.names[0], info.typ)
@@ -219,6 +244,12 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 			p.add(node.pos, diagnosticCodePendingAssignment, "pending binding %s is immutable and cannot be redeclared before it is awaited", node.name)
 			return expressionInfo{typ: "null", effects: info.effects}
 		}
+		if node.call.resolvedCallable {
+			// A task runs one declared function; a callable value carries an
+			// environment no child scope can be shown to own.
+			p.add(node.pos, diagnosticCodeAsyncInitializer, "async let initializer must resolve to one function or method call")
+			return expressionInfo{typ: "null", effects: info.effects}
+		}
 		if node.call.resolvedResult == "" {
 			if info.typ != typeUnknown {
 				p.add(node.pos, diagnosticCodeAsyncInitializer, "async let initializer must resolve to one function or method call")
@@ -254,6 +285,11 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		}
 		return expressionInfo{typ: "null", effects: info.effects}
 	case *assignmentStatement:
+		if _, captured := scope.captured[node.name]; captured {
+			p.add(node.pos, diagnosticCodeLambdaCapture, "captured binding %s is read-only inside a lambda; bind a separate local instead", node.name)
+			info := p.checkASTExpression(node.value, scope)
+			return expressionInfo{typ: "null", effects: info.effects}
+		}
 		if _, active := scope.usingBindings[node.name]; active {
 			p.add(node.pos, diagnosticCodeUsingAssignment, "using binding %s is immutable", node.name)
 		}
@@ -394,6 +430,8 @@ func (p *program) checkASTExpressionExpecting(expression expressionNode, scope *
 		return p.checkTemplateExpression(node, scope)
 	case *nameExpression:
 		return p.checkNameExpression(node, scope)
+	case *lambdaExpression:
+		return p.checkLambdaExpression(node, scope)
 	case *awaitExpression:
 		return p.checkAwaitExpression(node, scope)
 	case *unaryExpression:
@@ -488,6 +526,12 @@ func (p *program) checkNameExpression(node *nameExpression, scope *astScope) exp
 		if info, constant := p.checkConstantReference(node, scope); constant {
 			return info
 		}
+		if info, function := p.checkFunctionValue(node, scope); function {
+			return info
+		}
+		if p.reportRecursiveLambda(node.pos, scope, node.name) {
+			return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
+		}
 		p.add(node.pos, diagnosticCodeUnknownValue, "unknown value %s", node.name)
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	}
@@ -504,13 +548,23 @@ func (p *program) checkNameExpression(node *nameExpression, scope *astScope) exp
 		}
 		class := p.classes[receiver]
 		if class != nil {
-			field, ok := class.fields[parts[1]]
-			if !ok {
-				p.add(node.pos, diagnosticCodeUnknownField, "%s has no field %s", class.name, parts[1])
+			if field, ok := class.fields[parts[1]]; ok {
+				p.requireAccess(node.pos, scope.function.namespace, class.namespace, field.name, "field")
+				return expressionInfo{typ: p.resolveType(class.namespace, class.aliases, field.typ), effects: make(effectSet)}
+			}
+		}
+		// A method is invoked through its receiver and has no value form, so
+		// reading one names the real mistake instead of a missing field.
+		if exists {
+			if _, method := p.methodForType(receiver, parts[1]); method {
+				p.add(node.pos, diagnosticCodeMethodValue,
+					"%s.%s is a method and not a value; call it, or wrap the call in a lambda", parts[0], parts[1])
 				return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 			}
-			p.requireAccess(node.pos, scope.function.namespace, class.namespace, field.name, "field")
-			return expressionInfo{typ: p.resolveType(class.namespace, class.aliases, field.typ), effects: make(effectSet)}
+		}
+		if class != nil {
+			p.add(node.pos, diagnosticCodeUnknownField, "%s has no field %s", class.name, parts[1])
+			return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 		}
 		if union := p.unions[receiver]; union != nil {
 			p.add(node.pos, diagnosticCodeUnionVariant, "%s is union %s; match it to read the payload of one variant", parts[0], displayName(receiver))
@@ -522,6 +576,9 @@ func (p *program) checkNameExpression(node *nameExpression, scope *astScope) exp
 			return p.checkVariantValue(node, union, variant, scope)
 		}
 		if info, constant := p.checkConstantReference(node, scope); constant {
+			return info
+		}
+		if info, function := p.checkFunctionValue(node, scope); function {
 			return info
 		}
 	}
@@ -591,7 +648,7 @@ func (p *program) checkArrayExpression(node *arrayExpression, scope *astScope, e
 		elementType = joined
 	}
 	if elementType != "" {
-		info.typ = elementType + "[]"
+		info.typ = arrayOf(elementType)
 	}
 	return info
 }
@@ -817,8 +874,15 @@ func (p *program) checkCallExpression(node *callExpression, scope *astScope) exp
 func (p *program) checkCallExpressionEffects(node *callExpression, scope *astScope, includeThrows bool) expressionInfo {
 	name, ok := node.callee.(*nameExpression)
 	if !ok {
-		p.add(node.pos, diagnosticCodeUnknownValue, "call target is not a function or method")
-		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
+		// Any expression whose static type is callable may be invoked, so the
+		// callee is typed first and evaluated exactly once.
+		calleeInfo := p.checkASTExpression(node.callee, scope)
+		info := p.checkCallableInvocation(node, scope, calleeInfo.typ, expressionLabel(node.callee), includeThrows)
+		effects := make(effectSet, len(calleeInfo.effects)+len(info.effects))
+		mergeEffects(effects, calleeInfo.effects)
+		mergeEffects(effects, info.effects)
+		info.effects = effects
+		return info
 	}
 	parts := strings.Split(name.name, ".")
 	if pending, exists := scope.pending[parts[0]]; exists {
@@ -861,6 +925,10 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 		return info
 	}
 
+	if info, callable := p.checkCallableValueTarget(node, scope, name, includeThrows); callable {
+		return info
+	}
+
 	target, reported := p.resolveASTCall(scope.function, node, name, scope)
 	if len(parts) == 2 {
 		if receiver, exists := scope.lookup(parts[0]); exists {
@@ -873,7 +941,7 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 			// receiver mistake rather than a missing declaration.
 			if len(parts) > 1 && p.constantFor(scope.function.namespace, scope.function.aliases, parts[0]) != nil {
 				p.add(node.pos, diagnosticCodeUnknownCallable, "constant %s is a value and cannot be a method receiver", parts[0])
-			} else {
+			} else if !p.reportRecursiveLambda(node.pos, scope, parts[0]) {
 				p.add(node.pos, diagnosticCodeUnknownCallable, "unknown function or method %s", name.name)
 			}
 		}
@@ -883,18 +951,7 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 		}
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	}
-	if target.namespace == "std.io" {
-		p.usesStdIO = true
-	}
-	if target.namespace == "std.http" {
-		p.usesStdHTTP = true
-	}
-	if target.native == nativeStdFSReadDirectory || target.native == nativeStdFSCreateTemporaryDirectory {
-		p.usesStdFSDirectory = true
-	}
-	if target.namespace == "std.process" {
-		p.usesStdProcess = true
-	}
+	p.markStandardLibraryUse(target.namespace, target.native)
 
 	info := expressionInfo{
 		typ:     p.resolveType(target.namespace, target.aliases, target.result),
@@ -977,6 +1034,23 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 		mergeEffects(info.effects, node.resolvedThrows)
 	}
 	return info
+}
+
+// markStandardLibraryUse records that a program reaches a conditionally emitted
+// part of the standard library. Reading a function as a value pulls in the same
+// runtime support calling it would.
+func (p *program) markStandardLibraryUse(namespace string, native nativeFunction) {
+	switch namespace {
+	case "std.io":
+		p.usesStdIO = true
+	case "std.http":
+		p.usesStdHTTP = true
+	case "std.process":
+		p.usesStdProcess = true
+	}
+	if native == nativeStdFSReadDirectory || native == nativeStdFSCreateTemporaryDirectory {
+		p.usesStdFSDirectory = true
+	}
 }
 
 func (p *program) checkIterableCall(node *callExpression, scope *astScope, name *nameExpression) (expressionInfo, bool) {
@@ -1120,12 +1194,47 @@ func (p *program) assignable(actual, expected string) bool {
 		}
 		return p.assignable(actual, base)
 	}
+	if callableAssignable(actual, expected) {
+		return true
+	}
 	if iface := p.interfaces[expected]; iface != nil {
 		if class := p.classes[actual]; class != nil {
 			return len(p.classSatisfies(class, iface)) == 0
 		}
 	}
 	return false
+}
+
+// callableAssignable decides whether one callable may be stored where another
+// is required. The rule is deliberately narrow: arity must match exactly,
+// parameter and result types are invariant, and the source's declared throw set
+// must be a subset of the target's. A non-throwing callable therefore fits
+// where errors are expected, but never the reverse, so a checked effect can
+// never be erased by passing a callable through a wider type.
+func callableAssignable(actual, expected string) bool {
+	actualParams, actualResult, actualThrows, isActual := callableTypeParts(actual)
+	expectedParams, expectedResult, expectedThrows, isExpected := callableTypeParts(expected)
+	if !isActual || !isExpected {
+		return false
+	}
+	if len(actualParams) != len(expectedParams) || actualResult != expectedResult {
+		return false
+	}
+	for index, param := range actualParams {
+		if param != expectedParams[index] {
+			return false
+		}
+	}
+	accepted := make(map[string]struct{}, len(expectedThrows))
+	for _, thrown := range expectedThrows {
+		accepted[thrown] = struct{}{}
+	}
+	for _, thrown := range actualThrows {
+		if !containsError(accepted, thrown) {
+			return false
+		}
+	}
+	return true
 }
 
 // reportUnassignable emits exactly one diagnostic for a value that cannot be
@@ -1632,12 +1741,19 @@ func (scope *astScope) clone() *astScope {
 		binding.effects = cloneEffects(binding.effects)
 		pending[name] = binding
 	}
+	captured := make(map[string]struct{}, len(scope.captured))
+	for name := range scope.captured {
+		captured[name] = struct{}{}
+	}
 	return &astScope{
 		function:      scope.function,
 		locals:        locals,
 		narrowed:      narrowed,
 		usingBindings: usingBindings,
 		pending:       pending,
+		captured:      captured,
+		initializing:  scope.initializing,
+		recursive:     scope.recursive,
 		currentBlock:  scope.currentBlock,
 		loopDepth:     scope.loopDepth,
 	}
@@ -1705,6 +1821,9 @@ func (p *program) mergePendingPaths(target *astScope, pos position, paths []pend
 func (p *program) taskSafeType(name string, visiting map[string]bool) bool {
 	parsed := parseTypeName(name)
 	switch parsed.kind {
+	case typeKindCallable:
+		// A callable carries captured values a child task cannot be shown to own.
+		return false
 	case typeKindOptional, typeKindArray:
 		return p.taskSafeType(parsed.base, visiting)
 	case typeKindTuple:
@@ -1849,6 +1968,8 @@ func expressionLabel(expression expressionNode) string {
 		return expressionLabel(node.value)
 	case *matchExpression:
 		return "match"
+	case *lambdaExpression:
+		return "lambda"
 	default:
 		return "expression"
 	}
