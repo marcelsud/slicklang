@@ -3,6 +3,7 @@ package compiler
 import (
 	"fmt"
 	"go/format"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1693,6 +1694,11 @@ func (g *goGenerator) nameExpression(node *nameExpression, scope *goScope) (stri
 		if union, variant, named := g.program.resolveVariant(scope.function.namespace, scope.function.aliases, node.name); named && variant != nil {
 			return fmt.Sprintf("&%s{slickTag: %d}", goUnionName(union.qualified), variant.tag), nil
 		}
+		if decl := g.program.constantFor(scope.function.namespace, scope.function.aliases, node.name); decl != nil {
+			if literal, evaluated := constantGoValue(decl); evaluated {
+				return literal, nil
+			}
+		}
 		return "", fmt.Errorf("unknown generated value %s", node.name)
 	}
 	value := binding.name
@@ -1951,6 +1957,15 @@ func goLiteral(value any) string {
 	case int64:
 		return strconv.FormatInt(value, 10)
 	case float64:
+		// Constant folding can reach infinity, which has no Go float literal.
+		switch {
+		case math.IsInf(value, 1):
+			return "math.Inf(1)"
+		case math.IsInf(value, -1):
+			return "math.Inf(-1)"
+		case math.IsNaN(value):
+			return "math.NaN()"
+		}
 		return strconv.FormatFloat(value, 'g', -1, 64)
 	case string:
 		return strconv.Quote(value)

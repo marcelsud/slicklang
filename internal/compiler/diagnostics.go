@@ -94,6 +94,10 @@ const (
 	diagnosticCodeAwaitLoop                diagnosticCode = "SLK402"
 	diagnosticCodeAsyncUnsafeValue         diagnosticCode = "SLK403"
 	diagnosticCodeUnionVariant             diagnosticCode = "SLK404"
+	diagnosticCodeConstantType             diagnosticCode = "SLK405"
+	diagnosticCodeConstantExpression       diagnosticCode = "SLK406"
+	diagnosticCodeConstantAssignment       diagnosticCode = "SLK407"
+	diagnosticCodeConstantCycle            diagnosticCode = "SLK408"
 )
 
 var ErrUnknownDiagnostic = errors.New("unknown diagnostic")
@@ -504,6 +508,29 @@ var diagnosticDefinitions = []diagnosticDefinition{
 		"Name a variant declared by the union being constructed or matched.",
 		"Bind exactly one name per declared payload field, using _ to ignore one.",
 		"Write a fieldless variant without parentheses and a variant with fields with them."),
+	defineDiagnostic(diagnosticCodeConstantType, DiagnosticPhaseTypeCheck,
+		"Constant type is not supported",
+		"A constant holds one compile-time value, so its declared type must be a language primitive or a union whose fieldless variants name that value.",
+		"A constant is declared with an optional, collection, class, interface, or generic type.",
+		"Declare the constant bool, int, float, string, null, or a union.",
+		"Compute the value in a function when it needs a type constants do not carry."),
+	defineDiagnostic(diagnosticCodeConstantExpression, DiagnosticPhaseTypeCheck,
+		"Constant expression is not allowed",
+		"A constant initializer is limited to expressions the compiler evaluates with no runtime state: literals, other constants, fieldless union variants, grouping, unary - and !, and the non-failing operators.",
+		"An initializer calls a function, constructs a value, interpolates a template, reads a field, or uses another runtime construct.",
+		"Replace the initializer with a constant expression.",
+		"Move the computation into a function when it needs runtime state."),
+	defineDiagnostic(diagnosticCodeConstantAssignment, DiagnosticPhaseTypeCheck,
+		"Constant is immutable",
+		"A constant names one compile-time value and has no storage to write.",
+		"An assignment statement targets a constant.",
+		"Bind a local with let when the value must change.",
+		"Rename the local when it was meant to be separate from the constant."),
+	defineDiagnostic(diagnosticCodeConstantCycle, DiagnosticPhaseTypeCheck,
+		"Constant declarations form a cycle",
+		"Constants are evaluated once at compile time, so their references must form an acyclic graph; forward references are valid only while they stay acyclic.",
+		"A constant reaches itself through its own initializer, directly or through other constants.",
+		"Break the cycle by giving one constant on the reported chain a value that does not depend on the others."),
 }
 
 var diagnosticRegistry = mustBuildDiagnosticRegistry(diagnosticDefinitions)

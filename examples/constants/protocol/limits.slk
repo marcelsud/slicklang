@@ -1,0 +1,15 @@
+// The protocol's fixed limits, declared once at namespace scope.
+
+/// How a source file is checked.
+union Mode {
+    /// Every rule is enforced.
+    Strict
+    /// Recoverable problems are reported and skipped.
+    Lenient
+}
+
+// A private constant is visible only inside this namespace.
+const depthBudget: int = 8
+
+/// The deepest nesting the parser accepts.
+const MaximumDepth: int = depthBudget * 32

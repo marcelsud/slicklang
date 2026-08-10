@@ -116,6 +116,9 @@ func (p *program) describeSymbol(name string) (SymbolDescription, bool) {
 	if union := p.unions[name]; union != nil {
 		return p.describeUnion(union), true
 	}
+	if constant := p.constants[name]; constant != nil {
+		return p.describeConstant(constant), true
+	}
 	if member, ok := p.describeMember(name); ok {
 		return member, true
 	}
@@ -223,6 +226,17 @@ func (p *program) describeUnion(union *unionDecl) SymbolDescription {
 			Documentation: variant.documentation,
 		})
 	}
+	return description
+}
+
+// describeConstant reports a constant as its declared type, the same shape a
+// field description uses. The value itself stays out of the description: it is
+// a compile-time detail every backend inlines, not part of the public surface.
+func (p *program) describeConstant(constant *constDecl) SymbolDescription {
+	description := emptySymbol(constant.qualified, "constant", visibility(constant.name))
+	description.Documentation = constant.documentation
+	description.Type = p.canonicalType(constant.namespace, constant.aliases, constant.typ)
+	description.Source = describeSource(constant.pos)
 	return description
 }
 
@@ -340,6 +354,11 @@ func (p *program) namespaceExists(namespace string) bool {
 			return true
 		}
 	}
+	for name := range p.constants {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
 	return false
 }
 
@@ -379,6 +398,9 @@ func (p *program) describeChildren(namespace string) []ChildDescription {
 	}
 	for name, union := range p.unions {
 		add(name, "union", union.name, union.documentation)
+	}
+	for name, constant := range p.constants {
+		add(name, "constant", constant.name, constant.documentation)
 	}
 	names := sortedKeys(children)
 	descriptions := make([]ChildDescription, 0, len(names))

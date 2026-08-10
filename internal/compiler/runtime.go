@@ -778,6 +778,11 @@ func (p *program) evalName(node *nameExpression, frame *runtimeFrame) (runtimeVa
 		if union, variant, named := p.resolveVariant(frame.function.namespace, frame.function.aliases, node.name); named && variant != nil {
 			return p.runtimeVariantValue(union, variant, nil), nil
 		}
+		if decl := p.constantFor(frame.function.namespace, frame.function.aliases, node.name); decl != nil {
+			if constant, evaluated := p.constantRuntimeValue(decl); evaluated {
+				return constant, nil
+			}
+		}
 		return runtimeValue{}, runtimeError(node.pos, "unknown value %s", node.name)
 	}
 	for _, fieldName := range parts[1:] {

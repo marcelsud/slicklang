@@ -144,6 +144,7 @@ type program struct {
 	interfaces             map[string]*interfaceDecl
 	unions                 map[string]*unionDecl
 	functions              map[string]*functionDecl
+	constants              map[string]*constDecl
 	namespaceDocumentation map[string]*string
 	methodImpls            []*functionDecl
 	diags                  []Diagnostic
@@ -231,6 +232,7 @@ func compile(sources []Source) (*program, []Diagnostic) {
 		interfaces:             make(map[string]*interfaceDecl),
 		unions:                 make(map[string]*unionDecl),
 		functions:              make(map[string]*functionDecl),
+		constants:              make(map[string]*constDecl),
 		namespaceDocumentation: make(map[string]*string),
 	}
 	registerStandardLibrary(prog)
@@ -286,11 +288,13 @@ func parseSourceTokens(prog *program, source Source, tokens []token) {
 			p.parseUnion()
 		case p.acceptDocumented("function"):
 			p.parseFunction()
+		case p.acceptDocumented("const"):
+			p.parseConst()
 		case p.accept("use"):
 			p.parseUse()
 		default:
 			tok := p.current()
-			p.error(tok.pos, "expected 'use', 'class', 'interface', 'union', or 'function', found %q", tok.text)
+			p.error(tok.pos, "expected 'use', 'const', 'class', 'interface', 'union', or 'function', found %q", tok.text)
 			p.advance()
 		}
 	}
@@ -960,6 +964,7 @@ func readQualified(tokens []token, start int) (qualifiedRef, int, bool) {
 func (p *program) check() {
 	p.parseBodies()
 	p.checkAliases()
+	p.checkConstants()
 	p.checkDeclaredTypes()
 	p.checkVisibility()
 	p.resolveThrowSets()
@@ -978,7 +983,8 @@ func (p *program) checkAliases() {
 		iface := p.interfaces[alias.target]
 		union := p.unions[alias.target]
 		function := p.functions[alias.target]
-		if class == nil && iface == nil && union == nil && function == nil {
+		constant := p.constants[alias.target]
+		if class == nil && iface == nil && union == nil && function == nil && constant == nil {
 			p.add(alias.pos, diagnosticCodeAlias, "alias target %s does not exist", alias.target)
 		} else if class != nil {
 			p.requireAccess(alias.pos, alias.namespace, class.namespace, class.name, "class")
@@ -986,6 +992,8 @@ func (p *program) checkAliases() {
 			p.requireAccess(alias.pos, alias.namespace, iface.namespace, iface.name, "interface")
 		} else if union != nil {
 			p.requireAccess(alias.pos, alias.namespace, union.namespace, union.name, "union")
+		} else if constant != nil {
+			p.requireAccess(alias.pos, alias.namespace, constant.namespace, constant.name, "constant")
 		} else {
 			p.requireAccess(alias.pos, alias.namespace, function.namespace, function.name, "function")
 		}
@@ -994,7 +1002,8 @@ func (p *program) checkAliases() {
 		_, localInterfaceExists := p.interfaces[local]
 		_, localUnionExists := p.unions[local]
 		_, localFunctionExists := p.functions[local]
-		if alias.target != local && (localClassExists || localInterfaceExists || localUnionExists || localFunctionExists) {
+		_, localConstantExists := p.constants[local]
+		if alias.target != local && (localClassExists || localInterfaceExists || localUnionExists || localFunctionExists || localConstantExists) {
 			p.add(alias.pos, diagnosticCodeAlias, "alias %s conflicts with a declaration in %s", alias.name, alias.namespace)
 		}
 	}

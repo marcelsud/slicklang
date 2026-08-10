@@ -22,7 +22,7 @@ Native resource classes set `nativeResource` to the Go pointer type of their run
 
 ## Adding a top-level declaration form
 
-`internal/compiler/unions.go` is the worked example (`union`): one feature file holding parsing, checking, interpretation, and Go emission, wired into the shared dispatchers. Miss one and a single backend disagrees at runtime instead of failing the build:
+`internal/compiler/unions.go` and `internal/compiler/constants.go` are the worked examples (`union`, `const`): one feature file holding parsing, checking, interpretation, and Go emission, wired into the shared dispatchers. Miss one and a single backend disagrees at runtime instead of failing the build:
 
 1. the `program` map, initialized in both `compile` (`compiler.go`) and `parseFormatSource` (`format.go`);
 2. the `parseSourceTokens` dispatch and the "expected ..." error listing the forms;
@@ -38,6 +38,7 @@ Native resource classes set `nativeResource` to the Go pointer type of their run
 - Arrays expose `.Get(index)` (returns an optional) and `.Length()`; there is no index syntax.
 - `?` requires the enclosing function to return `Result`, including inside a `using` initializer.
 - Union variants are always qualified by their union or its exact alias, in construction and in patterns; payload bindings are positional, and payload fields are readable only through a match arm.
+- `text/scanner` skips newlines, so a declaration whose tail is an expression has no terminator token. `const` bounds its initializer by line: the value must sit on the `const` line, and a formatter or parser change there must keep that rule.
 - Example projects are pinned by observable output in `exampleOutputs` (`internal/compiler/build_test.go`) and must be a `slick fmt` fixed point.
 
 ## Maintaining this file

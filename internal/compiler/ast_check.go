@@ -261,8 +261,13 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		}
 		declared, exists := scope.locals[node.name]
 		if !exists {
-			p.add(node.pos, diagnosticCodeUnknownValue, "cannot assign unknown value %s", node.name)
-			return expressionInfo{typ: "null", effects: make(effectSet)}
+			if p.constantFor(scope.function.namespace, scope.function.aliases, node.name) != nil {
+				p.add(node.pos, diagnosticCodeConstantAssignment, "constant %s is immutable and cannot be assigned", node.name)
+			} else {
+				p.add(node.pos, diagnosticCodeUnknownValue, "cannot assign unknown value %s", node.name)
+			}
+			info := p.checkASTExpression(node.value, scope)
+			return expressionInfo{typ: "null", effects: info.effects}
 		}
 		node.resolved = declared
 		info := p.checkASTExpressionExpecting(node.value, scope, declared)
@@ -477,6 +482,9 @@ func (p *program) checkNameExpression(node *nameExpression, scope *astScope) exp
 		if typ, exists := scope.lookup(node.name); exists {
 			return expressionInfo{typ: typ, effects: make(effectSet)}
 		}
+		if info, constant := p.checkConstantReference(node, scope); constant {
+			return info
+		}
 		p.add(node.pos, diagnosticCodeUnknownValue, "unknown value %s", node.name)
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	}
@@ -509,6 +517,9 @@ func (p *program) checkNameExpression(node *nameExpression, scope *astScope) exp
 	if _, shadowed := scope.lookup(parts[0]); !shadowed {
 		if union, variant, named := p.resolveVariant(scope.function.namespace, scope.function.aliases, node.name); named {
 			return p.checkVariantValue(node, union, variant, scope)
+		}
+		if info, constant := p.checkConstantReference(node, scope); constant {
+			return info
 		}
 	}
 	p.add(node.pos, diagnosticCodeUnknownValue, "unknown value %s", node.name)
@@ -846,7 +857,13 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 	}
 	if target == nil {
 		if !reported {
-			p.add(node.pos, diagnosticCodeUnknownCallable, "unknown function or method %s", name.name)
+			// A constant names a value, so a dotted call through one is a
+			// receiver mistake rather than a missing declaration.
+			if len(parts) > 1 && p.constantFor(scope.function.namespace, scope.function.aliases, parts[0]) != nil {
+				p.add(node.pos, diagnosticCodeUnknownCallable, "constant %s is a value and cannot be a method receiver", parts[0])
+			} else {
+				p.add(node.pos, diagnosticCodeUnknownCallable, "unknown function or method %s", name.name)
+			}
 		}
 		// Avoid cascade diagnostics for type arguments on unknown callables.
 		for _, argument := range node.args {

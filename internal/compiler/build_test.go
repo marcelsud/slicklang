@@ -19,6 +19,7 @@ var exampleOutputs = map[string]string{
 	"bytes":              "Hello, 世界; 13; 72; bytes[13]",
 	"range-loop":         "0:Ada;2:Grace;",
 	"checked-errors":     "Ada: woof",
+	"constants":          "SLK001; 512; 3; true; -256; Strict",
 	"maps":               "37; 2; Ada=37;Linus=55;; map {Ada: 37, Grace: 36}",
 	"optional":           "missing user",
 	"optional-throws":    "Ada; Grace has no nickname; missing; Countess",
