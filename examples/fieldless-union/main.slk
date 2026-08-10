@@ -1,0 +1,31 @@
+/// HttpMethod is the closed set of methods this example accepts.
+union HttpMethod {
+    Get
+    Post
+    Put
+    Patch
+    Delete
+}
+
+/// WireName converts one typed method at the protocol boundary.
+function WireName(Method: HttpMethod) -> string {
+    match Method {
+        HttpMethod.Get => "GET"
+        HttpMethod.Post => "POST"
+        HttpMethod.Put => "PUT"
+        HttpMethod.Patch => "PATCH"
+        HttpMethod.Delete => "DELETE"
+    }
+}
+
+/// RequestLine builds one HTTP request line from typed application data.
+function RequestLine(Method: HttpMethod, Path: string) -> string {
+    let Name = WireName(Method)
+    `${Name} ${Path}`
+}
+
+function main() -> string {
+    let List = RequestLine(HttpMethod.Get, "/todos")
+    let Remove = RequestLine(HttpMethod.Delete, "/todos/42")
+    `${List}; ${Remove}`
+}
