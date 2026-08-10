@@ -196,12 +196,12 @@ func (p *program) instantiateGenerics() {
 		if _, exists := created[request.name]; exists {
 			continue
 		}
+		created[request.name] = struct{}{}
 		if instantiationDepth(request.name) > maxInstantiationDepth {
 			p.add(request.pos, diagnosticCodeGenericExpansion,
 				"%s expands without limit; a generic declaration may contain itself only at the same type arguments", displayName(request.name))
 			continue
 		}
-		created[request.name] = struct{}{}
 		pending = append(pending, p.instantiate(request)...)
 	}
 }
