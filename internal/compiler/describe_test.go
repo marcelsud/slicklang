@@ -44,7 +44,7 @@ func TestDescribeStandardLibraryFromRegistry(t *testing.T) {
 	if function.Symbol.Kind != "function" || !function.Symbol.Native {
 		t.Fatalf("describe std.env.Set = %+v", function.Symbol)
 	}
-	if got, want := function.Symbol.Parameters, []compiler.ParameterDescription{{Name: "Name", Type: "string"}, {Name: "Value", Type: "string"}}; !reflect.DeepEqual(got, want) {
+	if got, want := function.Symbol.Parameters, []compiler.ParameterDescription{{Name: "Name", Type: "string", Annotations: []compiler.AnnotationDescription{}}, {Name: "Value", Type: "string", Annotations: []compiler.AnnotationDescription{}}}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("std.env.Set parameters = %+v, want %+v", got, want)
 	}
 	if function.Symbol.ReturnType != "Result<null,std.env.Failure>" || len(function.Symbol.Throws) != 0 {

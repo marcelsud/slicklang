@@ -243,6 +243,7 @@ func writeHumanDescription(output io.Writer, description compiler.SymbolDescript
 	fmt.Fprintf(output, "Kind: %s\n", description.Kind)
 	fmt.Fprintf(output, "Visibility: %s\n", description.Visibility)
 	writeDocumentation(output, description.Documentation)
+	writeAnnotations(output, description.Annotations)
 
 	if description.Kind == "generic type" || len(description.TypeParameters) > 0 {
 		fmt.Fprintf(output, "Type parameters: %s\n", strings.Join(description.TypeParameters, ", "))
@@ -252,6 +253,9 @@ func writeHumanDescription(output io.Writer, description compiler.SymbolDescript
 		fmt.Fprintf(output, "Returns: %s\n", description.ReturnType)
 		writeThrows(output, description.Throws)
 		fmt.Fprintf(output, "Native: %t\n", description.Native)
+	}
+	if description.Kind == "annotation" {
+		writeParameters(output, description.Parameters)
 	}
 	if description.Kind == "method" {
 		writeParameters(output, description.Parameters)
@@ -316,7 +320,7 @@ func writeParameters(output io.Writer, parameters []compiler.ParameterDescriptio
 		fmt.Fprintln(output, "  none")
 	}
 	for _, parameter := range parameters {
-		fmt.Fprintf(output, "  %s: %s\n", parameter.Name, parameter.Type)
+		fmt.Fprintf(output, "  %s: %s%s\n", parameter.Name, parameter.Type, annotationSummary(parameter.Annotations))
 	}
 }
 
@@ -353,7 +357,7 @@ func writeMethods(output io.Writer, label string, methods []compiler.MethodDescr
 		if len(method.Throws) > 0 {
 			throws = " throws " + strings.Join(method.Throws, ", ")
 		}
-		fmt.Fprintf(output, "  %s %s(%s) -> %s%s%s%s\n",
+		fmt.Fprintf(output, "  %s %s(%s) -> %s%s%s%s%s\n",
 			method.Visibility,
 			method.CanonicalName,
 			strings.Join(parameters, ", "),
@@ -361,9 +365,42 @@ func writeMethods(output io.Writer, label string, methods []compiler.MethodDescr
 			throws,
 			sourceSuffix(method.Source),
 			documentationSummary(method.Documentation),
+			annotationSummary(method.Annotations),
 		)
 	}
 	writeElisionMarker(output, omitted, budget)
+}
+
+func writeAnnotations(output io.Writer, annotations []compiler.AnnotationDescription) {
+	if len(annotations) == 0 {
+		return
+	}
+	fmt.Fprintln(output, "Annotations:")
+	for _, annotation := range annotations {
+		authored := "@" + annotation.Name
+		if len(annotation.Arguments) > 0 {
+			authored += "(" + strings.Join(annotation.Arguments, ", ") + ")"
+		}
+		resolved := ""
+		if annotation.ResolvedName != "" {
+			resolved = " => @" + annotation.ResolvedName
+			if len(annotation.ResolvedArguments) > 0 {
+				resolved += "(" + strings.Join(annotation.ResolvedArguments, ", ") + ")"
+			}
+		}
+		fmt.Fprintf(output, "  %s%s\n", authored, resolved)
+	}
+}
+
+func annotationSummary(annotations []compiler.AnnotationDescription) string {
+	if len(annotations) == 0 {
+		return ""
+	}
+	names := make([]string, len(annotations))
+	for index, annotation := range annotations {
+		names[index] = "@" + annotation.Name
+	}
+	return " [" + strings.Join(names, ", ") + "]"
 }
 
 func writeNames(output io.Writer, label string, names []string, omitted int, budget *describeBudget) {

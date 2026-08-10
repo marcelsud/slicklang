@@ -789,7 +789,7 @@ function main() -> int {
     Value(2)
 }
 `,
-			code:    "SLK409",
+			code:    "SLK412",
 			message: "Value is int and cannot be called",
 		},
 		{
@@ -803,7 +803,7 @@ function main() -> int {
     Amount()(2)
 }
 `,
-			code:    "SLK409",
+			code:    "SLK412",
 			message: "cannot be called",
 		},
 		{
@@ -944,7 +944,7 @@ function main() -> int {
     Operation()
 }
 `,
-			code:    "SLK411",
+			code:    "SLK414",
 			message: "captured binding Total is read-only",
 		},
 		{
@@ -963,7 +963,7 @@ function main() -> int {
     Operation()
 }
 `,
-			code:    "SLK411",
+			code:    "SLK414",
 			message: "cannot capture pending binding Pending",
 		},
 		{
@@ -986,7 +986,7 @@ function main() -> int {
     }
 }
 `,
-			code:    "SLK411",
+			code:    "SLK414",
 			message: "cannot capture using binding Resource",
 		},
 		{
@@ -999,7 +999,7 @@ function main() -> int {
     Repeat(1)
 }
 `,
-			code:    "SLK411",
+			code:    "SLK414",
 			message: "Repeat is not in scope inside its own initializer",
 		},
 		{
@@ -1019,7 +1019,7 @@ function main() -> string {
     "done"
 }
 `,
-			code:    "SLK410",
+			code:    "SLK413",
 			message: "Held.Describe is a method and not a value",
 		},
 		{

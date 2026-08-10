@@ -56,7 +56,7 @@ func TestDescribeDiagnosticJSONOutputContract(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q", status, stderr.String())
 	}
 	want := `{
-  "schema_version": 5,
+  "schema_version": 6,
   "kind": "diagnostic",
   "code": "SLK370",
   "severity": "error",
@@ -113,7 +113,7 @@ func TestDescribeUnknownDiagnosticContracts(t *testing.T) {
 			t.Fatalf("status=%d stderr=%q", status, stderr.String())
 		}
 		want := `{
-  "schema_version": 5,
+  "schema_version": 6,
   "error": {
     "code": "unknown_diagnostic",
     "message": "unknown diagnostic \"SLK999\"",

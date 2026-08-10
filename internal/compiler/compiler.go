@@ -53,13 +53,15 @@ type typeRef struct {
 }
 
 type paramDecl struct {
-	name string
-	typ  typeRef
+	name        string
+	typ         typeRef
+	annotations []*annotationUse
 }
 
 type fieldDecl struct {
 	name          string
 	typ           typeRef
+	annotations   []*annotationUse
 	documentation *string
 	pos           position
 }
@@ -89,6 +91,7 @@ type methodSignature struct {
 	result         typeRef
 	throws         []typeRef
 	throwSet       map[string]struct{}
+	annotations    []*annotationUse
 	documentation  *string
 	pos            position
 }
@@ -109,6 +112,7 @@ type classDecl struct {
 	methods         map[string]*methodSignature
 	effective       map[string]*methodSignature
 	implementations map[string]*functionDecl
+	annotations     []*annotationUse
 	documentation   *string
 	pos             position
 }
@@ -120,6 +124,7 @@ type interfaceDecl struct {
 	typeParams    []string
 	instanceOf    string
 	methods       map[string]*methodSignature
+	annotations   []*annotationUse
 	documentation *string
 	pos           position
 }
@@ -141,6 +146,7 @@ type functionDecl struct {
 	inline            bool
 	instanceOf        string
 	native            nativeFunction
+	annotations       []*annotationUse
 	documentation     *string
 	pos               position
 }
@@ -156,6 +162,7 @@ type program struct {
 	genericInterfaces      map[string]*interfaceDecl
 	genericFunctions       map[string]*functionDecl
 	genericMethodImpls     []*functionDecl
+	annotations            map[string]*annotationDecl
 	namespaceDocumentation map[string]*string
 	methodImpls            []*functionDecl
 	diags                  []Diagnostic
@@ -171,8 +178,8 @@ type program struct {
 	usesAsync          bool
 }
 
-func newProgram() *program {
-	return &program{
+func newProgram(terminals ...terminalAnnotationDecl) *program {
+	program := &program{
 		classes:                make(map[string]*classDecl),
 		interfaces:             make(map[string]*interfaceDecl),
 		unions:                 make(map[string]*unionDecl),
@@ -182,8 +189,13 @@ func newProgram() *program {
 		genericInterfaces:      make(map[string]*interfaceDecl),
 		genericFunctions:       make(map[string]*functionDecl),
 		namespaceDocumentation: make(map[string]*string),
+		annotations:            make(map[string]*annotationDecl),
 		emitted:                make(map[Diagnostic]struct{}),
 	}
+	for index := range terminals {
+		program.registerTerminalAnnotation(&terminals[index])
+	}
+	return program
 }
 
 func CheckPath(path string) ([]Diagnostic, error) {
@@ -257,7 +269,11 @@ func Check(sources []Source) []Diagnostic {
 }
 
 func compile(sources []Source) (*program, []Diagnostic) {
-	prog := newProgram()
+	return compileWithTerminals(sources, nil)
+}
+
+func compileWithTerminals(sources []Source, terminals []terminalAnnotationDecl) (*program, []Diagnostic) {
+	prog := newProgram(terminals...)
 	registerStandardLibrary(prog)
 	for _, source := range sources {
 		if !validNamespace(source.Namespace) {
@@ -303,6 +319,10 @@ func parseSourceTokens(prog *program, source Source, tokens []token) {
 	}
 	for !p.atEnd() {
 		switch {
+		case p.current().text == "@":
+			p.parseAnnotatedTopLevel()
+		case p.acceptDocumented("annotation"):
+			p.parseAnnotationDeclaration()
 		case p.acceptDocumented("class"):
 			p.parseClass()
 		case p.acceptDocumented("interface"):
@@ -317,7 +337,7 @@ func parseSourceTokens(prog *program, source Source, tokens []token) {
 			p.parseUse()
 		default:
 			tok := p.current()
-			p.error(tok.pos, "expected 'use', 'const', 'class', 'interface', 'union', or 'function', found %q", tok.text)
+			p.error(tok.pos, "expected 'use', 'const', 'annotation', 'class', 'interface', 'union', or 'function', found %q", tok.text)
 			p.advance()
 		}
 	}
@@ -418,6 +438,7 @@ type parser struct {
 	aliases              map[string]aliasDecl
 	docByLine            map[int]*docBlock
 	pendingDocumentation *string
+	pendingAnnotations   []*annotationUse
 	index                int
 }
 
@@ -547,6 +568,7 @@ func (p *parser) parseClass() {
 		methods:         make(map[string]*methodSignature),
 		effective:       make(map[string]*methodSignature),
 		implementations: make(map[string]*functionDecl),
+		annotations:     p.consumeAnnotations(),
 		documentation:   p.consumeDocumentation(),
 		pos:             name.pos,
 	}
@@ -618,6 +640,9 @@ func (p *parser) parseClass() {
 
 	for !p.atEnd() && p.current().text != "}" {
 		p.pendingDocumentation = p.takeDocumentation(p.current().pos.line)
+		if p.current().text == "@" {
+			p.pendingAnnotations = p.parseAnnotationUses()
+		}
 		if p.accept("function") {
 			p.parseClassMethod(class, registered)
 		} else {
@@ -646,6 +671,7 @@ func (p *parser) parseClassMethod(class *classDecl, registered bool) {
 		params:         params,
 		result:         result,
 		throws:         throws,
+		annotations:    p.consumeAnnotations(),
 		documentation:  p.consumeDocumentation(),
 		pos:            name.pos,
 	}
@@ -669,6 +695,7 @@ func (p *parser) parseClassMethod(class *classDecl, registered bool) {
 			receiver:          typeRef{name: class.qualified, pos: name.pos},
 			receiverCanonical: class.qualified,
 			inline:            true,
+			annotations:       signature.annotations,
 			documentation:     signature.documentation,
 			pos:               name.pos,
 		}
@@ -695,11 +722,12 @@ func (p *parser) parseClassField(class *classDecl) {
 		return
 	}
 	documentation := p.consumeDocumentation()
+	annotations := p.consumeAnnotations()
 	if previous, exists := class.fields[name.text]; exists {
 		p.reportDocumentationConflict(name.pos, class.qualified+"."+name.text, previous.documentation, documentation)
 		p.error(name.pos, "duplicate field %s.%s; first declared at %s:%d:%d", class.qualified, name.text, previous.pos.file, previous.pos.line, previous.pos.column)
 	} else {
-		class.fields[name.text] = fieldDecl{name: name.text, typ: typ, documentation: documentation, pos: name.pos}
+		class.fields[name.text] = fieldDecl{name: name.text, typ: typ, annotations: annotations, documentation: documentation, pos: name.pos}
 	}
 	p.accept(",")
 	p.accept(";")
@@ -727,6 +755,7 @@ func (p *parser) parseInterface() {
 		namespace:     p.source.Namespace,
 		typeParams:    typeParams,
 		methods:       make(map[string]*methodSignature),
+		annotations:   p.consumeAnnotations(),
 		documentation: p.consumeDocumentation(),
 		pos:           name.pos,
 	}
@@ -742,6 +771,9 @@ func (p *parser) parseInterface() {
 	}
 	for !p.atEnd() && p.current().text != "}" {
 		p.pendingDocumentation = p.takeDocumentation(p.current().pos.line)
+		if p.current().text == "@" {
+			p.pendingAnnotations = p.parseAnnotationUses()
+		}
 		if !p.accept("function") {
 			p.error(p.current().pos, "interfaces may contain only method declarations")
 			p.advance()
@@ -766,6 +798,7 @@ func (p *parser) parseInterface() {
 			params:         params,
 			result:         result,
 			throws:         throws,
+			annotations:    p.consumeAnnotations(),
 			documentation:  p.consumeDocumentation(),
 			pos:            methodName.pos,
 		}
@@ -848,6 +881,7 @@ func (p *parser) parseFunction() {
 			result:        result,
 			throws:        throws,
 			body:          body,
+			annotations:   p.consumeAnnotations(),
 			documentation: p.consumeDocumentation(),
 			pos:           ref.pos,
 		}
@@ -874,6 +908,7 @@ func (p *parser) parseFunction() {
 		result:        result,
 		throws:        throws,
 		body:          body,
+		annotations:   p.consumeAnnotations(),
 		receiver:      typeRef{name: receiverName, pos: ref.pos},
 		documentation: p.consumeDocumentation(),
 		pos:           ref.pos,
@@ -921,6 +956,7 @@ func (p *parser) parseParams() ([]paramDecl, bool) {
 	}
 	var params []paramDecl
 	for !p.atEnd() && p.current().text != ")" {
+		annotations := p.parseAnnotationUses()
 		name, ok := p.expectIdent("parameter name")
 		if !ok {
 			return nil, false
@@ -933,7 +969,7 @@ func (p *parser) parseParams() ([]paramDecl, bool) {
 		if !ok {
 			return nil, false
 		}
-		params = append(params, paramDecl{name: name.text, typ: typ})
+		params = append(params, paramDecl{name: name.text, typ: typ, annotations: annotations})
 		if !p.accept(",") {
 			break
 		}
@@ -1278,6 +1314,7 @@ func (p *program) check() {
 	p.checkVisibility()
 	p.resolveThrowSets()
 	p.linkMethods()
+	p.checkAnnotations()
 	for _, name := range sortedKeys(p.functions) {
 		function := p.functions[name]
 		p.checkingInstance(function.instanceOf != "", func() { p.checkFunction(function) })
@@ -1294,7 +1331,8 @@ func (p *program) checkAliases() {
 		union := p.unions[alias.target]
 		function := p.functionDeclaration(alias.target)
 		constant := p.constants[alias.target]
-		if class == nil && iface == nil && union == nil && function == nil && constant == nil {
+		annotation := p.annotations[alias.target]
+		if class == nil && iface == nil && union == nil && function == nil && constant == nil && annotation == nil {
 			p.add(alias.pos, diagnosticCodeAlias, "alias target %s does not exist", alias.target)
 		} else if class != nil {
 			p.requireAccess(alias.pos, alias.namespace, class.namespace, class.name, "class")
@@ -1304,6 +1342,8 @@ func (p *program) checkAliases() {
 			p.requireAccess(alias.pos, alias.namespace, union.namespace, union.name, "union")
 		} else if constant != nil {
 			p.requireAccess(alias.pos, alias.namespace, constant.namespace, constant.name, "constant")
+		} else if annotation != nil {
+			p.requireAccess(alias.pos, alias.namespace, annotation.namespace, annotation.name, "annotation")
 		} else {
 			p.requireAccess(alias.pos, alias.namespace, function.namespace, function.name, "function")
 		}
@@ -1313,7 +1353,8 @@ func (p *program) checkAliases() {
 		localUnionExists := p.unions[local] != nil
 		localFunctionExists := p.functionDeclaration(local) != nil
 		localConstantExists := p.constants[local] != nil
-		if alias.target != local && (localClassExists || localInterfaceExists || localUnionExists || localFunctionExists || localConstantExists) {
+		localAnnotationExists := p.annotations[local] != nil
+		if alias.target != local && (localClassExists || localInterfaceExists || localUnionExists || localFunctionExists || localConstantExists || localAnnotationExists) {
 			p.add(alias.pos, diagnosticCodeAlias, "alias %s conflicts with a declaration in %s", alias.name, alias.namespace)
 		}
 	}

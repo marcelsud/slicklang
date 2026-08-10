@@ -31,7 +31,7 @@ type HighlightToken struct {
 }
 
 var highlightKeywords = map[string]struct{}{
-	"as": {}, "async": {}, "await": {}, "break": {}, "catch": {}, "const": {},
+	"annotation": {}, "as": {}, "async": {}, "await": {}, "break": {}, "catch": {}, "const": {},
 	"class": {}, "continue": {}, "else": {}, "extension": {}, "for": {},
 	"function": {}, "if": {}, "implements": {}, "in": {}, "interface": {},
 	"let": {}, "map": {}, "match": {}, "return": {}, "self": {},

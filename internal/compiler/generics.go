@@ -361,13 +361,14 @@ func (p *program) instantiateClass(request instantiation) []instantiation {
 		implementations: make(map[string]*functionDecl, len(generic.methods)),
 		documentation:   generic.documentation,
 		pos:             generic.pos,
+		annotations:     generic.annotations,
 	}
 	p.classes[request.name] = instance
 
 	var found []instantiation
 	for name, field := range generic.fields {
 		typ := p.substitutedRef(generic.namespace, generic.aliases, substitutions, field.typ)
-		instance.fields[name] = fieldDecl{name: field.name, typ: typ, documentation: field.documentation, pos: field.pos}
+		instance.fields[name] = fieldDecl{name: field.name, typ: typ, annotations: field.annotations, documentation: field.documentation, pos: field.pos}
 		p.collectFromCanonicalType(field.typ.pos, typ.name, &found)
 	}
 	for name, method := range generic.methods {
@@ -399,6 +400,7 @@ func (p *program) instantiateInterface(request instantiation) []instantiation {
 		instanceOf:    generic.qualified,
 		methods:       make(map[string]*methodSignature, len(generic.methods)),
 		documentation: generic.documentation,
+		annotations:   generic.annotations,
 		pos:           generic.pos,
 	}
 	p.interfaces[request.name] = instance
@@ -436,6 +438,7 @@ func (p *program) substitutedFunction(generic *functionDecl, substitutions map[s
 		instanceOf:    generic.qualified,
 		documentation: generic.documentation,
 		pos:           generic.pos,
+		annotations:   generic.annotations,
 	}
 	clone.ast = p.parseBody(generic.body, generic.pos)
 	substituteASTTypes(clone.ast, substitutions)
@@ -473,6 +476,7 @@ func (p *program) substitutedSignature(method *methodSignature, substitutions ma
 		params:         p.substitutedParams(method.namespace, method.aliases, substitutions, method.params, found),
 		result:         p.substitutedRef(method.namespace, method.aliases, substitutions, method.result),
 		throws:         p.substitutedRefs(method.namespace, method.aliases, substitutions, method.throws, found),
+		annotations:    method.annotations,
 		documentation:  method.documentation,
 		pos:            method.pos,
 	}
@@ -481,7 +485,7 @@ func (p *program) substitutedSignature(method *methodSignature, substitutions ma
 func (p *program) substitutedParams(namespace string, aliases map[string]aliasDecl, substitutions map[string]string, params []paramDecl, found *[]instantiation) []paramDecl {
 	substituted := make([]paramDecl, len(params))
 	for index, param := range params {
-		substituted[index] = paramDecl{name: param.name, typ: p.substitutedRef(namespace, aliases, substitutions, param.typ)}
+		substituted[index] = paramDecl{name: param.name, typ: p.substitutedRef(namespace, aliases, substitutions, param.typ), annotations: param.annotations}
 		p.collectFromCanonicalType(param.typ.pos, substituted[index].typ.name, found)
 	}
 	return substituted

@@ -73,33 +73,40 @@ type formatToken struct {
 }
 
 type sourceFormatter struct {
-	source           *formatSource
-	tokens           []formatToken
-	breakBefore      map[sourcePoint]struct{}
-	unaryAt          map[sourcePoint]struct{}
-	operatorAt       map[sourcePoint]struct{}
-	out              strings.Builder
-	indent           int
-	braceDepth       int
-	delimiters       []string
-	lineStart        bool
-	pendingSpace     bool
-	trailingNewlines int
-	braceComment     bool
-	previous         *formatToken
-	previousTop      string
-	topComment       bool
-	forHeader        bool
+	source                *formatSource
+	tokens                []formatToken
+	breakBefore           map[sourcePoint]struct{}
+	unaryAt               map[sourcePoint]struct{}
+	operatorAt            map[sourcePoint]struct{}
+	annotatedTargets      map[sourcePoint]struct{}
+	annotationStarts      map[sourcePoint]string
+	aliasTargets          map[sourcePoint]struct{}
+	out                   strings.Builder
+	indent                int
+	braceDepth            int
+	delimiters            []string
+	lineStart             bool
+	pendingSpace          bool
+	trailingNewlines      int
+	braceComment          bool
+	previous              *formatToken
+	previousTop           string
+	topComment            bool
+	forHeader             bool
+	annotationAliasIndent bool
 }
 
 func newSourceFormatter(source *formatSource) *sourceFormatter {
 	formatter := &sourceFormatter{
-		source:      source,
-		tokens:      canonicalFormatTokens(mergeFormatTokens(source.tokens)),
-		breakBefore: make(map[sourcePoint]struct{}),
-		unaryAt:     make(map[sourcePoint]struct{}),
-		operatorAt:  make(map[sourcePoint]struct{}),
-		lineStart:   true,
+		source:           source,
+		tokens:           canonicalFormatTokens(mergeFormatTokens(source.tokens)),
+		breakBefore:      make(map[sourcePoint]struct{}),
+		unaryAt:          make(map[sourcePoint]struct{}),
+		annotatedTargets: make(map[sourcePoint]struct{}),
+		annotationStarts: make(map[sourcePoint]string),
+		aliasTargets:     make(map[sourcePoint]struct{}),
+		operatorAt:       make(map[sourcePoint]struct{}),
+		lineStart:        true,
 	}
 	formatter.collectBreaks()
 	for index := range formatter.tokens {
@@ -209,10 +216,63 @@ func (f *sourceFormatter) collectBreaks() {
 			f.collectBlock(implementation.ast)
 		}
 	}
+	for _, target := range f.source.prog.annotationTargets() {
+		if len(target.annotations) == 0 {
+			continue
+		}
+		if target.kind != annotationTargetParameter {
+			for _, annotation := range target.annotations {
+				f.addBreak(annotation.pos)
+			}
+			first := target.annotations[0].pos
+			kind := "class"
+			if target.kind == annotationTargetFunction || target.kind == annotationTargetMethod {
+				kind = "function"
+			}
+			f.annotationStarts[sourcePoint{line: first.line, column: first.column}] = kind
+		}
+		point, found := f.annotationTargetPoint(target)
+		if found {
+			f.breakBefore[point] = struct{}{}
+			f.annotatedTargets[point] = struct{}{}
+		}
+	}
+	for _, annotation := range f.source.prog.annotations {
+		if annotation.terminal != nil || annotation.target == nil {
+			continue
+		}
+		f.addBreak(annotation.target.pos)
+		f.aliasTargets[sourcePoint{line: annotation.target.pos.line, column: annotation.target.pos.column}] = struct{}{}
+	}
 }
 
 func (f *sourceFormatter) addBreak(pos position) {
 	f.breakBefore[sourcePoint{line: pos.line, column: pos.column}] = struct{}{}
+}
+
+func (f *sourceFormatter) annotationTargetPoint(target annotationTargetRef) (sourcePoint, bool) {
+	if target.kind == annotationTargetParameter {
+		return sourcePoint{}, false
+	}
+	for index, token := range f.tokens {
+		if token.pos.line != target.pos.line || token.pos.column != target.pos.column {
+			continue
+		}
+		if target.kind == annotationTargetField {
+			return sourcePoint{line: token.pos.line, column: token.pos.column}, true
+		}
+		for previous := index - 1; previous >= 0; previous-- {
+			if f.tokens[previous].kind == scanner.Comment {
+				continue
+			}
+			if f.tokens[previous].text == "class" || f.tokens[previous].text == "interface" || f.tokens[previous].text == "function" {
+				position := f.tokens[previous].pos
+				return sourcePoint{line: position.line, column: position.column}, true
+			}
+			break
+		}
+	}
+	return sourcePoint{}, false
 }
 
 func (f *sourceFormatter) collectBlock(block *blockNode) {
@@ -346,16 +406,39 @@ func (f *sourceFormatter) format() string {
 
 func (f *sourceFormatter) writeCode(token formatToken) {
 	point := sourcePoint{line: token.pos.line, column: token.pos.column}
+	if _, aliasTarget := f.aliasTargets[point]; aliasTarget && !f.lineStart {
+		f.newline()
+		f.indent++
+		f.annotationAliasIndent = true
+	}
+	if token.text == "@" && f.braceDepth == 0 && f.annotationAliasIndent {
+		if _, aliasTarget := f.aliasTargets[point]; !aliasTarget {
+			f.indent--
+			f.annotationAliasIndent = false
+			f.blankline()
+		}
+	}
 	if _, ok := f.breakBefore[point]; ok && !f.lineStart {
 		f.newline()
 	}
+	if kind, ok := f.annotationStarts[point]; ok && f.braceDepth == 0 {
+		f.startTopDeclaration(kind)
+	}
 	if f.braceDepth == 0 && isTopDeclaration(token.text) {
-		f.startTopDeclaration(token.text)
+		if f.annotationAliasIndent {
+			f.indent--
+			f.annotationAliasIndent = false
+		}
+		if _, annotated := f.annotatedTargets[point]; !annotated {
+			f.startTopDeclaration(token.text)
+		} else {
+			f.previousTop = token.text
+			f.topComment = false
+		}
 	}
 	if token.text == "function" && f.braceDepth > 0 && !f.lineStart {
 		f.newline()
 	}
-
 	switch token.text {
 	case "{":
 		f.writeOpeningBrace()
@@ -447,7 +530,7 @@ func (f *sourceFormatter) needsSpace(current formatToken) bool {
 		return false
 	}
 	switch previous {
-	case "(", "[", "<", ".":
+	case "(", "[", "<", ".", "@":
 		return false
 	}
 	return true
@@ -467,6 +550,11 @@ func isSuffixTarget(token formatToken) bool {
 
 func (f *sourceFormatter) writeComment(index int) {
 	token := f.tokens[index]
+	if f.braceDepth == 0 && f.annotationAliasIndent {
+		f.indent--
+		f.annotationAliasIndent = false
+		f.blankline()
+	}
 	inline := f.previous != nil && f.previous.pos.line == token.pos.line && !f.lineStart
 	if inline {
 		f.space()
@@ -532,7 +620,7 @@ func (f *sourceFormatter) startTopDeclaration(kind string) {
 
 func isTopDeclaration(text string) bool {
 	switch text {
-	case "use", "const", "class", "interface", "union", "function":
+	case "use", "const", "annotation", "class", "interface", "union", "function":
 		return true
 	default:
 		return false

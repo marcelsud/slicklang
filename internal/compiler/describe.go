@@ -7,9 +7,9 @@ import (
 	"strings"
 )
 
-// DescriptionSchemaVersion is 5 because callable types added the structured
-// Callable fields; a consumer pinned to 4 has no shape for them.
-const DescriptionSchemaVersion = 5
+// DescriptionSchemaVersion is 6 because annotations expose authored and
+// terminal-resolved metadata on declarations and parameters.
+const DescriptionSchemaVersion = 6
 
 var ErrUnknownSymbol = errors.New("unknown symbol")
 
@@ -23,6 +23,7 @@ type SymbolDescription struct {
 	Kind               string                   `json:"kind"`
 	Visibility         string                   `json:"visibility"`
 	Documentation      *string                  `json:"documentation"`
+	Annotations        []AnnotationDescription  `json:"annotations"`
 	Type               string                   `json:"type"`
 	TypeCallable       *CallableTypeDescription `json:"type_callable"`
 	TypeParameters     []string                 `json:"type_parameters"`
@@ -38,6 +39,12 @@ type SymbolDescription struct {
 	Children           []ChildDescription       `json:"children"`
 	Source             *SourceDescription       `json:"source"`
 }
+type AnnotationDescription struct {
+	Name              string   `json:"name"`
+	Arguments         []string `json:"arguments"`
+	ResolvedName      string   `json:"resolved_name"`
+	ResolvedArguments []string `json:"resolved_arguments"`
+}
 
 // CallableTypeDescription is the structure of a callable type, so a consumer
 // reads its parameter types, result, and checked effects directly instead of
@@ -49,15 +56,17 @@ type CallableTypeDescription struct {
 }
 
 type ParameterDescription struct {
-	Name     string                   `json:"name"`
-	Type     string                   `json:"type"`
-	Callable *CallableTypeDescription `json:"callable"`
+	Name        string                   `json:"name"`
+	Type        string                   `json:"type"`
+	Callable    *CallableTypeDescription `json:"callable"`
+	Annotations []AnnotationDescription  `json:"annotations"`
 }
 
 type FieldDescription struct {
 	Name          string                   `json:"name"`
 	Type          string                   `json:"type"`
 	Callable      *CallableTypeDescription `json:"callable"`
+	Annotations   []AnnotationDescription  `json:"annotations"`
 	Visibility    string                   `json:"visibility"`
 	Documentation *string                  `json:"documentation"`
 	Source        *SourceDescription       `json:"source"`
@@ -67,6 +76,7 @@ type MethodDescription struct {
 	CanonicalName  string                   `json:"canonical_name"`
 	Visibility     string                   `json:"visibility"`
 	Documentation  *string                  `json:"documentation"`
+	Annotations    []AnnotationDescription  `json:"annotations"`
 	Parameters     []ParameterDescription   `json:"parameters"`
 	ReturnType     string                   `json:"return_type"`
 	ReturnCallable *CallableTypeDescription `json:"return_callable"`
@@ -154,6 +164,9 @@ func (p *program) describeSymbol(name string) (SymbolDescription, bool) {
 	if constant := p.constants[name]; constant != nil {
 		return p.describeConstant(constant), true
 	}
+	if annotation := p.annotations[name]; annotation != nil {
+		return p.describeAnnotation(annotation), true
+	}
 	if member, ok := p.describeMember(name); ok {
 		return member, true
 	}
@@ -171,6 +184,7 @@ func emptySymbol(name, kind, visibility string) SymbolDescription {
 		CanonicalName:      name,
 		Kind:               kind,
 		Visibility:         visibility,
+		Annotations:        []AnnotationDescription{},
 		TypeParameters:     []string{},
 		Parameters:         []ParameterDescription{},
 		Throws:             []string{},
@@ -184,6 +198,7 @@ func emptySymbol(name, kind, visibility string) SymbolDescription {
 
 func (p *program) describeFunction(function *functionDecl) SymbolDescription {
 	description := emptySymbol(function.qualified, "function", visibility(function.name))
+	description.Annotations = p.describeAnnotations(function.annotations)
 	description.Documentation = function.documentation
 	description.TypeParameters = append(description.TypeParameters, function.typeParams...)
 	description.Parameters = p.describeParameters(function.namespace, function.aliases, function.params)
@@ -197,6 +212,7 @@ func (p *program) describeFunction(function *functionDecl) SymbolDescription {
 
 func (p *program) describeClass(class *classDecl) SymbolDescription {
 	description := emptySymbol(class.qualified, "class", visibility(class.name))
+	description.Annotations = p.describeAnnotations(class.annotations)
 	description.Documentation = class.documentation
 	description.TypeParameters = append(description.TypeParameters, class.typeParams...)
 	description.Source = describeSource(class.pos)
@@ -207,6 +223,7 @@ func (p *program) describeClass(class *classDecl) SymbolDescription {
 			Name:          field.name,
 			Type:          fieldType,
 			Callable:      describeCallable(fieldType),
+			Annotations:   p.describeAnnotations(field.annotations),
 			Visibility:    visibility(field.name),
 			Documentation: field.documentation,
 			Source:        describeSource(field.pos),
@@ -221,6 +238,7 @@ func (p *program) describeClass(class *classDecl) SymbolDescription {
 		description.ImplementedMethods = append(description.ImplementedMethods, MethodDescription{
 			CanonicalName:  class.qualified + "." + implementation.name,
 			Documentation:  implementation.documentation,
+			Annotations:    p.describeAnnotations(implementation.annotations),
 			Visibility:     visibility(implementation.name),
 			Parameters:     p.describeParameters(implementation.namespace, implementation.aliases, implementation.params),
 			ReturnType:     implementationResult,
@@ -246,6 +264,7 @@ func (p *program) describeClass(class *classDecl) SymbolDescription {
 
 func (p *program) describeInterface(iface *interfaceDecl) SymbolDescription {
 	description := emptySymbol(iface.qualified, "interface", visibility(iface.name))
+	description.Annotations = p.describeAnnotations(iface.annotations)
 	description.Documentation = iface.documentation
 	description.TypeParameters = append(description.TypeParameters, iface.typeParams...)
 	description.Source = describeSource(iface.pos)
@@ -306,6 +325,7 @@ func (p *program) describeVariant(name string, union *unionDecl, variant *unionV
 func (p *program) describeMethod(owner string, method *methodSignature) MethodDescription {
 	result := p.canonicalType(method.namespace, method.aliases, method.result)
 	return MethodDescription{
+		Annotations:    p.describeAnnotations(method.annotations),
 		CanonicalName:  owner + "." + method.name,
 		Documentation:  method.documentation,
 		Visibility:     visibility(method.name),
@@ -327,6 +347,7 @@ func (p *program) describeMember(name string) (SymbolDescription, bool) {
 		if field, ok := class.fields[member]; ok {
 			description := emptySymbol(name, "field", visibility(field.name))
 			description.Documentation = field.documentation
+			description.Annotations = p.describeAnnotations(field.annotations)
 			description.Type = p.canonicalType(class.namespace, class.aliases, field.typ)
 			description.TypeCallable = describeCallable(description.Type)
 			description.Source = describeSource(field.pos)
@@ -355,6 +376,7 @@ func (p *program) describeMember(name string) (SymbolDescription, bool) {
 func (p *program) describeFunctionMember(name string, function *functionDecl) SymbolDescription {
 	description := emptySymbol(name, "method", visibility(function.name))
 	description.Documentation = function.documentation
+	description.Annotations = p.describeAnnotations(function.annotations)
 	description.Parameters = p.describeParameters(function.namespace, function.aliases, function.params)
 	description.ReturnType = p.canonicalType(function.namespace, function.aliases, function.result)
 	description.ReturnCallable = describeCallable(description.ReturnType)
@@ -365,6 +387,7 @@ func (p *program) describeFunctionMember(name string, function *functionDecl) Sy
 
 func (p *program) describeMethodMember(name string, method *methodSignature) SymbolDescription {
 	description := emptySymbol(name, "method", visibility(method.name))
+	description.Annotations = p.describeAnnotations(method.annotations)
 	description.Documentation = method.documentation
 	description.Parameters = p.describeParameters(method.namespace, method.aliases, method.params)
 	description.ReturnType = p.canonicalType(method.namespace, method.aliases, method.result)
@@ -379,9 +402,10 @@ func (p *program) describeParameters(namespace string, aliases map[string]aliasD
 	for _, param := range params {
 		typ := p.canonicalType(namespace, aliases, param.typ)
 		descriptions = append(descriptions, ParameterDescription{
-			Name:     param.name,
-			Type:     typ,
-			Callable: describeCallable(typ),
+			Name:        param.name,
+			Annotations: p.describeAnnotations(param.annotations),
+			Type:        typ,
+			Callable:    describeCallable(typ),
 		})
 	}
 	return descriptions
@@ -400,6 +424,11 @@ func (p *program) namespaceExists(namespace string) bool {
 		}
 	}
 	for name := range p.constants {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	for name := range p.annotations {
 		if strings.HasPrefix(name, prefix) {
 			return true
 		}
@@ -434,6 +463,11 @@ func (p *program) declaredSymbolNames() []string {
 	}
 	for name := range p.genericInterfaces {
 		names = append(names, name)
+	}
+	for name, annotation := range p.annotations {
+		if annotation.terminal == nil {
+			names = append(names, name)
+		}
 	}
 	sort.Strings(names)
 	return names
@@ -483,6 +517,11 @@ func (p *program) describeChildren(namespace string) []ChildDescription {
 	for name, constant := range p.constants {
 		add(name, "constant", constant.name, constant.documentation)
 	}
+	for name, annotation := range p.annotations {
+		if annotation.terminal == nil {
+			add(name, "annotation", annotation.name, annotation.documentation)
+		}
+	}
 	names := sortedKeys(children)
 	descriptions := make([]ChildDescription, 0, len(names))
 	for _, name := range names {
@@ -512,4 +551,77 @@ func sortedSet(values map[string]struct{}) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func (p *program) describeAnnotation(annotation *annotationDecl) SymbolDescription {
+	description := emptySymbol(annotation.qualified, "annotation", visibility(annotation.name))
+	description.Documentation = annotation.documentation
+	description.Parameters = p.describeParameters(annotation.namespace, annotation.aliases, annotation.params)
+	description.Source = describeSource(annotation.pos)
+	if annotation.target != nil {
+		description.Annotations = p.describeAnnotations([]*annotationUse{annotation.target})
+		if terminal := p.annotationTerminalName(annotation, nil); terminal != "" && len(description.Annotations) > 0 {
+			description.Annotations[0].ResolvedName = terminal
+		}
+	}
+	return description
+}
+
+func (p *program) annotationTerminalName(annotation *annotationDecl, seen map[string]struct{}) string {
+	if annotation == nil {
+		return ""
+	}
+	if annotation.terminal != nil {
+		return annotation.terminal.canonical
+	}
+	if seen == nil {
+		seen = make(map[string]struct{})
+	}
+	if _, duplicate := seen[annotation.qualified]; duplicate {
+		return ""
+	}
+	seen[annotation.qualified] = struct{}{}
+	if annotation.target == nil {
+		return ""
+	}
+	return p.annotationTerminalName(p.annotationFor(annotation.namespace, annotation.aliases, annotation.target.name), seen)
+}
+
+func (p *program) describeAnnotations(annotations []*annotationUse) []AnnotationDescription {
+	descriptions := make([]AnnotationDescription, 0, len(annotations))
+	for _, annotation := range annotations {
+		description := AnnotationDescription{
+			Name:              annotation.name,
+			Arguments:         make([]string, len(annotation.args)),
+			ResolvedArguments: []string{},
+		}
+		for index, argument := range annotation.args {
+			description.Arguments[index] = annotationExpressionDisplay(argument)
+		}
+		if len(annotation.resolved) > 0 {
+			resolved := annotation.resolved[0]
+			description.ResolvedName = resolved.terminal.canonical
+			description.ResolvedArguments = make([]string, len(resolved.values))
+			for index, value := range resolved.values {
+				description.ResolvedArguments[index] = value.display
+			}
+		}
+		descriptions = append(descriptions, description)
+	}
+	return descriptions
+}
+
+func annotationExpressionDisplay(expression expressionNode) string {
+	switch node := expression.(type) {
+	case *literalExpression:
+		return literalAnnotationValue(node.value).display
+	case *nameExpression:
+		return node.name
+	case *unaryExpression:
+		return node.op + annotationExpressionDisplay(node.value)
+	case *lambdaExpression:
+		return "<lambda>"
+	default:
+		return expressionLabel(expression)
+	}
 }

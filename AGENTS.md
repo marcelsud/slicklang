@@ -39,6 +39,13 @@ Native resource classes set `nativeResource` to the Go pointer type of their run
 - Instance-derived checks run inside `checkingInstance`, which deduplicates a diagnostic already reported, so one mistake in a generic is reported once instead of once per instantiation.
 
 A class that reaches itself by value — `Node { Next: Node? }`, generic or not — checks and interprets but fails `go build` with `invalid recursive type`. That predates generics; recursion through an array or Map compiles.
+
+## Adding a compiler-owned annotation terminal
+
+`internal/compiler/annotations.go` owns annotation parsing, alias expansion, typed argument resolution, target validation, and ordered hook application. A framework terminal supplies one canonical name, canonical parameter types, allowed targets, repeatability, documentation, and an `apply` callback through `compile`'s terminal arguments; the callback mutates the already-parsed declaration once, before either backend checks it. Keep backend behavior in that shared mutation rather than adding interpreter and generated-Go cases. Generic cloning in `generics.go` must preserve annotation metadata so each concrete method receives the same hook, and instance diagnostics must run through `checkingInstance`.
+
+Annotations are part of the machine-readable description contract. Changing their shape requires a `DescriptionSchemaVersion` bump and the exact JSON/budget pins in `cmd/slick`.
+
 ## Adding an expression form
 
 `internal/compiler/callables.go` is the worked example (lambdas and callable values). An expression node has to reach every dispatcher or one backend disagrees at runtime: `parsePrimary` and the node type (`ast.go`), `checkASTExpressionExpecting` and `expressionLabel` (`ast_check.go`), `evalExpression` (`runtime.go`), `expression` and `expressionType` (`codegen.go`), and `collectExpression` (`format.go`). A node that caches a resolved type must return it unchanged on a second visit, because `codegen.go`'s `expressionType` re-runs the checker over sub-expressions.
