@@ -42,6 +42,7 @@ func parseFormatSource(source Source) (*formatSource, []Diagnostic) {
 		interfaces: make(map[string]*interfaceDecl),
 		unions:     make(map[string]*unionDecl),
 		functions:  make(map[string]*functionDecl),
+		constants:  make(map[string]*constDecl),
 	}
 	parsed := &formatSource{source: source, prog: prog, tokens: tokens}
 	if len(diagnostics) > 0 {
@@ -190,6 +191,9 @@ func (f *sourceFormatter) collectBreaks() {
 		for _, name := range union.order {
 			f.addBreak(union.variants[name].pos)
 		}
+	}
+	for _, constant := range f.source.prog.constants {
+		f.collectExpression(constant.ast)
 	}
 	for _, function := range f.source.prog.functions {
 		f.collectBlock(function.ast)
@@ -518,7 +522,7 @@ func (f *sourceFormatter) startTopDeclaration(kind string) {
 
 func isTopDeclaration(text string) bool {
 	switch text {
-	case "use", "class", "interface", "union", "function":
+	case "use", "const", "class", "interface", "union", "function":
 		return true
 	default:
 		return false

@@ -258,7 +258,7 @@ func writeHumanDescription(output io.Writer, description compiler.SymbolDescript
 		fmt.Fprintf(output, "Returns: %s\n", description.ReturnType)
 		writeThrows(output, description.Throws)
 	}
-	if description.Kind == "field" {
+	if description.Kind == "field" || description.Kind == "constant" {
 		fmt.Fprintf(output, "Type: %s\n", description.Type)
 	}
 	if description.Kind == "class" {

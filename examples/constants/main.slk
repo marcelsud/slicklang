@@ -1,0 +1,33 @@
+// Typed compile-time constants
+// ============================
+//
+// A constant declares one typed value at namespace scope. Its initializer is
+// evaluated once during compilation, so both backends observe the same value
+// and nothing is initialized at run time.
+//
+// The output is
+// `SLK001; 512; 3; true; -256; Strict`.
+
+use root.protocol.MaximumDepth as DepthLimit
+use root.protocol.Mode
+
+/// The diagnostic code a syntax failure reports. Constants may refer to a
+/// constant declared later in the file, as long as the references stay acyclic.
+const DiagnosticSyntax: string = "SLK" + syntaxNumber
+
+const syntaxNumber: string = "001"
+
+const RetryBudget: int = DepthLimit * 2
+
+const Tolerance: float = 1.5 * 2.0
+
+const SupportsColor: bool = !false && (DepthLimit > 8 || false)
+
+const Deepest: int = -DepthLimit
+
+/// A fieldless union variant is a constant expression too.
+const DefaultMode: Mode = Mode.Strict
+
+function main() -> string {
+    `${DiagnosticSyntax}; ${RetryBudget}; ${Tolerance}; ${SupportsColor}; ${Deepest}; ${DefaultMode}`
+}

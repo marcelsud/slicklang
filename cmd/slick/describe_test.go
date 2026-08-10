@@ -219,6 +219,50 @@ func TestDescribeRejectsInvalidBudgets(t *testing.T) {
 		}
 	}
 }
+
+// TestDescribeConstantHumanOutputContract holds the renderer to the one fact a
+// constant description has to carry: its declared type.
+func TestDescribeConstantHumanOutputContract(t *testing.T) {
+	root := t.TempDir()
+	source := `/// The deepest nesting the parser accepts.
+const MaximumDepth: int = 256
+
+function main() -> int {
+    MaximumDepth
+}
+`
+	if err := os.WriteFile(filepath.Join(root, "main.slk"), []byte(source), 0o644); err != nil {
+		t.Fatalf("write constant project: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	status := runDescribe([]string{"root.MaximumDepth", root}, &stdout, &stderr)
+	if status != 0 || stderr.Len() != 0 {
+		t.Fatalf("status=%d stderr=%q", status, stderr.String())
+	}
+	want := `Name: root.MaximumDepth
+Kind: constant
+Visibility: public
+Documentation:
+The deepest nesting the parser accepts.
+
+Type: int
+Source: main.slk:2:7
+`
+	if stdout.String() != want {
+		t.Fatalf("constant human output:\n%s\nwant:\n%s", stdout.String(), want)
+	}
+
+	stdout.Reset()
+	status = runDescribe([]string{"root", root}, &stdout, &stderr)
+	if status != 0 || stderr.Len() != 0 {
+		t.Fatalf("status=%d stderr=%q", status, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "constant root.MaximumDepth (public) — The deepest nesting the parser accepts.") {
+		t.Fatalf("namespace children omit the constant:\n%s", stdout.String())
+	}
+}
+
 func TestDescribeUserDocumentationAndExplicitNull(t *testing.T) {
 	root := t.TempDir()
 	source := `/// Complete user documentation.
