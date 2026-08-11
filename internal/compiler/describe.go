@@ -230,17 +230,22 @@ func (p *program) describeClass(class *classDecl) SymbolDescription {
 		})
 	}
 	for _, name := range sortedKeys(class.methods) {
-		description.DeclaredMethods = append(description.DeclaredMethods, p.describeMethod(class.qualified, class.methods[name]))
+		description.DeclaredMethods = append(description.DeclaredMethods, p.describeMethod(class.qualified, class.methods[name], class.implementations[name]))
 	}
 	for _, name := range sortedKeys(class.implementations) {
 		implementation := class.implementations[name]
+		method := class.methods[name]
+		var declarationParams []paramDecl
+		if method != nil && !implementation.inline {
+			declarationParams = method.params
+		}
 		implementationResult := p.canonicalType(implementation.namespace, implementation.aliases, implementation.result)
 		description.ImplementedMethods = append(description.ImplementedMethods, MethodDescription{
 			CanonicalName:  class.qualified + "." + implementation.name,
 			Documentation:  implementation.documentation,
-			Annotations:    p.describeAnnotations(implementation.annotations),
+			Annotations:    p.describeAnnotations(methodAnnotationUses(method, implementation)),
 			Visibility:     visibility(implementation.name),
-			Parameters:     p.describeParameters(implementation.namespace, implementation.aliases, implementation.params),
+			Parameters:     p.describeMergedParameters(implementation.namespace, implementation.aliases, implementation.params, declarationParams),
 			ReturnType:     implementationResult,
 			ReturnCallable: describeCallable(implementationResult),
 			Throws:         sortedSet(implementation.throwSet),
@@ -269,7 +274,7 @@ func (p *program) describeInterface(iface *interfaceDecl) SymbolDescription {
 	description.TypeParameters = append(description.TypeParameters, iface.typeParams...)
 	description.Source = describeSource(iface.pos)
 	for _, name := range sortedKeys(iface.methods) {
-		description.DeclaredMethods = append(description.DeclaredMethods, p.describeMethod(iface.qualified, iface.methods[name]))
+		description.DeclaredMethods = append(description.DeclaredMethods, p.describeMethod(iface.qualified, iface.methods[name], nil))
 	}
 	return description
 }
@@ -322,14 +327,18 @@ func (p *program) describeVariant(name string, union *unionDecl, variant *unionV
 	return description
 }
 
-func (p *program) describeMethod(owner string, method *methodSignature) MethodDescription {
+func (p *program) describeMethod(owner string, method *methodSignature, implementation *functionDecl) MethodDescription {
+	var implementationParams []paramDecl
+	if implementation != nil && !implementation.inline {
+		implementationParams = implementation.params
+	}
 	result := p.canonicalType(method.namespace, method.aliases, method.result)
 	return MethodDescription{
-		Annotations:    p.describeAnnotations(method.annotations),
+		Annotations:    p.describeAnnotations(methodAnnotationUses(method, implementation)),
 		CanonicalName:  owner + "." + method.name,
 		Documentation:  method.documentation,
 		Visibility:     visibility(method.name),
-		Parameters:     p.describeParameters(method.namespace, method.aliases, method.params),
+		Parameters:     p.describeMergedParameters(method.namespace, method.aliases, method.params, implementationParams),
 		ReturnType:     result,
 		ReturnCallable: describeCallable(result),
 		Throws:         sortedSet(method.throwSet),
@@ -354,7 +363,7 @@ func (p *program) describeMember(name string) (SymbolDescription, bool) {
 			return description, true
 		}
 		if implementation := class.implementations[member]; implementation != nil {
-			return p.describeFunctionMember(name, implementation), true
+			return p.describeFunctionMember(name, implementation, class.methods[member]), true
 		}
 		if method := class.methods[member]; method != nil {
 			return p.describeMethodMember(name, method), true
@@ -373,11 +382,15 @@ func (p *program) describeMember(name string) (SymbolDescription, bool) {
 	return SymbolDescription{}, false
 }
 
-func (p *program) describeFunctionMember(name string, function *functionDecl) SymbolDescription {
+func (p *program) describeFunctionMember(name string, function *functionDecl, method *methodSignature) SymbolDescription {
+	var declarationParams []paramDecl
+	if method != nil && !function.inline {
+		declarationParams = method.params
+	}
 	description := emptySymbol(name, "method", visibility(function.name))
 	description.Documentation = function.documentation
-	description.Annotations = p.describeAnnotations(function.annotations)
-	description.Parameters = p.describeParameters(function.namespace, function.aliases, function.params)
+	description.Annotations = p.describeAnnotations(methodAnnotationUses(method, function))
+	description.Parameters = p.describeMergedParameters(function.namespace, function.aliases, function.params, declarationParams)
 	description.ReturnType = p.canonicalType(function.namespace, function.aliases, function.result)
 	description.ReturnCallable = describeCallable(description.ReturnType)
 	description.Throws = sortedSet(function.throwSet)
@@ -407,6 +420,16 @@ func (p *program) describeParameters(namespace string, aliases map[string]aliasD
 			Type:        typ,
 			Callable:    describeCallable(typ),
 		})
+	}
+	return descriptions
+}
+
+func (p *program) describeMergedParameters(namespace string, aliases map[string]aliasDecl, params, counterparts []paramDecl) []ParameterDescription {
+	descriptions := p.describeParameters(namespace, aliases, params)
+	for index := range descriptions {
+		if index < len(counterparts) {
+			descriptions[index].Annotations = p.describeAnnotations(mergeAnnotationUses(params[index].annotations, counterparts[index].annotations))
+		}
 	}
 	return descriptions
 }

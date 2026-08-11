@@ -750,3 +750,59 @@ function main() -> int {
 		t.Fatalf("format fixed point: output=%q diagnostics=%+v err=%v", again, diagnostics, err)
 	}
 }
+
+func TestDetachedMethodDescriptionCombinesAuthoredAnnotations(t *testing.T) {
+	terminals := append(testAnnotationTerminals(), terminalAnnotationDecl{
+		canonical:  "std.test.Note",
+		params:     []string{"string"},
+		targets:    []annotationTarget{annotationTargetMethod, annotationTargetParameter},
+		repeatable: true,
+	})
+	program, diagnostics := compileWithTerminals([]Source{{Name: "main.slk", Namespace: "root", Text: `
+@std.test.Note("implementation method")
+function Service.Run(@std.test.Note("implementation parameter") Value: int) -> int {
+    Value
+}
+
+class Service {
+    @std.test.Note("declaration method")
+    function Run(@std.test.Note("declaration parameter") Value: int) -> int
+}
+
+function main() -> int {
+    let App = Service {}
+    App.Run(42)
+}
+`}}, terminals)
+	if len(diagnostics) > 0 {
+		t.Fatalf("compile detached method descriptions: %+v", diagnostics)
+	}
+	check := func(label string, annotations []AnnotationDescription, parameters []ParameterDescription) {
+		t.Helper()
+		if len(annotations) != 2 || annotations[0].Name != "std.test.Note" || annotations[1].Name != "std.test.Note" ||
+			annotations[0].ResolvedName != "std.test.Note" || annotations[1].ResolvedName != "std.test.Note" ||
+			len(annotations[0].Arguments) != 1 || len(annotations[1].Arguments) != 1 ||
+			len(annotations[0].ResolvedArguments) != 1 || len(annotations[1].ResolvedArguments) != 1 ||
+			strings.Join([]string{annotations[0].Arguments[0], annotations[1].Arguments[0]}, ",") != `"implementation method","declaration method"` ||
+			strings.Join([]string{annotations[0].ResolvedArguments[0], annotations[1].ResolvedArguments[0]}, ",") != `"implementation method","declaration method"` {
+			t.Fatalf("%s method annotations: %+v", label, annotations)
+		}
+		if len(parameters) != 1 || len(parameters[0].Annotations) != 2 || len(parameters[0].Annotations[0].Arguments) != 1 || len(parameters[0].Annotations[1].Arguments) != 1 ||
+			len(parameters[0].Annotations[0].ResolvedArguments) != 1 || len(parameters[0].Annotations[1].ResolvedArguments) != 1 ||
+			strings.Join([]string{parameters[0].Annotations[0].Arguments[0], parameters[0].Annotations[1].Arguments[0]}, ",") != `"implementation parameter","declaration parameter"` ||
+			strings.Join([]string{parameters[0].Annotations[0].ResolvedArguments[0], parameters[0].Annotations[1].ResolvedArguments[0]}, ",") != `"implementation parameter","declaration parameter"` {
+			t.Fatalf("%s parameter annotations: %+v", label, parameters)
+		}
+	}
+	method, ok := program.describeSymbol("root.Service.Run")
+	if !ok {
+		t.Fatal("describe root.Service.Run")
+	}
+	check("exact", method.Annotations, method.Parameters)
+	class, ok := program.describeSymbol("root.Service")
+	if !ok || len(class.DeclaredMethods) != 1 || len(class.ImplementedMethods) != 1 {
+		t.Fatalf("describe root.Service: found=%t value=%+v", ok, class)
+	}
+	check("declared", class.DeclaredMethods[0].Annotations, class.DeclaredMethods[0].Parameters)
+	check("implemented", class.ImplementedMethods[0].Annotations, class.ImplementedMethods[0].Parameters)
+}

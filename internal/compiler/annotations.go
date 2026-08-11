@@ -268,6 +268,31 @@ func positionLess(left, right position) bool {
 	return left.column < right.column
 }
 
+func mergeAnnotationUses(first, second []*annotationUse) []*annotationUse {
+	if len(first) == 0 {
+		return second
+	}
+	if len(second) == 0 {
+		return first
+	}
+	merged := append(append([]*annotationUse(nil), first...), second...)
+	sort.SliceStable(merged, func(i, j int) bool { return positionLess(merged[i].pos, merged[j].pos) })
+	return merged
+}
+
+func methodAnnotationUses(method *methodSignature, function *functionDecl) []*annotationUse {
+	if method == nil {
+		if function == nil {
+			return nil
+		}
+		return function.annotations
+	}
+	if function == nil || function.inline {
+		return method.annotations
+	}
+	return mergeAnnotationUses(method.annotations, function.annotations)
+}
+
 func (terminal *terminalAnnotationDecl) accepts(target annotationTarget) bool {
 	for _, allowed := range terminal.targets {
 		if target == allowed {
@@ -576,10 +601,7 @@ func (p *program) annotationTargets() []annotationTargetRef {
 				if function == nil {
 					function = p.methodImplementation(class.qualified, method.name)
 				}
-				annotations := method.annotations
-				if function != nil && !function.inline && len(function.annotations) > 0 {
-					annotations = append(append([]*annotationUse(nil), annotations...), function.annotations...)
-				}
+				annotations := methodAnnotationUses(method, function)
 				methodTarget := annotationTargetRef{kind: annotationTargetMethod, name: class.qualified + "." + method.name, pos: method.pos, namespace: method.namespace, aliases: method.aliases, annotations: annotations, instance: instance, class: class, method: method, function: function}
 				targets = append(targets, methodTarget)
 				var implementationParams []paramDecl
@@ -675,7 +697,7 @@ func parameterAnnotationTargets(owner annotationTargetRef, params, implementatio
 		param := &params[index]
 		annotations := param.annotations
 		if index < len(implementationParams) && len(implementationParams[index].annotations) > 0 {
-			annotations = append(append([]*annotationUse(nil), annotations...), implementationParams[index].annotations...)
+			annotations = mergeAnnotationUses(annotations, implementationParams[index].annotations)
 		}
 		target := owner
 		target.kind = annotationTargetParameter
