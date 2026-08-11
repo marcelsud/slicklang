@@ -437,6 +437,52 @@ function main() -> null {
 `)
 		assertDiagnostic(t, diagnostics, "SLK411", "expands without limit")
 	})
+	t.Run("callable-growing type arguments", func(t *testing.T) {
+		diagnostics := checkGenerics(t, `
+class Loop<T> {
+    Next: Loop<() -> T>?
+}
+
+function main() -> null {
+    let Value = Loop<int> {}
+    null
+}
+`)
+		assertDiagnostic(t, diagnostics, "SLK411", "expands without limit")
+	})
+	t.Run("array-growing type arguments", func(t *testing.T) {
+		diagnostics := checkGenerics(t, `
+class Loop<T> {
+    Next: Loop<T[]>?
+}
+
+function main() -> null {
+    let Value = Loop<int> {}
+    null
+}
+`)
+		assertDiagnostic(t, diagnostics, "SLK411", "expands without limit")
+	})
+	t.Run("long acyclic expansion", func(t *testing.T) {
+		diagnostics := checkGenerics(t, `
+class A<T> { Next: B<T>? }
+class B<T> { Next: C<T>? }
+class C<T> { Next: D<T>? }
+class D<T> { Next: E<T>? }
+class E<T> { Next: F<T>? }
+class F<T> { Next: G<T>? }
+class G<T> { Next: H<T>? }
+class H<T> { Next: I<T>? }
+class I<T> { Next: J<T>? }
+class J<T> {}
+
+function main() -> null {
+    let Value = A<int> {}
+    null
+}
+`)
+		assertNoDiagnostics(t, diagnostics)
+	})
 }
 
 func TestCallableTypeArgumentsAtGenericExpressionBoundaries(t *testing.T) {

@@ -48,10 +48,11 @@ func (scope *typeParamScope) binds(name string) bool {
 
 // instantiation is one concrete use of a generic declaration.
 type instantiation struct {
-	name string
-	base string
-	args []string
-	pos  position
+	name      string
+	base      string
+	args      []string
+	pos       position
+	ancestors []string
 }
 
 func genericInstanceName(base string, args []string) string {
@@ -204,12 +205,23 @@ func (p *program) instantiateGenerics() {
 			continue
 		}
 		created[request.name] = struct{}{}
-		if instantiationDepth(request.name) > maxInstantiationDepth {
+		recursiveDepth := 1
+		for _, ancestor := range request.ancestors {
+			if ancestor == request.base {
+				recursiveDepth++
+			}
+		}
+		if recursiveDepth > maxInstantiationDepth || instantiationDepth(request.name) > maxInstantiationDepth {
 			p.add(request.pos, diagnosticCodeGenericExpansion,
 				"%s expands without limit; a generic declaration may contain itself only at the same type arguments", displayName(request.name))
 			continue
 		}
-		pending = append(pending, p.instantiate(request)...)
+		next := p.instantiate(request)
+		ancestors := append(append([]string(nil), request.ancestors...), request.base)
+		for index := range next {
+			next[index].ancestors = ancestors
+		}
+		pending = append(pending, next...)
 	}
 }
 
