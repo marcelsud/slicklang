@@ -42,7 +42,7 @@ A class that reaches itself by value — `Node { Next: Node? }`, generic or not 
 
 ## Adding a compiler-owned annotation terminal
 
-`internal/compiler/annotations.go` owns annotation parsing, alias expansion, typed argument resolution, target validation, and ordered hook application. A framework terminal supplies one canonical name, canonical parameter types, allowed targets, repeatability, documentation, and an `apply` callback through `compile`'s terminal arguments; the callback mutates the already-parsed declaration once, before either backend checks it. Keep backend behavior in that shared mutation rather than adding interpreter and generated-Go cases. Generic cloning in `generics.go` must preserve annotation metadata so each concrete method receives the same hook, and instance diagnostics must run through `checkingInstance`.
+`internal/compiler/annotations.go` owns annotation parsing, alias expansion, typed argument resolution, target validation, and ordered hook application. A framework terminal supplies one canonical name, canonical parameter types, allowed targets, repeatability, documentation, and an `apply` callback through `compileWithTerminals`; the callback mutates the already-parsed declaration once, before either backend checks it. Keep backend behavior in that shared mutation rather than adding interpreter and generated-Go cases. Generic cloning in `generics.go` must preserve annotation metadata so each concrete method receives the same hook, and instance diagnostics must run through `checkingInstance`.
 
 Annotations are part of the machine-readable description contract. Changing their shape requires a `DescriptionSchemaVersion` bump and the exact JSON/budget pins in `cmd/slick`.
 
