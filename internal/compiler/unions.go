@@ -278,6 +278,7 @@ func (p *program) checkUnionMatch(node *matchExpression, union *unionDecl, value
 		}
 		armInfo := p.checkASTExpressionExpecting(arm.value, armScope, expected)
 		mergeEffects(info.effects, armInfo.effects)
+		info.using = mergeUsingValues(info.using, armInfo.using)
 		paths = append(paths, pendingPath{scope: armScope, normal: armInfo.typ != typeNever})
 		clearAssignedNarrowings(scope, arm.value)
 		if armInfo.typ == typeNever || armInfo.typ == typeUnknown {

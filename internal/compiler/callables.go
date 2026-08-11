@@ -74,7 +74,11 @@ func (p *program) checkLambdaExpression(node *lambdaExpression, scope *astScope)
 
 	lambdaScope := newASTScope(function, len(node.params)+len(scope.locals))
 	lambdaScope.recursive = recursiveNames(scope)
-	node.captures = p.bindLambdaCaptures(node, scope, lambdaScope)
+	bound := make(map[string]struct{}, len(node.params))
+	for _, param := range node.params {
+		bound[param.name] = struct{}{}
+	}
+	node.captures = p.bindLambdaCaptures(node, scope, lambdaScope, bound)
 
 	paramTypes := make([]string, len(node.params))
 	seen := make(map[string]struct{}, len(node.params))
@@ -104,12 +108,9 @@ func (p *program) checkLambdaExpression(node *lambdaExpression, scope *astScope)
 // lambda scope and reports the ones a lambda may not hold: a pending async
 // binding has no value yet, and an active using binding is owned by the scope
 // that must close it.
-func (p *program) bindLambdaCaptures(node *lambdaExpression, scope, lambdaScope *astScope) []string {
+func (p *program) bindLambdaCaptures(node *lambdaExpression, scope, lambdaScope *astScope, bound map[string]struct{}) []string {
 	referenced := make(map[string]struct{})
-	bound := make(map[string]struct{}, len(node.params))
-	for _, param := range node.params {
-		bound[param.name] = struct{}{}
-	}
+
 	collectReferencedNames(node.body, referenced, bound)
 	captures := make([]string, 0, len(referenced))
 	for _, name := range sortedKeys(referenced) {

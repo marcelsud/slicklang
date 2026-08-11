@@ -604,7 +604,7 @@ var standardLibraryRegistry = struct {
 			canonical:     string(nativeStdHTTPServerServe),
 			namespace:     "std.http.server",
 			name:          "Serve",
-			documentation: "Binds Config.Address, serves Application concurrently under documented limits and timeouts, and blocks until SIGINT, SIGTERM, or a fatal listener failure.",
+			documentation: "Binds Config.Address, serializes Application.Handle calls under documented limits and timeouts, and blocks until SIGINT, SIGTERM, or a fatal listener failure.",
 			params: []paramDecl{
 				{name: "Config", typ: typeRef{name: stdHTTPServerConfigName}},
 				{name: "Application", typ: typeRef{name: stdHTTPServerHandlerName}},

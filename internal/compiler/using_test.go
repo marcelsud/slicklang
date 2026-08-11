@@ -368,6 +368,21 @@ func TestUsingDiagnostics(t *testing.T) {
 			code:    "SLK389",
 			message: "using binding Handle cannot escape its scope",
 		},
+		"conditional block value escape": {
+			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function main() -> Resource { using Handle = Open() { if (true) { Handle } else { Open() } } }`,
+			code:    "SLK389",
+			message: "using binding Handle cannot escape its scope",
+		},
+		"match block value escape": {
+			source:  `class Failure implements Error {} class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function Choice() -> Result<int, Failure> { Ok(1) } function main() -> Resource { using Handle = Open() { match Choice() { Ok(_) => Handle Err(_) => Open() } } }`,
+			code:    "SLK389",
+			message: "using binding Handle cannot escape its scope",
+		},
+		"catch block value escape": {
+			source:  `class Failure implements Error {} class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function Choice() -> Resource throws Failure { throw Failure {} } function main() -> Resource { using Handle = Open() { Choice() catch (Caught) { Failure => Handle } } }`,
+			code:    "SLK389",
+			message: "using binding Handle cannot escape its scope",
+		},
 		"immutable binding": {
 			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function main() -> null { using Handle = Open() { Handle = Open() } }`,
 			code:    "SLK390",

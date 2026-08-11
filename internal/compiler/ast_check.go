@@ -35,11 +35,17 @@ type effectSet map[string]effectOrigin
 type expressionInfo struct {
 	typ     string
 	effects effectSet
+	using   *usingValue
 }
 
 type usingBinding struct {
 	outerLocals map[string]struct{}
 	owned       bool
+}
+
+type usingValue struct {
+	name    string
+	binding usingBinding
 }
 
 type pendingState uint8
@@ -200,6 +206,7 @@ func (p *program) checkASTBlock(block *blockNode, scope *astScope, expected stri
 		statementInfo := p.checkASTStatement(statement, scope, statementExpected)
 		mergeEffects(info.effects, statementInfo.effects)
 		info.typ = statementInfo.typ
+		info.using = statementInfo.using
 	}
 	if info.typ != typeNever {
 		for _, statement := range block.statements {
@@ -228,11 +235,11 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		scope.initializing = previous
 		node.resolved = info.typ
 		if len(node.names) == 1 {
-			_, binding, aliasesUsing := directUsingBinding(node.value, scope)
+			resource := info.using
 			scope.bind(node.names[0], info.typ)
-			if aliasesUsing {
-				binding.owned = false
-				scope.usingBindings[node.names[0]] = binding
+			if resource != nil {
+				resource.binding.owned = false
+				scope.usingBindings[node.names[0]] = resource.binding
 			}
 			return expressionInfo{typ: "null", effects: info.effects}
 		}
@@ -342,16 +349,16 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		}
 		// The stored value is no longer the one a branch proved non-null.
 		delete(scope.narrowed, node.name)
-		_, sourceBinding, aliasesUsing := directUsingBinding(node.value, scope)
-		if aliasesUsing && (!targetsUsing || !targetBinding.owned) {
-			if _, escapes := sourceBinding.outerLocals[node.name]; escapes {
+		resource := info.using
+		if resource != nil && (!targetsUsing || !targetBinding.owned) {
+			if _, escapes := resource.binding.outerLocals[node.name]; escapes {
 				p.add(node.pos, diagnosticCodeUsingEscape, "using resource cannot be assigned outside its scope")
 			}
 		}
 		if !targetsUsing || !targetBinding.owned {
-			if aliasesUsing {
-				sourceBinding.owned = false
-				scope.usingBindings[node.name] = sourceBinding
+			if resource != nil {
+				resource.binding.owned = false
+				scope.usingBindings[node.name] = resource.binding
 			} else {
 				delete(scope.usingBindings, node.name)
 			}
@@ -415,11 +422,12 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		info.typ = typeNever
 		return info
 	case *returnStatement:
-		if resource, _, ok := directUsingBinding(node.value, scope); ok {
-			p.add(node.pos, diagnosticCodeUsingEscape, "using binding %s cannot be returned outside its scope", resource)
-		}
 		declared := p.resolveType(scope.function.namespace, scope.function.aliases, scope.function.result)
 		info := p.checkASTExpressionExpecting(node.value, scope, declared)
+		if info.using != nil {
+			p.add(node.pos, diagnosticCodeUsingEscape, "using binding %s cannot be returned outside its scope", info.using.name)
+			info.using = nil
+		}
 		if !p.assignable(info.typ, declared) {
 			p.reportUnassignable(node.pos, info.typ, declared, diagnosticCodeReturnType,
 				"%s returns %s, expected %s", scope.function.qualified, displayName(info.typ), displayName(declared))
@@ -557,7 +565,11 @@ func (p *program) checkNameExpression(node *nameExpression, scope *astScope) exp
 			return expressionInfo{typ: pending.typ, effects: make(effectSet)}
 		}
 		if typ, exists := scope.lookup(node.name); exists {
-			return expressionInfo{typ: typ, effects: make(effectSet)}
+			info := expressionInfo{typ: typ, effects: make(effectSet)}
+			if binding, active := scope.usingBindings[node.name]; active {
+				info.using = &usingValue{name: node.name, binding: binding}
+			}
+			return info
 		}
 		if info, constant := p.checkConstantReference(node, scope); constant {
 			return info
@@ -848,8 +860,10 @@ func (p *program) checkUsingExpression(node *usingExpression, scope *astScope, e
 		copyPendingStates(scope, bodyScope)
 	}
 
-	if resource, _, ok := directUsingBlockValue(node.body, bodyScope); ok {
-		p.add(node.pos, diagnosticCodeUsingEscape, "using binding %s cannot escape its scope", resource)
+	info.using = body.using
+	if info.using != nil {
+		p.add(node.pos, diagnosticCodeUsingEscape, "using binding %s cannot escape its scope", info.using.name)
+		info.using = nil
 	}
 	node.result = body.typ
 	if node.resolved == typeUnknown {
@@ -879,26 +893,6 @@ func (p *program) checkUsingExpression(node *usingExpression, scope *astScope, e
 		}
 	}
 	return info
-}
-
-func directUsingBinding(expression expressionNode, scope *astScope) (string, usingBinding, bool) {
-	name, ok := expression.(*nameExpression)
-	if !ok {
-		return "", usingBinding{}, false
-	}
-	binding, ok := scope.usingBindings[name.name]
-	return name.name, binding, ok
-}
-
-func directUsingBlockValue(block *blockNode, scope *astScope) (string, usingBinding, bool) {
-	if block == nil || len(block.statements) == 0 {
-		return "", usingBinding{}, false
-	}
-	statement, ok := block.statements[len(block.statements)-1].(*expressionStatement)
-	if !ok {
-		return "", usingBinding{}, false
-	}
-	return directUsingBinding(statement.value, scope)
 }
 
 func (p *program) checkCallExpression(node *callExpression, scope *astScope) expressionInfo {
@@ -935,6 +929,9 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 			p.add(node.pos, diagnosticCodeResourceRequiresUsing, "std.io resources must be closed by a using scope")
 		}
 	}
+	if info, callable := p.checkCallableValueTarget(node, scope, name, includeThrows); callable {
+		return info
+	}
 	if info, builtin := p.checkIterableCall(node, scope, name); builtin {
 		if len(node.typeArgs) > 0 {
 			p.add(node.pos, diagnosticCodeTypeArguments, "%s does not take type arguments", name.name)
@@ -946,21 +943,19 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 			return p.checkVariantConstruction(node, name, union, variant, scope)
 		}
 	}
-	if className, isError := p.resolveErrorIn(scope.function.namespace, scope.function.aliases, name.name); isError && p.classes[className] != nil {
-		class := p.classes[className]
-		p.requireAccess(node.pos, scope.function.namespace, class.namespace, class.name, "error class")
-		info := expressionInfo{typ: className, effects: make(effectSet)}
-		if len(node.typeArgs) > 0 {
-			p.add(node.pos, diagnosticCodeTypeArguments, "%s does not take type arguments", name.name)
+	if _, shadowed := scope.lookup(parts[0]); !shadowed {
+		if className, isError := p.resolveErrorIn(scope.function.namespace, scope.function.aliases, name.name); isError && p.classes[className] != nil {
+			class := p.classes[className]
+			p.requireAccess(node.pos, scope.function.namespace, class.namespace, class.name, "error class")
+			info := expressionInfo{typ: className, effects: make(effectSet)}
+			if len(node.typeArgs) > 0 {
+				p.add(node.pos, diagnosticCodeTypeArguments, "%s does not take type arguments", name.name)
+			}
+			for _, argument := range node.args {
+				mergeEffects(info.effects, p.checkASTExpression(argument, scope).effects)
+			}
+			return info
 		}
-		for _, argument := range node.args {
-			mergeEffects(info.effects, p.checkASTExpression(argument, scope).effects)
-		}
-		return info
-	}
-
-	if info, callable := p.checkCallableValueTarget(node, scope, name, includeThrows); callable {
-		return info
 	}
 
 	target, reported := p.resolveASTCall(scope.function, node, name, scope)
@@ -1420,6 +1415,7 @@ func (p *program) checkIfExpression(node *ifExpression, scope *astScope, expecte
 	if node.elseBlock != nil {
 		elseInfo = p.checkASTBlock(node.elseBlock, elseScope, expected)
 		mergeEffects(info.effects, elseInfo.effects)
+		info.using = mergeUsingValues(thenInfo.using, elseInfo.using)
 	}
 	p.mergePendingBranches(scope, thenScope, elseScope, thenInfo.typ != typeNever, elseInfo.typ != typeNever, node.pos)
 	mergeUsingPaths(scope, []pendingPath{{scope: thenScope, normal: thenInfo.typ != typeNever}, {scope: elseScope, normal: elseInfo.typ != typeNever}})
@@ -1443,7 +1439,7 @@ func (p *program) checkCatchExpression(node *catchExpression, scope *astScope, e
 	for name, origin := range valueInfo.effects {
 		remaining[name] = origin
 	}
-	result := expressionInfo{typ: valueInfo.typ, effects: make(effectSet)}
+	result := expressionInfo{typ: valueInfo.typ, effects: make(effectSet), using: valueInfo.using}
 	paths := []pendingPath{{scope: scope.clone(), normal: valueInfo.typ != typeNever}}
 	catchAll := false
 	for _, arm := range node.arms {
@@ -1473,6 +1469,7 @@ func (p *program) checkCatchExpression(node *catchExpression, scope *astScope, e
 		}
 		armInfo := p.checkASTExpressionExpecting(arm.value, armScope, expected)
 		mergeEffects(result.effects, armInfo.effects)
+		result.using = mergeUsingValues(result.using, armInfo.using)
 		paths = append(paths, pendingPath{scope: armScope, normal: armInfo.typ != typeNever})
 		clearAssignedNarrowings(scope, arm.value)
 		if armInfo.typ != typeNever && result.typ != armInfo.typ {
@@ -1593,6 +1590,7 @@ func (p *program) checkMatchExpression(node *matchExpression, scope *astScope, e
 		}
 		armInfo := p.checkASTExpressionExpecting(arm.value, armScope, expected)
 		mergeEffects(info.effects, armInfo.effects)
+		info.using = mergeUsingValues(info.using, armInfo.using)
 		paths = append(paths, pendingPath{scope: armScope, normal: armInfo.typ != typeNever})
 		clearAssignedNarrowings(scope, arm.value)
 		if armInfo.typ == typeNever || armInfo.typ == typeUnknown {
@@ -1807,6 +1805,28 @@ func cloneEffects(source effectSet) effectSet {
 		cloned[name] = origin
 	}
 	return cloned
+}
+
+func mergeUsingValues(values ...*usingValue) *usingValue {
+	var merged *usingValue
+	for _, value := range values {
+		if value == nil {
+			continue
+		}
+		if merged == nil {
+			outerLocals := make(map[string]struct{}, len(value.binding.outerLocals))
+			for name := range value.binding.outerLocals {
+				outerLocals[name] = struct{}{}
+			}
+			merged = &usingValue{name: value.name, binding: usingBinding{outerLocals: outerLocals, owned: value.binding.owned}}
+			continue
+		}
+		for name := range value.binding.outerLocals {
+			merged.binding.outerLocals[name] = struct{}{}
+		}
+		merged.binding.owned = merged.binding.owned && value.binding.owned
+	}
+	return merged
 }
 
 func copyPendingStates(target, source *astScope) {

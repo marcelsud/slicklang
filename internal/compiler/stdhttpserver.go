@@ -34,6 +34,7 @@ const (
 func markUsesStdHTTP(p *program, name string) {
 	if strings.Contains(name, "std.http.server.") || strings.Contains(name, "std.http.server") {
 		p.usesStdHTTPServer = true
+		p.usesAsync = true
 		return
 	}
 	if strings.Contains(name, "std.http.") || name == "std.http" {
@@ -45,6 +46,7 @@ func markUsesStdHTTPNamespace(p *program, namespace string) {
 	switch namespace {
 	case "std.http.server":
 		p.usesStdHTTPServer = true
+		p.usesAsync = true
 	case "std.http":
 		p.usesStdHTTP = true
 	}
@@ -473,7 +475,7 @@ func (p *program) serveHTTP(ctx context.Context, config httpServerConfigData, ha
 	}
 	defer listener.Close()
 
-	var waitGroup sync.WaitGroup
+	var handlerMutex sync.Mutex
 	server := &http.Server{
 		MaxHeaderBytes:    int(config.maxHeaderBytes),
 		ReadHeaderTimeout: httpServerTimeoutDuration(config.readHeaderTimeoutMillis),
@@ -481,8 +483,6 @@ func (p *program) serveHTTP(ctx context.Context, config httpServerConfigData, ha
 		WriteTimeout:      httpServerTimeoutDuration(config.writeTimeoutMillis),
 		IdleTimeout:       httpServerTimeoutDuration(config.idleTimeoutMillis),
 		Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-			waitGroup.Add(1)
-			defer waitGroup.Done()
 			data, status, err := convertHTTPServerRequest(request, config.maxBodyBytes)
 			if err != nil {
 				if status == 0 {
@@ -492,6 +492,8 @@ func (p *program) serveHTTP(ctx context.Context, config httpServerConfigData, ha
 				return
 			}
 			slickRequest := runtimeHTTPServerRequest(data)
+			handlerMutex.Lock()
+			defer handlerMutex.Unlock()
 			responseValue, ok := p.invokeHTTPServerHandler(request.Context(), handler, slickRequest)
 			if !ok {
 				writeHTTPServerResponse(writer, request.Method, sanitizedHTTPServerInternalResponse())
@@ -530,7 +532,6 @@ func (p *program) serveHTTP(ctx context.Context, config httpServerConfigData, ha
 			return httpServerFailure("Shutdown", config.address, "forced shutdown failed")
 		}
 	}
-	waitGroup.Wait()
 	if err := <-serveErrors; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return httpServerFailure("Serve", config.address, "HTTP server failed")
 	}
@@ -695,7 +696,7 @@ func (g *goGenerator) emitHTTPServerRuntimeSupport() {
 	g.line("if err != nil { return %s{failure: &%s{%s: %q, %s: data.address, %s: %q}}, nil }",
 		resultType, failureClass, operationField, "Bind", addressField, messageField, "failed to bind listen address")
 	g.line(`defer listener.Close()`)
-	g.line(`var waitGroup sync.WaitGroup`)
+	g.line(`var handlerMutex sync.Mutex`)
 	handleMethod := goMethodName("Handle")
 	handleCallArgs := "slickRequest"
 	if g.program.usesAsync {
@@ -708,13 +709,13 @@ func (g *goGenerator) emitHTTPServerRuntimeSupport() {
 	g.line(`WriteTimeout: slickHTTPServerTimeoutDuration(data.writeTimeoutMillis),`)
 	g.line(`IdleTimeout: slickHTTPServerTimeoutDuration(data.idleTimeoutMillis),`)
 	g.line(`Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {`)
-	g.line(`waitGroup.Add(1)`)
-	g.line(`defer waitGroup.Done()`)
 	g.line(`converted, status, err := slickHTTPServerConvertRequest(request, data.maxBodyBytes)`)
 	g.line(`if err != nil { if status == 0 { status = http.StatusBadRequest }; writer.WriteHeader(status); return }`)
 	g.line(`slickRequest := slickHTTPServerToRequest(converted)`)
 	g.line(`func() {`)
 	g.line(`defer func() { if recover() != nil { slickHTTPServerWriteResponse(writer, request.Method, slickHTTPServerResponseData{status: http.StatusInternalServerError}) } }()`)
+	g.line(`handlerMutex.Lock()`)
+	g.line(`defer handlerMutex.Unlock()`)
 	g.line(`response, handleError := application.%s(%s)`, handleMethod, handleCallArgs)
 	g.line(`if handleError != nil { slickHTTPServerWriteResponse(writer, request.Method, slickHTTPServerResponseData{status: http.StatusInternalServerError}); return }`)
 	g.line(`slickHTTPServerWriteResponse(writer, request.Method, slickHTTPServerFromResponse(response))`)
@@ -746,7 +747,6 @@ func (g *goGenerator) emitHTTPServerRuntimeSupport() {
 		resultType, failureClass, operationField, "Shutdown", addressField, messageField, "forced shutdown failed")
 	g.line(`}`)
 	g.line(`}`)
-	g.line(`waitGroup.Wait()`)
 	g.line(`if err := <-serveErrors; err != nil && !errors.Is(err, http.ErrServerClosed) {`)
 	g.line("return %s{failure: &%s{%s: %q, %s: data.address, %s: %q}}, nil",
 		resultType, failureClass, operationField, "Serve", addressField, messageField, "HTTP server failed")

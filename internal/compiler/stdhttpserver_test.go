@@ -2,6 +2,7 @@ package compiler_test
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,7 +25,24 @@ import (
 
 const httpServerEchoHandler = `
 class Echo implements std.http.server.Handler {
+	Hits: Buffer<int>
+
     function Handle(Request: std.http.server.Request) -> std.http.server.Response {
+		if (Request.Path == "/serialized") {
+			let Before = std.buffer.Length<int>(self.Hits)
+			let URL = std.env.Get("SLICK_HTTP_SERIAL_URL")
+			if (URL != null) {
+				let Result = std.http.Fetch(std.http.Request {
+					Method: "GET"
+					URL: URL
+				})
+			}
+			std.buffer.Push<int>(self.Hits, Before)
+			return std.http.server.Response {
+				Status: 200
+				Body: std.bytes.FromUtf8(std.convert.IntToString(Before))
+			}
+		}
         if (Request.Path == "/bad-status") {
             return std.http.server.Response {
                 Status: 0
@@ -196,14 +215,95 @@ func assertMalformedQueryAndConnectRejected(t *testing.T, address string) {
 
 func shutdownBlocker(t *testing.T) (string, <-chan struct{}) {
 	t.Helper()
-	started := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		close(started)
-		time.Sleep(150 * time.Millisecond)
-		writer.WriteHeader(http.StatusNoContent)
+	started := make(chan struct{}, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		started <- struct{}{}
+		<-request.Context().Done()
 	}))
 	t.Cleanup(server.Close)
 	return server.URL, started
+}
+
+func serializationDelayServer(t *testing.T) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		time.Sleep(20 * time.Millisecond)
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	return server.URL
+}
+
+func assertHandlerCancellation(t *testing.T, base string, started <-chan struct{}) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/slow", nil)
+	if err != nil {
+		t.Fatalf("build cancellable request: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		response, err := http.DefaultClient.Do(request)
+		if err == nil {
+			response.Body.Close()
+		}
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancellable handler did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled request did not finish")
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	response, err := client.Get(base + "/count")
+	if err != nil {
+		t.Fatalf("handler remained blocked after cancellation: %v", err)
+	}
+	response.Body.Close()
+}
+
+func assertSerializedHandler(t *testing.T, base string) {
+	t.Helper()
+	const requests = 8
+	values := make(chan int, requests)
+	var waitGroup sync.WaitGroup
+	for range requests {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			response, err := http.Get(base + "/serialized")
+			if err != nil {
+				values <- -1
+				return
+			}
+			body, _ := io.ReadAll(response.Body)
+			response.Body.Close()
+			value, err := strconv.Atoi(string(body))
+			if err != nil || response.StatusCode != http.StatusOK {
+				values <- -1
+				return
+			}
+			values <- value
+		}()
+	}
+	waitGroup.Wait()
+	close(values)
+	got := make([]int, 0, requests)
+	for value := range values {
+		got = append(got, value)
+	}
+	sort.Ints(got)
+	for index, value := range got {
+		if value != index {
+			t.Fatalf("serialized handler results = %v", got)
+		}
+	}
 }
 
 func assertShutdownDeadlineSucceeds(t *testing.T, command *exec.Cmd, base string, started <-chan struct{}, output *strings.Builder) {
@@ -218,7 +318,7 @@ func assertShutdownDeadlineSucceeds(t *testing.T, command *exec.Cmd, base string
 	}()
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(2 * time.Second):
 		t.Fatal("slow handler did not start")
 	}
 	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
@@ -315,15 +415,18 @@ function main() -> Result<null, std.http.server.Failure> {
             WriteTimeoutMilliseconds: 1000
             IdleTimeoutMilliseconds: 1000
             ShutdownTimeoutMilliseconds: 10
-        }, Echo {})
+        }, Echo { Hits: std.buffer.New<int>() })
     }
 }
 `
 	binary := buildHTTPServerBinary(t, source)
 	blockURL, blockerStarted := shutdownBlocker(t)
-	command := startHTTPServerBinary(t, binary, address, "SLICK_HTTP_BLOCK_URL="+blockURL)
+	serialURL := serializationDelayServer(t)
+	command := startHTTPServerBinary(t, binary, address, "SLICK_HTTP_BLOCK_URL="+blockURL, "SLICK_HTTP_SERIAL_URL="+serialURL)
 	base := "http://" + address
 	waitForHTTP(t, base+"/count")
+	assertHandlerCancellation(t, base, blockerStarted)
+	assertSerializedHandler(t, base)
 	assertMalformedQueryAndConnectRejected(t, address)
 
 	// Methods including an extension token, query, headers, and body.
@@ -484,7 +587,7 @@ function main() -> Result<null, std.http.server.Failure> {
             Address: Address
             MaxBodyBytes: 64
             ShutdownTimeoutMilliseconds: 10
-        }, Echo {})
+		}, Echo { Hits: std.buffer.New<int>() })
     }
 }
 `
@@ -496,7 +599,8 @@ function main() -> Result<null, std.http.server.Failure> {
 	slick := buildSlickTool(t)
 	command := exec.Command(slick, "run", path)
 	blockURL, blockerStarted := shutdownBlocker(t)
-	command.Env = append(os.Environ(), "SLICK_HTTP_SERVER_ADDR="+address, "SLICK_HTTP_BLOCK_URL="+blockURL)
+	serialURL := serializationDelayServer(t)
+	command.Env = append(os.Environ(), "SLICK_HTTP_SERVER_ADDR="+address, "SLICK_HTTP_BLOCK_URL="+blockURL, "SLICK_HTTP_SERIAL_URL="+serialURL)
 	var output strings.Builder
 	command.Stdout = &output
 	command.Stderr = &output
@@ -512,6 +616,8 @@ function main() -> Result<null, std.http.server.Failure> {
 
 	base := "http://" + address
 	waitForHTTP(t, base+"/count")
+	assertHandlerCancellation(t, base, blockerStarted)
+	assertSerializedHandler(t, base)
 	assertMalformedQueryAndConnectRejected(t, address)
 
 	response, err := http.Post(base+"/echo?q=one&q=two", "text/plain", strings.NewReader("hi"))
