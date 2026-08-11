@@ -365,12 +365,14 @@ func (p *program) checkCallableInvocation(node *callExpression, scope *astScope,
 		argumentInfo := p.checkASTExpressionExpecting(argument, scope, expected)
 		node.resolvedArgumentTypes[index] = argumentInfo.typ
 		mergeEffects(info.effects, argumentInfo.effects)
+		info.using = mergeUsingValues(info.using, argumentInfo.using)
 		if index < len(params) {
 			// The position matches a named call's, so both call forms report an
 			// argument mismatch the same way.
 			p.checkAssignable(node.pos, argumentInfo.typ, expected, label, index+1)
 		}
 	}
+	info.using = p.usingForType(info.typ, info.using)
 	if includeThrows {
 		mergeEffects(info.effects, node.resolvedThrows)
 	}

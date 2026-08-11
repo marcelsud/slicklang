@@ -240,12 +240,7 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		scope.initializing = previous
 		node.resolved = info.typ
 		if len(node.names) == 1 {
-			resource := info.using
-			scope.bind(node.names[0], info.typ)
-			if resource != nil {
-				resource.binding.owned = false
-				scope.usingBindings[node.names[0]] = resource.binding
-			}
+			p.bindUsingLocal(scope, node.names[0], info.typ, info.using)
 			return expressionInfo{typ: "null", effects: info.effects}
 		}
 		tupleTypes, tuple := tupleElementTypes(info.typ)
@@ -268,11 +263,7 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 				continue
 			}
 			seen[name] = struct{}{}
-			scope.bind(name, tupleTypes[index])
-			if info.using != nil {
-				info.using.binding.owned = false
-				scope.usingBindings[name] = info.using.binding
-			}
+			p.bindUsingLocal(scope, name, tupleTypes[index], info.using)
 		}
 		return expressionInfo{typ: "null", effects: info.effects}
 	case *asyncLetStatement:
@@ -401,7 +392,7 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		loopScope.loopDepth++
 		for index, binding := range node.bindings {
 			if binding != "_" {
-				loopScope.bind(binding, bindingTypes[index])
+				p.bindUsingLocal(loopScope, binding, bindingTypes[index], iterable.using)
 			}
 		}
 		body := p.checkASTBlock(node.body, loopScope, "")
@@ -929,9 +920,14 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 		mergeEffects(effects, calleeInfo.effects)
 		mergeEffects(effects, info.effects)
 		info.effects = effects
+		info.using = p.usingForType(info.typ, info.using, calleeInfo.using)
 		return info
 	}
 	parts := strings.Split(name.name, ".")
+	var receiverUsing *usingValue
+	if binding, active := scope.usingBindings[parts[0]]; active {
+		receiverUsing = &usingValue{name: parts[0], binding: binding}
+	}
 	if pending, exists := scope.pending[parts[0]]; exists {
 		p.add(node.pos, diagnosticCodePendingUse, "pending binding %s is not a call receiver; use await %s", parts[0], parts[0])
 		info := expressionInfo{typ: pending.typ, effects: make(effectSet)}
@@ -949,6 +945,7 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 		}
 	}
 	if info, callable := p.checkCallableValueTarget(node, scope, name, includeThrows); callable {
+		info.using = p.usingForType(info.typ, info.using, receiverUsing)
 		return info
 	}
 	if info, builtin := p.checkIterableCall(node, scope, name); builtin {
@@ -1070,14 +1067,17 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 			argumentInfo := p.checkASTExpression(argument, scope)
 			node.resolvedArgumentTypes[index] = argumentInfo.typ
 			mergeEffects(info.effects, argumentInfo.effects)
+			info.using = mergeUsingValues(info.using, argumentInfo.using)
 			continue
 		}
 		expected := node.resolvedParams[index]
 		argumentInfo := p.checkASTExpressionExpecting(argument, scope, expected)
 		node.resolvedArgumentTypes[index] = argumentInfo.typ
 		mergeEffects(info.effects, argumentInfo.effects)
+		info.using = mergeUsingValues(info.using, argumentInfo.using)
 		p.checkAssignable(node.pos, argumentInfo.typ, expected, target.name, index+1)
 	}
+	info.using = p.usingForType(info.typ, info.using, receiverUsing)
 	if target.native == nativeStdHTTPServerServe && len(node.resolvedArgumentTypes) > 1 {
 		handlerType := node.resolvedArgumentTypes[1]
 		if handlerType != typeUnknown && p.interfaces[handlerType] == nil && !p.taskSafeType(handlerType, make(map[string]bool)) {
@@ -1116,6 +1116,7 @@ func (p *program) checkIterableCall(node *callExpression, scope *astScope, name 
 	for _, argument := range node.args {
 		argumentInfo := p.checkASTExpression(argument, scope)
 		mergeEffects(info.effects, argumentInfo.effects)
+		info.using = mergeUsingValues(info.using, argumentInfo.using)
 		arguments = append(arguments, argumentInfo)
 	}
 	if name.name == "enumerate" {
@@ -1129,6 +1130,7 @@ func (p *program) checkIterableCall(node *callExpression, scope *astScope, name 
 			return info, true
 		}
 		info.typ = iterableType("int", elementType)
+		info.using = p.usingForType(info.typ, info.using)
 		return info, true
 	}
 	if len(arguments) < 2 {
@@ -1145,6 +1147,7 @@ func (p *program) checkIterableCall(node *callExpression, scope *astScope, name 
 		elementTypes = append(elementTypes, elementType)
 	}
 	info.typ = iterableType(elementTypes...)
+	info.using = p.usingForType(info.typ, info.using)
 	return info, true
 }
 
@@ -1563,7 +1566,10 @@ func (p *program) checkPropagateExpression(node *propagateExpression, scope *ast
 		p.add(node.pos, diagnosticCodePropagateError, "? cannot propagate %s from %s, which fails with %s", displayName(failure), scope.function.qualified, displayName(enclosingFailure))
 		return expressionInfo{typ: typeUnknown, effects: info.effects}
 	}
-	return expressionInfo{typ: success, effects: info.effects}
+	if info.using != nil && !p.taskSafeType(failure, make(map[string]bool)) {
+		p.add(node.pos, diagnosticCodeUsingEscape, "using binding %s cannot escape through Result propagation", info.using.name)
+	}
+	return expressionInfo{typ: success, effects: info.effects, using: p.usingForType(success, info.using)}
 }
 
 // checkMatchExpression types an exhaustive match. A Result scrutinee must
@@ -1575,7 +1581,7 @@ func (p *program) checkMatchExpression(node *matchExpression, scope *astScope, e
 	info := expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	mergeEffects(info.effects, valueInfo.effects)
 	if union := p.unions[valueInfo.typ]; union != nil {
-		return p.checkUnionMatch(node, union, valueInfo.effects, scope, expected)
+		return p.checkUnionMatch(node, union, valueInfo.effects, valueInfo.using, scope, expected)
 	}
 	success, failure, isResult := resultTypeArgs(valueInfo.typ)
 	if !isResult {
@@ -1613,7 +1619,7 @@ func (p *program) checkMatchExpression(node *matchExpression, scope *astScope, e
 			if arm.pattern == matchPatternErr {
 				binding = failure
 			}
-			armScope.bind(arm.binding, binding)
+			p.bindUsingLocal(armScope, arm.binding, binding, valueInfo.using)
 		}
 		armInfo := p.checkASTExpressionExpecting(arm.value, armScope, expected)
 		mergeEffects(info.effects, armInfo.effects)
@@ -1856,6 +1862,24 @@ func mergeUsingValues(values ...*usingValue) *usingValue {
 	return merged
 }
 
+func (p *program) usingForType(typ string, values ...*usingValue) *usingValue {
+	if p.taskSafeType(typ, make(map[string]bool)) {
+		return nil
+	}
+	return mergeUsingValues(values...)
+}
+
+func (p *program) bindUsingLocal(scope *astScope, name, typ string, value *usingValue) {
+	scope.bind(name, typ)
+	value = p.usingForType(typ, value)
+	if value == nil {
+		return
+	}
+	binding := value.binding
+	binding.owned = false
+	scope.usingBindings[name] = binding
+}
+
 func copyPendingStates(target, source *astScope) {
 	for name, binding := range target.pending {
 		updated, exists := source.pending[name]
@@ -2020,6 +2044,9 @@ func (p *program) taskSafeType(name string, visiting map[string]bool) bool {
 func (p *program) taskSafeClass(name string, visiting map[string]bool) bool {
 	class := p.classes[name]
 	if class == nil || class.nativeResource != "" {
+		return false
+	}
+	if _, resource := p.methodForType(name, "Close"); resource {
 		return false
 	}
 	if visiting[name] {

@@ -408,6 +408,51 @@ func TestUsingDiagnostics(t *testing.T) {
 			code:    "SLK389",
 			message: "using binding Handle cannot escape its scope",
 		},
+		"named call result escape": {
+			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function Identity(Value: Resource) -> Resource { Value } function main() -> Resource { using Handle = Open() { Identity(Handle) } }`,
+			code:    "SLK389",
+			message: "using binding Handle cannot escape its scope",
+		},
+		"callable result escape": {
+			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function main() -> Resource { let Identity = (Value: Resource) -> Resource { Value } using Handle = Open() { Identity(Handle) } }`,
+			code:    "SLK389",
+			message: "using binding Handle cannot escape its scope",
+		},
+		"receiver result escape": {
+			source:  `class Resource { function Close() -> null { null } function Identity() -> Resource { self } } function Open() -> Resource { Resource {} } function main() -> Resource { using Handle = Open() { Handle.Identity() } }`,
+			code:    "SLK389",
+			message: "using binding Handle cannot escape its scope",
+		},
+		"union construction escape": {
+			source:  `class Resource { function Close() -> null { null } } union Choice { Held(Value: Resource) Empty } function Open() -> Resource { Resource {} } function main() -> Choice { using Handle = Open() { Choice.Held(Handle) } }`,
+			code:    "SLK389",
+			message: "using binding Handle cannot escape its scope",
+		},
+		"result propagation escape": {
+			source:  `class Failure implements Error {} class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function Wrap(Value: Resource) -> Result<Resource,Failure> { Ok(Value) } function main() -> Result<Resource,Failure> { using Handle = Open() { Ok(Wrap(Handle)?) } }`,
+			code:    "SLK389",
+			message: "using binding Handle cannot escape its scope",
+		},
+		"result failure propagation escape": {
+			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function Wrap(Value: Resource) -> Result<int,Resource> { Err(Value) } function main() -> Result<int,Resource> { using Handle = Open() { let Value = Wrap(Handle)? Ok(Value) } }`,
+			code:    "SLK389",
+			message: "cannot escape through Result propagation",
+		},
+		"result payload escape": {
+			source:  `class Failure implements Error {} class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function Wrap(Value: Resource) -> Result<Resource,Failure> { Ok(Value) } function main() -> Resource { using Handle = Open() { match Wrap(Handle) { Ok(Value) => Value Err(_) => Open() } } }`,
+			code:    "SLK389",
+			message: "cannot escape its scope",
+		},
+		"union payload escape": {
+			source:  `class Resource { function Close() -> null { null } } union Choice { Held(Value: Resource) Empty } function Open() -> Resource { Resource {} } function Wrap(Value: Resource) -> Choice { Choice.Held(Value) } function main() -> Resource { using Handle = Open() { match Wrap(Handle) { Choice.Held(Value) => Value Choice.Empty => Open() } } }`,
+			code:    "SLK389",
+			message: "cannot escape its scope",
+		},
+		"loop binding escape": {
+			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function main() -> Resource { using Handle = Open() { for Item in [Handle] { return Item } Open() } }`,
+			code:    "SLK389",
+			message: "cannot be returned outside its scope",
+		},
 		"immutable binding": {
 			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function main() -> null { using Handle = Open() { Handle = Open() } }`,
 			code:    "SLK390",
@@ -454,6 +499,23 @@ function main() -> null {
         let Alias = Open()
         Alias = Handle
         null
+    }
+}
+`)
+	assertNoDiagnostics(t, diagnostics)
+}
+
+func TestUsingTupleDestructureKeepsSafeElementClean(t *testing.T) {
+	diagnostics := checkResult(t, `
+class Resource {
+    function Close() -> null { null }
+}
+function Open() -> Resource { Resource {} }
+function main() -> int {
+    using Handle = Open() {
+        let Pair = (1, Handle)
+        let (Number, _) = Pair
+        Number
     }
 }
 `)

@@ -291,8 +291,8 @@ func convertHTTPServerRequest(request *http.Request, maxBodyBytes int64) (httpSe
 }
 
 func validateHTTPServerResponse(response httpServerResponseData) error {
-	if response.status < 100 || response.status > 599 {
-		return errors.New("response status must be between 100 and 599")
+	if response.status < 200 || response.status > 599 {
+		return errors.New("response status must be between 200 and 599")
 	}
 	for _, header := range response.headers {
 		if isHopByHopHeader(header.name) {
@@ -309,8 +309,8 @@ func validateHTTPServerResponse(response httpServerResponseData) error {
 			return fmt.Errorf("%s header values must not be empty", canonical)
 		}
 		for _, value := range header.values {
-			if strings.ContainsAny(value, "\r\n") {
-				return fmt.Errorf("%s header values must not contain CR or LF", canonical)
+			if !validHTTPFieldValue(value) {
+				return fmt.Errorf("%s header value contains a forbidden control byte", canonical)
 			}
 		}
 	}
@@ -608,6 +608,7 @@ func (g *goGenerator) emitHTTPServerRuntimeSupport() {
 	// Reuse client token validation when client support is also present; otherwise emit a local copy.
 	if !g.program.usesStdHTTP {
 		g.line("func slickHTTPValidToken(value string) bool { if value == \"\" { return false }; for index := 0; index < len(value); index++ { character := value[index]; if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || strings.ContainsRune(\"!#$%%&'*+-.^_`|~\", rune(character)) { continue }; return false }; return true }")
+		g.line(`func slickHTTPValidFieldValue(value string) bool { for index := 0; index < len(value); index++ { character := value[index]; if character != '\t' && (character < ' ' || character == 0x7f) { return false } }; return true }`)
 	}
 	g.line(`func slickHTTPServerReadBody(request *http.Request, maxBodyBytes int64) (slickBytes, int, error) {`)
 	g.line(`if request.Body == nil || request.Body == http.NoBody { return slickBytes{}, 0, nil }`)
@@ -624,14 +625,14 @@ func (g *goGenerator) emitHTTPServerRuntimeSupport() {
 	g.line(`return slickHTTPServerRequestData{method: request.Method, path: path, query: query, headers: slickHTTPServerRequestHeaders(request.Header), body: body}, 0, nil`)
 	g.line(`}`)
 	g.line(`func slickHTTPServerValidateResponse(response slickHTTPServerResponseData) error {`)
-	g.line(`if response.status < 100 || response.status > 599 { return errors.New("response status must be between 100 and 599") }`)
+	g.line(`if response.status < 200 || response.status > 599 { return errors.New("response status must be between 200 and 599") }`)
 	g.line(`for _, header := range response.headers {`)
 	g.line(`if slickHTTPServerIsHopByHop(header.name) { return fmt.Errorf("%%s header cannot be controlled", http.CanonicalHeaderKey(header.name)) }`)
 	g.line(`canonical := http.CanonicalHeaderKey(header.name)`)
 	g.line(`if !slickHTTPValidToken(header.name) || canonical == "" { return errors.New("invalid response header name") }`)
 	g.line(`if canonical == "Content-Length" || canonical == "Host" || canonical == "Transfer-Encoding" { return fmt.Errorf("%%s header cannot be controlled", canonical) }`)
 	g.line(`if len(header.values) == 0 { return fmt.Errorf("%%s header values must not be empty", canonical) }`)
-	g.line(`for _, value := range header.values { if strings.ContainsAny(value, "\r\n") { return fmt.Errorf("%%s header values must not contain CR or LF", canonical) } }`)
+	g.line(`for _, value := range header.values { if !slickHTTPValidFieldValue(value) { return fmt.Errorf("%%s header value contains a forbidden control byte", canonical) } }`)
 	g.line(`}`)
 	g.line(`return nil`)
 	g.line(`}`)

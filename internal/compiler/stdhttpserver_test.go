@@ -31,6 +31,12 @@ class Echo implements std.http.server.Handler {
                 Body: std.bytes.FromUtf8("nope")
             }
         }
+        if (Request.Path == "/informational-status") {
+            return std.http.server.Response {
+                Status: 103
+                Body: std.bytes.FromUtf8("nope")
+            }
+        }
         if (Request.Path == "/unsupported-status") {
             return std.http.server.Response {
                 Status: 600
@@ -41,6 +47,13 @@ class Echo implements std.http.server.Handler {
             return std.http.server.Response {
                 Status: 200
                 Headers: map { "Bad Name": ["value"] }
+                Body: std.bytes.FromUtf8("nope")
+            }
+        }
+        if (Request.Path == "/bad-header-value") {
+            return std.http.server.Response {
+                Status: 200
+                Headers: map { "X-Bad": ["nul\u0000del\u007f"] }
                 Body: std.bytes.FromUtf8("nope")
             }
         }
@@ -118,6 +131,7 @@ class Echo implements std.http.server.Handler {
             Headers: map {
                 "X-Echo": ["yes"]
                 "X-Multi": ["a", "b"]
+                "X-Tab": ["left\tright"]
             }
             Body: std.bytes.FromUtf8(Payload)
         }
@@ -424,6 +438,9 @@ function main() -> Result<null, std.http.server.Failure> {
 	if values := response.Header.Values("X-Multi"); strings.Join(values, ",") != "a,b" {
 		t.Fatalf("response multi headers = %v", values)
 	}
+	if value := response.Header.Get("X-Tab"); value != "left\tright" {
+		t.Fatalf("response tab header = %q", value)
+	}
 
 	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions} {
 		req, err := http.NewRequest(method, base+"/m", nil)
@@ -476,6 +493,15 @@ function main() -> Result<null, std.http.server.Failure> {
 	if strings.Contains(string(badBody), "nope") {
 		t.Fatalf("invalid response echoed body: %q", badBody)
 	}
+	informational, err := http.Get(base + "/informational-status")
+	if err != nil {
+		t.Fatalf("informational-status: %v", err)
+	}
+	informationalBody, _ := io.ReadAll(informational.Body)
+	informational.Body.Close()
+	if informational.StatusCode != 500 || strings.Contains(string(informationalBody), "nope") {
+		t.Fatalf("informational-status status=%d body=%q", informational.StatusCode, informationalBody)
+	}
 	unsupported, err := http.Get(base + "/unsupported-status")
 	if err != nil {
 		t.Fatalf("unsupported-status: %v", err)
@@ -495,6 +521,15 @@ function main() -> Result<null, std.http.server.Failure> {
 	badHeader.Body.Close()
 	if badHeader.StatusCode != 500 || strings.Contains(string(badHeaderBody), "nope") {
 		t.Fatalf("bad-header status=%d body=%q", badHeader.StatusCode, badHeaderBody)
+	}
+	badHeaderValue, err := http.Get(base + "/bad-header-value")
+	if err != nil {
+		t.Fatalf("bad-header-value: %v", err)
+	}
+	badHeaderValueBody, _ := io.ReadAll(badHeaderValue.Body)
+	badHeaderValue.Body.Close()
+	if badHeaderValue.StatusCode != 500 || strings.Contains(string(badHeaderValueBody), "nope") {
+		t.Fatalf("bad-header-value status=%d body=%q", badHeaderValue.StatusCode, badHeaderValueBody)
 	}
 
 	// Oversized body is rejected without invoking handler payload echo.
@@ -611,6 +646,18 @@ function main() -> Result<null, std.http.server.Failure> {
 	if response.StatusCode != 200 || string(body) != "POST|/echo|one,two||hi|2" {
 		t.Fatalf("interpreter body %q status %d", body, response.StatusCode)
 	}
+	if value := response.Header.Get("X-Tab"); value != "left\tright" {
+		t.Fatalf("interpreter tab header = %q", value)
+	}
+	informational, err := http.Get(base + "/informational-status")
+	if err != nil {
+		t.Fatalf("interpreter informational-status: %v", err)
+	}
+	informationalBody, _ := io.ReadAll(informational.Body)
+	informational.Body.Close()
+	if informational.StatusCode != 500 || strings.Contains(string(informationalBody), "nope") {
+		t.Fatalf("interpreter informational-status status=%d body=%q", informational.StatusCode, informationalBody)
+	}
 	unsupported, err := http.Get(base + "/unsupported-status")
 	if err != nil {
 		t.Fatalf("interpreter unsupported-status: %v", err)
@@ -619,6 +666,15 @@ function main() -> Result<null, std.http.server.Failure> {
 	unsupported.Body.Close()
 	if unsupported.StatusCode != 500 || strings.Contains(string(unsupportedBody), "nope") {
 		t.Fatalf("interpreter unsupported-status status=%d body=%q", unsupported.StatusCode, unsupportedBody)
+	}
+	badHeaderValue, err := http.Get(base + "/bad-header-value")
+	if err != nil {
+		t.Fatalf("interpreter bad-header-value: %v", err)
+	}
+	badHeaderValueBody, _ := io.ReadAll(badHeaderValue.Body)
+	badHeaderValue.Body.Close()
+	if badHeaderValue.StatusCode != 500 || strings.Contains(string(badHeaderValueBody), "nope") {
+		t.Fatalf("interpreter bad-header-value status=%d body=%q", badHeaderValue.StatusCode, badHeaderValueBody)
 	}
 
 	// Concurrent requests through the interpreter path.
