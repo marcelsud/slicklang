@@ -41,6 +41,7 @@ func testAnnotationTerminals() []terminalAnnotationDecl {
 		{canonical: "std.test.Marker", targets: []annotationTarget{annotationTargetClass, annotationTargetMethod, annotationTargetParameter}},
 		{canonical: "std.test.Tag", params: []string{"string"}, targets: []annotationTarget{annotationTargetClass}, repeatable: true},
 		{canonical: "std.test.Choice", params: []string{"root.Method"}, targets: []annotationTarget{annotationTargetClass}},
+		{canonical: "std.test.MetaChoice", params: []string{"root.meta.Method"}, targets: []annotationTarget{annotationTargetClass}},
 	}
 }
 

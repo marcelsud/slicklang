@@ -13,7 +13,6 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -292,8 +291,8 @@ func convertHTTPServerRequest(request *http.Request, maxBodyBytes int64) (httpSe
 }
 
 func validateHTTPServerResponse(response httpServerResponseData) error {
-	if response.status < 100 || response.status > 999 {
-		return errors.New("response status must be between 100 and 999")
+	if response.status < 100 || response.status > 599 {
+		return errors.New("response status must be between 100 and 599")
 	}
 	for _, header := range response.headers {
 		if isHopByHopHeader(header.name) {
@@ -466,6 +465,9 @@ func (p *program) invokeHTTPServerHandler(ctx context.Context, handler runtimeVa
 }
 
 func (p *program) serveHTTP(ctx context.Context, config httpServerConfigData, handler runtimeValue) *httpServerFailureData {
+	if !p.taskSafeType(handler.typ, make(map[string]bool)) {
+		return httpServerFailure("Config", config.address, "Application must be task-safe")
+	}
 	if failure := validateHTTPServerConfig(config); failure != nil {
 		return failure
 	}
@@ -475,7 +477,6 @@ func (p *program) serveHTTP(ctx context.Context, config httpServerConfigData, ha
 	}
 	defer listener.Close()
 
-	var handlerMutex sync.Mutex
 	server := &http.Server{
 		MaxHeaderBytes:    int(config.maxHeaderBytes),
 		ReadHeaderTimeout: httpServerTimeoutDuration(config.readHeaderTimeoutMillis),
@@ -492,8 +493,6 @@ func (p *program) serveHTTP(ctx context.Context, config httpServerConfigData, ha
 				return
 			}
 			slickRequest := runtimeHTTPServerRequest(data)
-			handlerMutex.Lock()
-			defer handlerMutex.Unlock()
 			responseValue, ok := p.invokeHTTPServerHandler(request.Context(), handler, slickRequest)
 			if !ok {
 				writeHTTPServerResponse(writer, request.Method, sanitizedHTTPServerInternalResponse())
@@ -625,7 +624,7 @@ func (g *goGenerator) emitHTTPServerRuntimeSupport() {
 	g.line(`return slickHTTPServerRequestData{method: request.Method, path: path, query: query, headers: slickHTTPServerRequestHeaders(request.Header), body: body}, 0, nil`)
 	g.line(`}`)
 	g.line(`func slickHTTPServerValidateResponse(response slickHTTPServerResponseData) error {`)
-	g.line(`if response.status < 100 || response.status > 999 { return errors.New("response status must be between 100 and 999") }`)
+	g.line(`if response.status < 100 || response.status > 599 { return errors.New("response status must be between 100 and 599") }`)
 	g.line(`for _, header := range response.headers {`)
 	g.line(`if slickHTTPServerIsHopByHop(header.name) { return fmt.Errorf("%%s header cannot be controlled", http.CanonicalHeaderKey(header.name)) }`)
 	g.line(`canonical := http.CanonicalHeaderKey(header.name)`)
@@ -690,13 +689,14 @@ func (g *goGenerator) emitHTTPServerRuntimeSupport() {
 	g.line("if config.%s.present { data.writeTimeoutMillis = config.%s.value }", writeField, writeField)
 	g.line("if config.%s.present { data.idleTimeoutMillis = config.%s.value }", idleField, idleField)
 	g.line("if config.%s.present { data.shutdownTimeoutMillis = config.%s.value }", shutdownField, shutdownField)
+	g.line("if _, safe := application.(interface{ slickHTTPServerTaskSafe() }); !safe { return %s{failure: &%s{%s: %q, %s: data.address, %s: %q}}, nil }",
+		resultType, failureClass, operationField, "Config", addressField, messageField, "Application must be task-safe")
 	g.line("if failure := slickHTTPServerValidateConfig(data); failure != nil { return %s{failure: &%s{%s: failure.operation, %s: failure.address, %s: failure.message}}, nil }",
 		resultType, failureClass, operationField, addressField, messageField)
 	g.line(`listener, err := net.Listen("tcp", data.address)`)
 	g.line("if err != nil { return %s{failure: &%s{%s: %q, %s: data.address, %s: %q}}, nil }",
 		resultType, failureClass, operationField, "Bind", addressField, messageField, "failed to bind listen address")
 	g.line(`defer listener.Close()`)
-	g.line(`var handlerMutex sync.Mutex`)
 	handleMethod := goMethodName("Handle")
 	handleCallArgs := "slickRequest"
 	if g.program.usesAsync {
@@ -714,8 +714,6 @@ func (g *goGenerator) emitHTTPServerRuntimeSupport() {
 	g.line(`slickRequest := slickHTTPServerToRequest(converted)`)
 	g.line(`func() {`)
 	g.line(`defer func() { if recover() != nil { slickHTTPServerWriteResponse(writer, request.Method, slickHTTPServerResponseData{status: http.StatusInternalServerError}) } }()`)
-	g.line(`handlerMutex.Lock()`)
-	g.line(`defer handlerMutex.Unlock()`)
 	g.line(`response, handleError := application.%s(%s)`, handleMethod, handleCallArgs)
 	g.line(`if handleError != nil { slickHTTPServerWriteResponse(writer, request.Method, slickHTTPServerResponseData{status: http.StatusInternalServerError}); return }`)
 	g.line(`slickHTTPServerWriteResponse(writer, request.Method, slickHTTPServerFromResponse(response))`)

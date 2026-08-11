@@ -383,6 +383,31 @@ func TestUsingDiagnostics(t *testing.T) {
 			code:    "SLK389",
 			message: "using binding Handle cannot escape its scope",
 		},
+		"object value escape": {
+			source:  `class Resource { function Close() -> null { null } } class Box { Value: Resource } function Open() -> Resource { Resource {} } function main() -> Box { using Handle = Open() { Box { Value: Handle } } }`,
+			code:    "SLK389",
+			message: "using binding Handle cannot escape its scope",
+		},
+		"tuple value escape": {
+			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function main() -> (Resource,int) { using Handle = Open() { (Handle, 1) } }`,
+			code:    "SLK389",
+			message: "using binding Handle cannot escape its scope",
+		},
+		"array value escape": {
+			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function main() -> Resource[] { using Handle = Open() { [Handle] } }`,
+			code:    "SLK389",
+			message: "using binding Handle cannot escape its scope",
+		},
+		"map value escape": {
+			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function main() -> Map<string,Resource> { using Handle = Open() { map { "handle": Handle } } }`,
+			code:    "SLK389",
+			message: "using binding Handle cannot escape its scope",
+		},
+		"result value escape": {
+			source:  `class Failure implements Error {} class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function main() -> Result<Resource,Failure> { using Handle = Open() { Ok(Handle) } }`,
+			code:    "SLK389",
+			message: "using binding Handle cannot escape its scope",
+		},
 		"immutable binding": {
 			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function main() -> null { using Handle = Open() { Handle = Open() } }`,
 			code:    "SLK390",
@@ -415,6 +440,24 @@ func TestUsingDiagnostics(t *testing.T) {
 			assertDiagnostic(t, checkResult(t, test.source), test.code, test.message)
 		})
 	}
+}
+
+func TestUsingShadowedAssignmentStaysInsideScope(t *testing.T) {
+	diagnostics := checkResult(t, `
+class Resource {
+    function Close() -> null { null }
+}
+function Open() -> Resource { Resource {} }
+function main() -> null {
+    let Alias = Open()
+    using Handle = Open() {
+        let Alias = Open()
+        Alias = Handle
+        null
+    }
+}
+`)
+	assertNoDiagnostics(t, diagnostics)
 }
 
 func runUsingFailureEverywhere(t *testing.T, source string) string {

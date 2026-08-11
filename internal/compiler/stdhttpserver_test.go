@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,27 +24,16 @@ import (
 
 const httpServerEchoHandler = `
 class Echo implements std.http.server.Handler {
-	Hits: Buffer<int>
-
     function Handle(Request: std.http.server.Request) -> std.http.server.Response {
-		if (Request.Path == "/serialized") {
-			let Before = std.buffer.Length<int>(self.Hits)
-			let URL = std.env.Get("SLICK_HTTP_SERIAL_URL")
-			if (URL != null) {
-				let Result = std.http.Fetch(std.http.Request {
-					Method: "GET"
-					URL: URL
-				})
-			}
-			std.buffer.Push<int>(self.Hits, Before)
-			return std.http.server.Response {
-				Status: 200
-				Body: std.bytes.FromUtf8(std.convert.IntToString(Before))
-			}
-		}
         if (Request.Path == "/bad-status") {
             return std.http.server.Response {
                 Status: 0
+                Body: std.bytes.FromUtf8("nope")
+            }
+        }
+        if (Request.Path == "/unsupported-status") {
+            return std.http.server.Response {
+                Status: 600
                 Body: std.bytes.FromUtf8("nope")
             }
         }
@@ -66,6 +54,26 @@ class Echo implements std.http.server.Handler {
             return std.http.server.Response {
                 Status: 200
                 Body: std.bytes.FromUtf8("hit")
+            }
+        }
+        if (Request.Path == "/reentrant") {
+            let Address = std.env.Get("SLICK_HTTP_SERVER_ADDR")
+            if (Address != null) {
+                let Outbound = std.http.Request {
+                    Method: "GET"
+                    URL: "http://" + Address + "/count"
+                }
+                let Fetched = std.http.Fetch(Outbound)
+                return match Fetched {
+                    Ok(_) => std.http.server.Response {
+                        Status: 200
+                        Body: std.bytes.FromUtf8("reentrant")
+                    }
+                    Err(_) => std.http.server.Response {
+                        Status: 500
+                        Body: std.bytes.FromUtf8("failed")
+                    }
+                }
             }
         }
         if (Request.Path == "/slow") {
@@ -224,16 +232,6 @@ func shutdownBlocker(t *testing.T) (string, <-chan struct{}) {
 	return server.URL, started
 }
 
-func serializationDelayServer(t *testing.T) string {
-	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		time.Sleep(20 * time.Millisecond)
-		writer.WriteHeader(http.StatusNoContent)
-	}))
-	t.Cleanup(server.Close)
-	return server.URL
-}
-
 func assertHandlerCancellation(t *testing.T, base string, started <-chan struct{}) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -268,41 +266,17 @@ func assertHandlerCancellation(t *testing.T, base string, started <-chan struct{
 	response.Body.Close()
 }
 
-func assertSerializedHandler(t *testing.T, base string) {
+func assertReentrantHandler(t *testing.T, base string) {
 	t.Helper()
-	const requests = 8
-	values := make(chan int, requests)
-	var waitGroup sync.WaitGroup
-	for range requests {
-		waitGroup.Add(1)
-		go func() {
-			defer waitGroup.Done()
-			response, err := http.Get(base + "/serialized")
-			if err != nil {
-				values <- -1
-				return
-			}
-			body, _ := io.ReadAll(response.Body)
-			response.Body.Close()
-			value, err := strconv.Atoi(string(body))
-			if err != nil || response.StatusCode != http.StatusOK {
-				values <- -1
-				return
-			}
-			values <- value
-		}()
+	client := &http.Client{Timeout: 2 * time.Second}
+	response, err := client.Get(base + "/reentrant")
+	if err != nil {
+		t.Fatalf("reentrant handler: %v", err)
 	}
-	waitGroup.Wait()
-	close(values)
-	got := make([]int, 0, requests)
-	for value := range values {
-		got = append(got, value)
-	}
-	sort.Ints(got)
-	for index, value := range got {
-		if value != index {
-			t.Fatalf("serialized handler results = %v", got)
-		}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || string(body) != "reentrant" {
+		t.Fatalf("reentrant handler status=%d body=%q", response.StatusCode, body)
 	}
 }
 
@@ -415,18 +389,17 @@ function main() -> Result<null, std.http.server.Failure> {
             WriteTimeoutMilliseconds: 1000
             IdleTimeoutMilliseconds: 1000
             ShutdownTimeoutMilliseconds: 10
-        }, Echo { Hits: std.buffer.New<int>() })
+        }, Echo {})
     }
 }
 `
 	binary := buildHTTPServerBinary(t, source)
 	blockURL, blockerStarted := shutdownBlocker(t)
-	serialURL := serializationDelayServer(t)
-	command := startHTTPServerBinary(t, binary, address, "SLICK_HTTP_BLOCK_URL="+blockURL, "SLICK_HTTP_SERIAL_URL="+serialURL)
+	command := startHTTPServerBinary(t, binary, address, "SLICK_HTTP_BLOCK_URL="+blockURL)
 	base := "http://" + address
 	waitForHTTP(t, base+"/count")
 	assertHandlerCancellation(t, base, blockerStarted)
-	assertSerializedHandler(t, base)
+	assertReentrantHandler(t, base)
 	assertMalformedQueryAndConnectRejected(t, address)
 
 	// Methods including an extension token, query, headers, and body.
@@ -502,6 +475,15 @@ function main() -> Result<null, std.http.server.Failure> {
 	}
 	if strings.Contains(string(badBody), "nope") {
 		t.Fatalf("invalid response echoed body: %q", badBody)
+	}
+	unsupported, err := http.Get(base + "/unsupported-status")
+	if err != nil {
+		t.Fatalf("unsupported-status: %v", err)
+	}
+	unsupportedBody, _ := io.ReadAll(unsupported.Body)
+	unsupported.Body.Close()
+	if unsupported.StatusCode != 500 || strings.Contains(string(unsupportedBody), "nope") {
+		t.Fatalf("unsupported-status status=%d body=%q", unsupported.StatusCode, unsupportedBody)
 	}
 
 	// Invalid response header becomes sanitized 500.
@@ -587,7 +569,7 @@ function main() -> Result<null, std.http.server.Failure> {
             Address: Address
             MaxBodyBytes: 64
             ShutdownTimeoutMilliseconds: 10
-		}, Echo { Hits: std.buffer.New<int>() })
+		}, Echo {})
     }
 }
 `
@@ -599,8 +581,7 @@ function main() -> Result<null, std.http.server.Failure> {
 	slick := buildSlickTool(t)
 	command := exec.Command(slick, "run", path)
 	blockURL, blockerStarted := shutdownBlocker(t)
-	serialURL := serializationDelayServer(t)
-	command.Env = append(os.Environ(), "SLICK_HTTP_SERVER_ADDR="+address, "SLICK_HTTP_BLOCK_URL="+blockURL, "SLICK_HTTP_SERIAL_URL="+serialURL)
+	command.Env = append(os.Environ(), "SLICK_HTTP_SERVER_ADDR="+address, "SLICK_HTTP_BLOCK_URL="+blockURL)
 	var output strings.Builder
 	command.Stdout = &output
 	command.Stderr = &output
@@ -617,7 +598,7 @@ function main() -> Result<null, std.http.server.Failure> {
 	base := "http://" + address
 	waitForHTTP(t, base+"/count")
 	assertHandlerCancellation(t, base, blockerStarted)
-	assertSerializedHandler(t, base)
+	assertReentrantHandler(t, base)
 	assertMalformedQueryAndConnectRejected(t, address)
 
 	response, err := http.Post(base+"/echo?q=one&q=two", "text/plain", strings.NewReader("hi"))
@@ -629,6 +610,15 @@ function main() -> Result<null, std.http.server.Failure> {
 	// Method|Path|Query|Header|Body|Length — Content-Type is not X-Trace.
 	if response.StatusCode != 200 || string(body) != "POST|/echo|one,two||hi|2" {
 		t.Fatalf("interpreter body %q status %d", body, response.StatusCode)
+	}
+	unsupported, err := http.Get(base + "/unsupported-status")
+	if err != nil {
+		t.Fatalf("interpreter unsupported-status: %v", err)
+	}
+	unsupportedBody, _ := io.ReadAll(unsupported.Body)
+	unsupported.Body.Close()
+	if unsupported.StatusCode != 500 || strings.Contains(string(unsupportedBody), "nope") {
+		t.Fatalf("interpreter unsupported-status status=%d body=%q", unsupported.StatusCode, unsupportedBody)
 	}
 
 	// Concurrent requests through the interpreter path.
@@ -699,6 +689,22 @@ function main() -> null {
 			code:    "SLK320",
 			message: "does not implement std.http.server.Handler",
 		},
+		"Handler task safety": {
+			source: `
+class Unsafe implements std.http.server.Handler {
+    State: Buffer<int>
+    function Handle(Request: std.http.server.Request) -> std.http.server.Response {
+        std.http.server.Response { Status: 200 }
+    }
+}
+function main() -> null {
+    std.http.server.Serve(std.http.server.Config { Address: "127.0.0.1:0" }, Unsafe { State: std.buffer.New<int>() })
+    null
+}
+`,
+			code:    "SLK403",
+			message: "HTTP server handler has task-unsafe type Unsafe",
+		},
 		"Config requires Address": {
 			source:  `function main() -> null { let _ = std.http.server.Config {} null }`,
 			code:    "SLK376",
@@ -710,6 +716,34 @@ function main() -> null {
 			diagnostics := checkResult(t, test.source)
 			assertDiagnostic(t, diagnostics, test.code, test.message)
 		})
+	}
+}
+
+func TestStdHTTPServerUnsafeHandlerCallableRejectedEverywhere(t *testing.T) {
+	source := `
+class Unsafe implements std.http.server.Handler {
+    State: Buffer<int>
+    function Handle(Request: std.http.server.Request) -> std.http.server.Response {
+        std.http.server.Response {
+            Status: 200
+            Body: std.bytes.FromUtf8("unsafe")
+        }
+    }
+}
+
+function main() -> string {
+    let Start = std.http.server.Serve
+	let Config = std.http.server.Config { Address: "127.0.0.1:0" }
+	let Application = Unsafe { State: std.buffer.New<int>() }
+	let Started = Start(Config, Application)
+    match Started {
+        Ok(_) => "started"
+        Err(Failure) => Failure.Message
+    }
+}
+`
+	if output := runResultEverywhere(t, source); output != "Application must be task-safe" {
+		t.Fatalf("unsafe callable handler = %q", output)
 	}
 }
 

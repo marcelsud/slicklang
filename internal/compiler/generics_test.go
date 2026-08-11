@@ -136,6 +136,49 @@ function main() -> string {
 `,
 			expected: "7;seven",
 		},
+		"generic nested only in callable signature": {
+			source: `
+class Box<T> {
+    Value: T
+}
+
+function Accept(Operation: (Box<int>) -> Box<int>) -> null {
+    null
+}
+
+function main() -> int {
+    42
+}
+`,
+			expected: "42",
+		},
+		"generic constructed only inside lambda": {
+			source: genericBox + `
+function main() -> int {
+    let Make = () -> Box<int> {
+        Box<int> { Value: 42 }
+    }
+    let Value = Make()
+    Value.Get()
+}
+`,
+			expected: "42",
+		},
+		"enclosing generic substitutes lambda signature": {
+			source: `
+function Make<T>(Value: T) -> (() -> T) {
+    () -> T {
+        Value
+    }
+}
+
+function main() -> int {
+    let Read = Make<int>(42)
+    Read()
+}
+`,
+			expected: "42",
+		},
 		"detached method keeps the receiver parameters": {
 			source: `
 class Box<T> {

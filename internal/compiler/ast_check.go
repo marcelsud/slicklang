@@ -39,8 +39,13 @@ type expressionInfo struct {
 }
 
 type usingBinding struct {
-	outerLocals map[string]struct{}
+	outerLocals map[bindingIdentity]struct{}
 	owned       bool
+}
+
+type bindingIdentity struct {
+	name string
+	id   uint64
 }
 
 type usingValue struct {
@@ -264,6 +269,10 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 			}
 			seen[name] = struct{}{}
 			scope.bind(name, tupleTypes[index])
+			if info.using != nil {
+				info.using.binding.owned = false
+				scope.usingBindings[name] = info.using.binding
+			}
 		}
 		return expressionInfo{typ: "null", effects: info.effects}
 	case *asyncLetStatement:
@@ -351,7 +360,8 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		delete(scope.narrowed, node.name)
 		resource := info.using
 		if resource != nil && (!targetsUsing || !targetBinding.owned) {
-			if _, escapes := resource.binding.outerLocals[node.name]; escapes {
+			identity := bindingIdentity{name: node.name, id: scope.bindingIDs[node.name]}
+			if _, escapes := resource.binding.outerLocals[identity]; escapes {
 				p.add(node.pos, diagnosticCodeUsingEscape, "using resource cannot be assigned outside its scope")
 			}
 		}
@@ -505,6 +515,7 @@ func (p *program) checkTupleExpression(node *tupleExpression, scope *astScope, e
 		for _, element := range node.elements {
 			elementInfo := p.checkASTExpression(element, scope)
 			mergeEffects(info.effects, elementInfo.effects)
+			info.using = mergeUsingValues(info.using, elementInfo.using)
 		}
 		p.add(node.pos, diagnosticCodeLoopBindings, "tuple expects %d elements, found %d", len(expectedTypes), len(node.elements))
 		info.typ = typeUnknown
@@ -519,6 +530,7 @@ func (p *program) checkTupleExpression(node *tupleExpression, scope *astScope, e
 		}
 		elementInfo := p.checkASTExpressionExpecting(element, scope, elementExpected)
 		mergeEffects(info.effects, elementInfo.effects)
+		info.using = mergeUsingValues(info.using, elementInfo.using)
 		types[index] = elementInfo.typ
 		if hasExpectedTuple && !p.assignable(elementInfo.typ, elementExpected) {
 			mismatch = true
@@ -598,7 +610,11 @@ func (p *program) checkNameExpression(node *nameExpression, scope *astScope) exp
 		if class != nil {
 			if field, ok := class.fields[parts[1]]; ok {
 				p.requireAccess(node.pos, scope.function.namespace, class.namespace, field.name, "field")
-				return expressionInfo{typ: p.resolveType(class.namespace, class.aliases, field.typ), effects: make(effectSet)}
+				info := expressionInfo{typ: p.resolveType(class.namespace, class.aliases, field.typ), effects: make(effectSet)}
+				if binding, active := scope.usingBindings[parts[0]]; active && !p.taskSafeType(info.typ, make(map[string]bool)) {
+					info.using = &usingValue{name: parts[0], binding: binding}
+				}
+				return info
 			}
 		}
 		// A method is invoked through its receiver and has no value form, so
@@ -684,6 +700,7 @@ func (p *program) checkArrayExpression(node *arrayExpression, scope *astScope, e
 	for _, element := range node.elements {
 		elementInfo := p.checkASTExpressionExpecting(element, scope, elementType)
 		mergeEffects(info.effects, elementInfo.effects)
+		info.using = mergeUsingValues(info.using, elementInfo.using)
 		if elementType == "" {
 			elementType = elementInfo.typ
 			continue
@@ -728,6 +745,7 @@ func (p *program) checkMapExpression(node *mapExpression, scope *astScope, expec
 		valueInfo := p.checkASTExpressionExpecting(entry.value, scope, valueExpected)
 		mergeEffects(info.effects, keyInfo.effects)
 		mergeEffects(info.effects, valueInfo.effects)
+		info.using = mergeUsingValues(info.using, keyInfo.using, valueInfo.using)
 
 		if keyInfo.typ != typeUnknown && !isMapKeyType(keyInfo.typ) {
 			p.add(entry.key.expressionPos(), diagnosticCodeMapKeyType, "Map key type must be string, int, or bool; found %s", displayName(keyInfo.typ))
@@ -822,6 +840,7 @@ func (p *program) checkObjectExpression(node *objectExpression, scope *astScope)
 		expected := p.resolveType(class.namespace, class.aliases, field.typ)
 		valueInfo := p.checkASTExpressionExpecting(fieldValue.value, scope, expected)
 		mergeEffects(info.effects, valueInfo.effects)
+		info.using = mergeUsingValues(info.using, valueInfo.using)
 		if !p.assignable(valueInfo.typ, expected) {
 			p.reportUnassignable(fieldValue.pos, valueInfo.typ, expected, diagnosticCodeTypeMismatch,
 				"field %s.%s must be %s, found %s", class.name, field.name, displayName(expected), displayName(valueInfo.typ))
@@ -847,9 +866,9 @@ func (p *program) checkUsingExpression(node *usingExpression, scope *astScope, e
 	node.resolved = info.typ
 
 	bodyScope := scope.clone()
-	outerLocals := make(map[string]struct{}, len(scope.locals))
+	outerLocals := make(map[bindingIdentity]struct{}, len(scope.locals))
 	for name := range scope.locals {
-		outerLocals[name] = struct{}{}
+		outerLocals[bindingIdentity{name: name, id: scope.bindingIDs[name]}] = struct{}{}
 	}
 	bodyScope.bind(node.name, info.typ)
 	bodyScope.usingBindings[node.name] = usingBinding{outerLocals: outerLocals, owned: true}
@@ -1058,6 +1077,13 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 		node.resolvedArgumentTypes[index] = argumentInfo.typ
 		mergeEffects(info.effects, argumentInfo.effects)
 		p.checkAssignable(node.pos, argumentInfo.typ, expected, target.name, index+1)
+	}
+	if target.native == nativeStdHTTPServerServe && len(node.resolvedArgumentTypes) > 1 {
+		handlerType := node.resolvedArgumentTypes[1]
+		if handlerType != typeUnknown && p.interfaces[handlerType] == nil && !p.taskSafeType(handlerType, make(map[string]bool)) {
+			p.add(node.args[1].expressionPos(), diagnosticCodeAsyncUnsafeValue,
+				"HTTP server handler has task-unsafe type %s", displayName(handlerType))
+		}
 	}
 	if includeThrows {
 		mergeEffects(info.effects, node.resolvedThrows)
@@ -1500,7 +1526,8 @@ func (p *program) checkResultExpression(node *resultExpression, scope *astScope,
 	success, failure, isResult := resultTypeArgs(expected)
 	if !isResult {
 		p.add(node.pos, diagnosticCodeResultTypeUnknown, "%s needs a known Result type here; give the enclosing return type, argument, or field a Result<T, E> type", node.label())
-		return expressionInfo{typ: typeUnknown, effects: p.checkASTExpression(node.value, scope).effects}
+		info := p.checkASTExpression(node.value, scope)
+		return expressionInfo{typ: typeUnknown, effects: info.effects, using: info.using}
 	}
 	payload := success
 	if !node.ok {
@@ -1512,7 +1539,7 @@ func (p *program) checkResultExpression(node *resultExpression, scope *astScope,
 			"%s payload must be %s, found %s", node.label(), displayName(payload), displayName(info.typ))
 	}
 	node.resolved = expected
-	return expressionInfo{typ: expected, effects: info.effects}
+	return expressionInfo{typ: expected, effects: info.effects, using: info.using}
 }
 
 // checkPropagateExpression types postfix ?. It never contributes a throw
@@ -1814,15 +1841,15 @@ func mergeUsingValues(values ...*usingValue) *usingValue {
 			continue
 		}
 		if merged == nil {
-			outerLocals := make(map[string]struct{}, len(value.binding.outerLocals))
-			for name := range value.binding.outerLocals {
-				outerLocals[name] = struct{}{}
+			outerLocals := make(map[bindingIdentity]struct{}, len(value.binding.outerLocals))
+			for identity := range value.binding.outerLocals {
+				outerLocals[identity] = struct{}{}
 			}
 			merged = &usingValue{name: value.name, binding: usingBinding{outerLocals: outerLocals, owned: value.binding.owned}}
 			continue
 		}
-		for name := range value.binding.outerLocals {
-			merged.binding.outerLocals[name] = struct{}{}
+		for identity := range value.binding.outerLocals {
+			merged.binding.outerLocals[identity] = struct{}{}
 		}
 		merged.binding.owned = merged.binding.owned && value.binding.owned
 	}
@@ -1873,7 +1900,7 @@ func mergeUsingPaths(target *astScope, paths []pendingPath) {
 				found = true
 				continue
 			}
-			outerLocals := make(map[string]struct{}, len(merged.outerLocals)+len(binding.outerLocals))
+			outerLocals := make(map[bindingIdentity]struct{}, len(merged.outerLocals)+len(binding.outerLocals))
 			for outer := range merged.outerLocals {
 				outerLocals[outer] = struct{}{}
 			}

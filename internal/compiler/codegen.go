@@ -146,7 +146,7 @@ func (p *program) generateGo() (string, error) {
 		}
 	}
 	if p.usesStdHTTPServer {
-		for _, name := range []string{"context", "io", "math", "net", "net/http", "net/url", "os", "os/signal", "sort", "strings", "sync", "syscall", "time"} {
+		for _, name := range []string{"context", "io", "math", "net", "net/http", "net/url", "os", "os/signal", "sort", "strings", "syscall", "time"} {
 			generator.imports[name] = true
 		}
 	}
@@ -543,6 +543,9 @@ func (g *goGenerator) emitDeclarations() error {
 			receiver = "*"
 		}
 		g.line("func (%s%s) slickTypeName() string { return %s }", receiver, goClassName(name), strconv.Quote(name))
+		if g.program.usesStdHTTPServer && g.program.taskSafeClass(name, make(map[string]bool)) {
+			g.line("func (%s%s) slickHTTPServerTaskSafe() {}", receiver, goClassName(name))
+		}
 		if class.isError {
 			g.line("func (value *%s) Error() string {", goClassName(name))
 			g.line("if value == nil { return %s }", strconv.Quote(name))
