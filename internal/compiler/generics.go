@@ -387,7 +387,7 @@ func (p *program) instantiateClass(request instantiation) []instantiation {
 	var found []instantiation
 	for name, field := range generic.fields {
 		typ := p.substitutedRef(generic.namespace, generic.aliases, substitutions, field.typ)
-		instance.fields[name] = fieldDecl{name: field.name, typ: typ, annotations: field.annotations, documentation: field.documentation, pos: field.pos}
+		instance.fields[name] = fieldDecl{name: field.name, typ: typ, documentation: field.documentation, pos: field.pos}
 		p.collectFromCanonicalType(field.typ.pos, typ.name, &found)
 	}
 	for name, method := range generic.methods {

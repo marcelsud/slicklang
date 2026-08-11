@@ -768,6 +768,37 @@ function main() -> int {
 	}
 }
 
+func TestGenericCallableComponentsKeepTypeParameterScope(t *testing.T) {
+	output := runResultEverywhere(t, `
+class Box<T> {
+    Value: T
+}
+
+class Failure<T> implements Error {
+    Message: string
+}
+
+function Apply<T>(
+    Operation: (Box<T>) -> T throws Failure<T>,
+    Input: Box<T>,
+) -> T throws Failure<T> {
+    Operation(Input)
+}
+
+function main() -> int {
+    let Read = (Value: Box<int>) -> int throws Failure<int> {
+        Value.Value
+    }
+    Apply<int>(Read, Box<int> { Value: 42 }) catch {
+        Failure<int> => 0
+    }
+}
+`)
+	if output != "42" {
+		t.Fatalf("program produced %q, want 42", output)
+	}
+}
+
 func TestLambdaParameterShadowsUsingBinding(t *testing.T) {
 	output := runResultEverywhere(t, `
 class Handle {
@@ -782,6 +813,29 @@ function main() -> int {
             Resource
         }
         Identity(42)
+    }
+}
+`)
+	if output != "42" {
+		t.Fatalf("program produced %q, want 42", output)
+	}
+}
+
+func TestLambdaLocalShadowsUsingBinding(t *testing.T) {
+	output := runResultEverywhere(t, `
+class Handle {
+    function Close() -> null {
+        null
+    }
+}
+
+function main() -> int {
+    using Resource = Handle {} {
+        let Operation = () -> int {
+            let Resource = 42
+            Resource
+        }
+        Operation()
     }
 }
 `)

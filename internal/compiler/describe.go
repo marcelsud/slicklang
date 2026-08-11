@@ -223,7 +223,7 @@ func (p *program) describeClass(class *classDecl) SymbolDescription {
 			Name:          field.name,
 			Type:          fieldType,
 			Callable:      describeCallable(fieldType),
-			Annotations:   p.describeAnnotations(field.annotations),
+			Annotations:   []AnnotationDescription{},
 			Visibility:    visibility(field.name),
 			Documentation: field.documentation,
 			Source:        describeSource(field.pos),
@@ -347,7 +347,7 @@ func (p *program) describeMember(name string) (SymbolDescription, bool) {
 		if field, ok := class.fields[member]; ok {
 			description := emptySymbol(name, "field", visibility(field.name))
 			description.Documentation = field.documentation
-			description.Annotations = p.describeAnnotations(field.annotations)
+			description.Annotations = []AnnotationDescription{}
 			description.Type = p.canonicalType(class.namespace, class.aliases, field.typ)
 			description.TypeCallable = describeCallable(description.Type)
 			description.Source = describeSource(field.pos)

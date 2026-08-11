@@ -118,18 +118,22 @@ func (p *program) checkTypeNameScoped(pos position, namespace string, scope *typ
 		return
 	case typeKindCallable:
 		for _, param := range parsed.args {
-			p.checkTypeName(pos, namespace, param)
+			p.checkTypeNameScoped(pos, namespace, scope, named, param)
 		}
-		p.checkTypeName(pos, namespace, parsed.base)
+		p.checkTypeNameScoped(pos, namespace, scope, named, parsed.base)
 		for _, thrown := range parsed.throws {
 			if thrown == errorTypeName {
 				continue
 			}
-			if class := p.classes[thrown]; class == nil || !class.isError {
-				p.add(pos, diagnosticCodeErrorValue, "%s does not name an Error type", displayName(thrown))
-				continue
+			p.checkTypeNameScoped(pos, namespace, scope, named, thrown)
+			thrownType := parseTypeName(thrown)
+			class := p.classes[thrown]
+			if thrownType.kind == typeKindGeneric {
+				class = p.genericClasses[thrownType.base]
 			}
-			p.checkTypeName(pos, namespace, thrown)
+			if class == nil || !class.isError {
+				p.add(pos, diagnosticCodeErrorValue, "%s does not name an Error type", displayName(thrown))
+			}
 		}
 		return
 	case typeKindTuple:

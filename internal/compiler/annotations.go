@@ -13,7 +13,6 @@ const (
 	annotationTargetClass     annotationTarget = "class"
 	annotationTargetMethod    annotationTarget = "method"
 	annotationTargetParameter annotationTarget = "parameter"
-	annotationTargetField     annotationTarget = "field"
 	annotationTargetFunction  annotationTarget = "function"
 )
 
@@ -567,10 +566,6 @@ func (p *program) annotationTargets() []annotationTargetRef {
 			class := classes[name]
 			instance := class.instanceOf != ""
 			targets = append(targets, annotationTargetRef{kind: annotationTargetClass, name: class.qualified, pos: class.pos, namespace: class.namespace, aliases: class.aliases, annotations: class.annotations, instance: instance, class: class})
-			for _, fieldName := range sortedKeys(class.fields) {
-				field := class.fields[fieldName]
-				targets = append(targets, annotationTargetRef{kind: annotationTargetField, name: class.qualified + "." + field.name, pos: field.pos, namespace: class.namespace, aliases: class.aliases, annotations: field.annotations, instance: instance, class: class})
-			}
 			for _, methodName := range sortedKeys(class.methods) {
 				method := class.methods[methodName]
 				function := class.implementations[method.name]
@@ -581,8 +576,13 @@ func (p *program) annotationTargets() []annotationTargetRef {
 				if function != nil && !function.inline && len(function.annotations) > 0 {
 					annotations = append(append([]*annotationUse(nil), annotations...), function.annotations...)
 				}
-				targets = append(targets, annotationTargetRef{kind: annotationTargetMethod, name: class.qualified + "." + method.name, pos: method.pos, namespace: method.namespace, aliases: method.aliases, annotations: annotations, instance: instance, class: class, method: method, function: function})
-				targets = append(targets, parameterAnnotationTargets(class.qualified+"."+method.name, method.namespace, method.aliases, method.params, instance)...)
+				methodTarget := annotationTargetRef{kind: annotationTargetMethod, name: class.qualified + "." + method.name, pos: method.pos, namespace: method.namespace, aliases: method.aliases, annotations: annotations, instance: instance, class: class, method: method, function: function}
+				targets = append(targets, methodTarget)
+				var implementationParams []paramDecl
+				if function != nil && !function.inline {
+					implementationParams = function.params
+				}
+				targets = append(targets, parameterAnnotationTargets(methodTarget, method.params, implementationParams)...)
 			}
 		}
 	}
@@ -592,8 +592,9 @@ func (p *program) annotationTargets() []annotationTargetRef {
 			instance := iface.instanceOf != ""
 			for _, methodName := range sortedKeys(iface.methods) {
 				method := iface.methods[methodName]
-				targets = append(targets, annotationTargetRef{kind: annotationTargetMethod, name: iface.qualified + "." + method.name, pos: method.pos, namespace: method.namespace, aliases: method.aliases, annotations: method.annotations, instance: instance, method: method})
-				targets = append(targets, parameterAnnotationTargets(iface.qualified+"."+method.name, method.namespace, method.aliases, method.params, instance)...)
+				methodTarget := annotationTargetRef{kind: annotationTargetMethod, name: iface.qualified + "." + method.name, pos: method.pos, namespace: method.namespace, aliases: method.aliases, annotations: method.annotations, instance: instance, method: method}
+				targets = append(targets, methodTarget)
+				targets = append(targets, parameterAnnotationTargets(methodTarget, method.params, nil)...)
 			}
 		}
 	}
@@ -605,18 +606,22 @@ func (p *program) annotationTargets() []annotationTargetRef {
 				kind = annotationTargetMethod
 			}
 			instance := function.instanceOf != ""
-			targets = append(targets, annotationTargetRef{kind: kind, name: function.qualified, pos: function.pos, namespace: function.namespace, aliases: function.aliases, annotations: function.annotations, instance: instance, function: function})
-			targets = append(targets, parameterAnnotationTargets(function.qualified, function.namespace, function.aliases, function.params, instance)...)
+			functionTarget := annotationTargetRef{kind: kind, name: function.qualified, pos: function.pos, namespace: function.namespace, aliases: function.aliases, annotations: function.annotations, instance: instance, function: function}
+			targets = append(targets, functionTarget)
+			targets = append(targets, parameterAnnotationTargets(functionTarget, function.params, nil)...)
 		}
 	}
 	for _, implementations := range [][]*functionDecl{p.genericMethodImpls, p.methodImpls} {
 		for _, function := range implementations {
-			if function.inline || len(function.annotations) == 0 || p.methodDeclaration(function) != nil {
+			if function.inline || p.methodDeclaration(function) != nil {
 				continue
 			}
 			instance := function.instanceOf != ""
-			targets = append(targets, annotationTargetRef{kind: annotationTargetMethod, name: function.qualified, pos: function.pos, namespace: function.namespace, aliases: function.aliases, annotations: function.annotations, instance: instance, function: function})
-			targets = append(targets, parameterAnnotationTargets(function.qualified, function.namespace, function.aliases, function.params, instance)...)
+			methodTarget := annotationTargetRef{kind: annotationTargetMethod, name: function.qualified, pos: function.pos, namespace: function.namespace, aliases: function.aliases, annotations: function.annotations, instance: instance, function: function}
+			if len(function.annotations) > 0 {
+				targets = append(targets, methodTarget)
+			}
+			targets = append(targets, parameterAnnotationTargets(methodTarget, function.params, nil)...)
 		}
 	}
 	return targets
@@ -660,11 +665,22 @@ func (p *program) methodDeclaration(implementation *functionDecl) *methodSignatu
 	return nil
 }
 
-func parameterAnnotationTargets(owner, namespace string, aliases map[string]aliasDecl, params []paramDecl, instance bool) []annotationTargetRef {
+func parameterAnnotationTargets(owner annotationTargetRef, params, implementationParams []paramDecl) []annotationTargetRef {
 	targets := make([]annotationTargetRef, 0, len(params))
 	for index := range params {
 		param := &params[index]
-		targets = append(targets, annotationTargetRef{kind: annotationTargetParameter, name: owner + "." + param.name, pos: param.typ.pos, namespace: namespace, aliases: aliases, annotations: param.annotations, instance: instance, parameter: param, parameterIndex: index})
+		annotations := param.annotations
+		if index < len(implementationParams) && len(implementationParams[index].annotations) > 0 {
+			annotations = append(append([]*annotationUse(nil), annotations...), implementationParams[index].annotations...)
+		}
+		target := owner
+		target.kind = annotationTargetParameter
+		target.name += "." + param.name
+		target.pos = param.typ.pos
+		target.annotations = annotations
+		target.parameter = param
+		target.parameterIndex = index
+		targets = append(targets, target)
 	}
 	return targets
 }

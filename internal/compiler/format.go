@@ -258,9 +258,6 @@ func (f *sourceFormatter) annotationTargetPoint(target annotationTargetRef) (sou
 		if token.pos.line != target.pos.line || token.pos.column != target.pos.column {
 			continue
 		}
-		if target.kind == annotationTargetField {
-			return sourcePoint{line: token.pos.line, column: token.pos.column}, true
-		}
 		for previous := index - 1; previous >= 0; previous-- {
 			if f.tokens[previous].kind == scanner.Comment {
 				continue

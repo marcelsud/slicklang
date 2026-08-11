@@ -106,10 +106,11 @@ func (p *program) checkLambdaExpression(node *lambdaExpression, scope *astScope)
 // that must close it.
 func (p *program) bindLambdaCaptures(node *lambdaExpression, scope, lambdaScope *astScope) []string {
 	referenced := make(map[string]struct{})
-	collectReferencedNames(node.body, referenced)
+	bound := make(map[string]struct{}, len(node.params))
 	for _, param := range node.params {
-		delete(referenced, param.name)
+		bound[param.name] = struct{}{}
 	}
+	collectReferencedNames(node.body, referenced, bound)
 	captures := make([]string, 0, len(referenced))
 	for _, name := range sortedKeys(referenced) {
 		if _, pending := scope.pending[name]; pending {
@@ -156,11 +157,7 @@ func (p *program) reportRecursiveLambda(pos position, scope *astScope, name stri
 	return true
 }
 
-// collectReferencedNames gathers every name a lambda body mentions, keyed by
-// its root segment. Shadowing is deliberately ignored: capturing a name the
-// body later rebinds is harmless because the rebinding overwrites it, while
-// missing one would lose the value the lambda was supposed to keep.
-func collectReferencedNames(node any, names map[string]struct{}) {
+func collectReferencedNames(node any, names, bound map[string]struct{}) {
 	switch value := node.(type) {
 	case nil:
 		return
@@ -168,87 +165,132 @@ func collectReferencedNames(node any, names map[string]struct{}) {
 		if value == nil {
 			return
 		}
+		blockBound := cloneBoundNames(bound)
 		for _, statement := range value.statements {
-			collectReferencedNames(statement, names)
+			collectReferencedNames(statement, names, blockBound)
 		}
 	case *letStatement:
-		collectReferencedNames(value.value, names)
+		collectReferencedNames(value.value, names, bound)
+		for _, name := range value.names {
+			bound[name] = struct{}{}
+		}
 	case *asyncLetStatement:
-		collectReferencedNames(value.call, names)
+		collectReferencedNames(value.call, names, bound)
+		bound[value.name] = struct{}{}
 	case *assignmentStatement:
-		names[value.name] = struct{}{}
-		collectReferencedNames(value.value, names)
+		collectReferencedName(value.name, names, bound)
+		collectReferencedNames(value.value, names, bound)
 	case *forStatement:
-		collectReferencedNames(value.iterable, names)
-		collectReferencedNames(value.body, names)
+		collectReferencedNames(value.iterable, names, bound)
+		bodyBound := cloneBoundNames(bound)
+		for _, name := range value.bindings {
+			bodyBound[name] = struct{}{}
+		}
+		collectReferencedNames(value.body, names, bodyBound)
 	case *throwStatement:
-		collectReferencedNames(value.value, names)
+		collectReferencedNames(value.value, names, bound)
 	case *returnStatement:
-		collectReferencedNames(value.value, names)
+		collectReferencedNames(value.value, names, bound)
 	case *expressionStatement:
-		collectReferencedNames(value.value, names)
+		collectReferencedNames(value.value, names, bound)
 	case *nameExpression:
-		names[rootName(value.name)] = struct{}{}
+		collectReferencedName(value.name, names, bound)
 	case *templateExpression:
 		for _, name := range templateNames(value.text) {
-			names[rootName(name)] = struct{}{}
+			collectReferencedName(name, names, bound)
 		}
 	case *awaitExpression:
-		names[value.name] = struct{}{}
+		collectReferencedName(value.name, names, bound)
 	case *lambdaExpression:
-		collectReferencedNames(value.body, names)
+		lambdaBound := cloneBoundNames(bound)
+		for _, param := range value.params {
+			lambdaBound[param.name] = struct{}{}
+		}
+		collectReferencedNames(value.body, names, lambdaBound)
 	case *tupleExpression:
 		for _, element := range value.elements {
-			collectReferencedNames(element, names)
+			collectReferencedNames(element, names, bound)
 		}
 	case *arrayExpression:
 		for _, element := range value.elements {
-			collectReferencedNames(element, names)
+			collectReferencedNames(element, names, bound)
 		}
 	case *mapExpression:
 		for _, entry := range value.entries {
-			collectReferencedNames(entry.key, names)
-			collectReferencedNames(entry.value, names)
+			collectReferencedNames(entry.key, names, bound)
+			collectReferencedNames(entry.value, names, bound)
 		}
 	case *rangeExpression:
-		collectReferencedNames(value.start, names)
-		collectReferencedNames(value.end, names)
+		collectReferencedNames(value.start, names, bound)
+		collectReferencedNames(value.end, names, bound)
 	case *objectExpression:
 		for _, field := range value.fields {
-			collectReferencedNames(field.value, names)
+			collectReferencedNames(field.value, names, bound)
 		}
 	case *callExpression:
-		collectReferencedNames(value.callee, names)
+		collectReferencedNames(value.callee, names, bound)
 		for _, argument := range value.args {
-			collectReferencedNames(argument, names)
+			collectReferencedNames(argument, names, bound)
 		}
 	case *unaryExpression:
-		collectReferencedNames(value.value, names)
+		collectReferencedNames(value.value, names, bound)
 	case *binaryExpression:
-		collectReferencedNames(value.left, names)
-		collectReferencedNames(value.right, names)
+		collectReferencedNames(value.left, names, bound)
+		collectReferencedNames(value.right, names, bound)
 	case *ifExpression:
-		collectReferencedNames(value.condition, names)
-		collectReferencedNames(value.thenBlock, names)
-		collectReferencedNames(value.elseBlock, names)
+		collectReferencedNames(value.condition, names, bound)
+		collectReferencedNames(value.thenBlock, names, bound)
+		collectReferencedNames(value.elseBlock, names, bound)
 	case *catchExpression:
-		collectReferencedNames(value.value, names)
+		collectReferencedNames(value.value, names, bound)
 		for _, arm := range value.arms {
-			collectReferencedNames(arm.value, names)
+			armBound := cloneBoundNames(bound)
+			binding := arm.binding
+			if binding == "" {
+				binding = value.binding
+			}
+			if binding != "" {
+				armBound[binding] = struct{}{}
+			}
+			collectReferencedNames(arm.value, names, armBound)
 		}
 	case *resultExpression:
-		collectReferencedNames(value.value, names)
+		collectReferencedNames(value.value, names, bound)
 	case *propagateExpression:
-		collectReferencedNames(value.value, names)
+		collectReferencedNames(value.value, names, bound)
 	case *usingExpression:
-		collectReferencedNames(value.initializer, names)
-		collectReferencedNames(value.body, names)
+		collectReferencedNames(value.initializer, names, bound)
+		bodyBound := cloneBoundNames(bound)
+		bodyBound[value.name] = struct{}{}
+		collectReferencedNames(value.body, names, bodyBound)
 	case *matchExpression:
-		collectReferencedNames(value.value, names)
+		collectReferencedNames(value.value, names, bound)
 		for _, arm := range value.arms {
-			collectReferencedNames(arm.value, names)
+			armBound := cloneBoundNames(bound)
+			if arm.binding != "" {
+				armBound[arm.binding] = struct{}{}
+			}
+			for _, binding := range arm.bindings {
+				armBound[binding] = struct{}{}
+			}
+			collectReferencedNames(arm.value, names, armBound)
 		}
 	}
+}
+
+func collectReferencedName(name string, names, bound map[string]struct{}) {
+	name = rootName(name)
+	if _, local := bound[name]; !local {
+		names[name] = struct{}{}
+	}
+}
+
+func cloneBoundNames(bound map[string]struct{}) map[string]struct{} {
+	clone := make(map[string]struct{}, len(bound))
+	for name := range bound {
+		clone[name] = struct{}{}
+	}
+	return clone
 }
 
 func rootName(name string) string {

@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"fmt"
 	"go/format"
 	"os"
 	"os/exec"
@@ -222,6 +223,58 @@ function main() -> int {
 	}
 }
 
+func TestDetachedMethodParameterAnnotationsShareOneTarget(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		declared  bool
+		duplicate bool
+	}{
+		{name: "implementation annotation"},
+		{name: "duplicate annotation", declared: true, duplicate: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			applied := 0
+			terminals := append(testAnnotationTerminals(), terminalAnnotationDecl{
+				canonical: "std.test.ParameterOnce",
+				targets:   []annotationTarget{annotationTargetParameter},
+				apply: func(_ *program, target annotationTargetRef, _ resolvedAnnotation) {
+					if target.method == nil || target.function == nil || target.parameterIndex != 0 {
+						t.Fatalf("incomplete semantic parameter target: %+v", target)
+					}
+					applied++
+				},
+			})
+			declarationAnnotation := ""
+			if test.declared {
+				declarationAnnotation = "@std.test.ParameterOnce "
+			}
+			source := fmt.Sprintf(`
+class Service {
+    function Run(%sValue: int) -> int
+}
+
+function Service.Run(@std.test.ParameterOnce Value: int) -> int {
+    Value
+}
+
+function main() -> int {
+    let App = Service {}
+    App.Run(42)
+}
+`, declarationAnnotation)
+			_, diagnostics := compileWithTerminals([]Source{{Name: "main.slk", Namespace: "root", Text: source}}, terminals)
+			if test.duplicate {
+				requireAnnotationDiagnostic(t, diagnostics, "SLK416", "cannot repeat")
+			} else if len(diagnostics) > 0 {
+				t.Fatalf("compile annotations: %+v", diagnostics)
+			}
+			if applied != 1 {
+				t.Fatalf("terminal applied %d times, want 1", applied)
+			}
+		})
+	}
+}
+
 func TestAnnotationApplicationsResolveAcrossTargetsAndAliases(t *testing.T) {
 	program := compileAnnotationProgram(t, Source{Name: "main.slk", Namespace: "root", Text: `
 use std.test.Marker
@@ -430,6 +483,17 @@ interface Service {}
 function main() -> null { null }
 `,
 			code: "SLK416", message: "cannot target an interface",
+		},
+		{
+			name: "field target",
+			source: `
+class Service {
+    @std.test.Marker
+    Value: int
+}
+function main() -> null { null }
+`,
+			code: "SLK416", message: "cannot target a field",
 		},
 		{
 			name: "wrong arity",
