@@ -422,6 +422,127 @@ function main() -> string {
 `)
 		assertDiagnostic(t, diagnostics, "SLK411", "expands without limit")
 	})
+	t.Run("callable arrows do not hide expansion depth", func(t *testing.T) {
+		diagnostics := checkGenerics(t, `
+class Box<T> {}
+
+class Loop<T> {
+    Next: Loop<() -> Box<T>>?
+}
+
+function main() -> null {
+    let Value = Loop<int> {}
+    null
+}
+`)
+		assertDiagnostic(t, diagnostics, "SLK411", "expands without limit")
+	})
+	t.Run("callable-growing type arguments", func(t *testing.T) {
+		diagnostics := checkGenerics(t, `
+class Loop<T> {
+    Next: Loop<() -> T>?
+}
+
+function main() -> null {
+    let Value = Loop<int> {}
+    null
+}
+`)
+		assertDiagnostic(t, diagnostics, "SLK411", "expands without limit")
+	})
+	t.Run("array-growing type arguments", func(t *testing.T) {
+		diagnostics := checkGenerics(t, `
+class Loop<T> {
+    Next: Loop<T[]>?
+}
+
+function main() -> null {
+    let Value = Loop<int> {}
+    null
+}
+`)
+		assertDiagnostic(t, diagnostics, "SLK411", "expands without limit")
+	})
+	t.Run("long acyclic expansion", func(t *testing.T) {
+		diagnostics := checkGenerics(t, `
+class A<T> { Next: B<T>? }
+class B<T> { Next: C<T>? }
+class C<T> { Next: D<T>? }
+class D<T> { Next: E<T>? }
+class E<T> { Next: F<T>? }
+class F<T> { Next: G<T>? }
+class G<T> { Next: H<T>? }
+class H<T> { Next: I<T>? }
+class I<T> { Next: J<T>? }
+class J<T> {}
+
+function main() -> null {
+    let Value = A<int> {}
+    null
+}
+`)
+		assertNoDiagnostics(t, diagnostics)
+	})
+}
+
+func TestCallableTypeArgumentsAtGenericExpressionBoundaries(t *testing.T) {
+	tests := map[string]struct {
+		source string
+		want   string
+	}{
+		"object construction": {
+			source: `
+class Holder<T> {
+    Value: T
+}
+
+function main() -> int {
+    let Identity = (Value: int) -> int {
+        Value
+    }
+    let Held = Holder<(int) -> int> { Value: Identity }
+    Held.Value(42)
+}
+`,
+			want: "42",
+		},
+		"caught error": {
+			source: `
+class Failure<T> implements Error {}
+
+function Work() -> int throws Failure<() -> int> {
+    42
+}
+
+function main() -> int {
+    Work() catch {
+        Failure<() -> int> => 0
+    }
+}
+`,
+			want: "42",
+		},
+		"implements clause": {
+			source: `
+interface Contract<T> {}
+
+class Service implements Contract<() -> int> {}
+
+function main() -> int {
+    let App = Service {}
+    42
+}
+`,
+			want: "42",
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			if output := runGenericsEverywhere(t, test.source); output != test.want {
+				t.Fatalf("output = %q, want %q", output, test.want)
+			}
+		})
+	}
 }
 
 func TestGenericDiagnostics(t *testing.T) {

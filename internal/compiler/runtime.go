@@ -20,6 +20,7 @@ type runtimeValue struct {
 	result    *runtimeResult
 	optional  *runtimeOptional
 	variant   *runtimeVariant
+	callable  *runtimeCallable
 	native    *nativeIOResource
 	directory *nativeTemporaryDirectory
 }
@@ -437,13 +438,23 @@ func (p *program) callFunction(function *functionDecl, args []runtimeValue, self
 }
 
 func (p *program) callFunctionContext(ctx context.Context, function *functionDecl, args []runtimeValue, self *runtimeValue, typeArgs []string) (runtimeValue, error) {
+	return p.invokeFunction(ctx, function, args, self, typeArgs, nil)
+}
+
+// invokeFunction runs one callable body. captures is the environment a lambda
+// closed over; it is placed before the parameters, so a parameter of the same
+// name shadows its capture.
+func (p *program) invokeFunction(ctx context.Context, function *functionDecl, args []runtimeValue, self *runtimeValue, typeArgs []string, captures map[string]runtimeValue) (runtimeValue, error) {
 	if err := checkTaskCancellation(ctx); err != nil {
 		return runtimeValue{}, err
 	}
 	if len(args) != len(function.params) {
 		return runtimeValue{}, fmt.Errorf("%s expects %d arguments, found %d", function.qualified, len(function.params), len(args))
 	}
-	frame := &runtimeFrame{function: function, locals: make(map[string]runtimeValue, len(args)+1), ctx: ctx}
+	frame := &runtimeFrame{function: function, locals: make(map[string]runtimeValue, len(args)+len(captures)+1), ctx: ctx}
+	for name, captured := range captures {
+		frame.locals[name] = captured
+	}
 	paramTypes := make([]string, len(function.params))
 	if len(function.typeParams) > 0 {
 		if len(typeArgs) != len(function.typeParams) {
@@ -653,7 +664,7 @@ func (p *program) evalExpression(expression expressionNode, frame *runtimeFrame)
 			typ = typeUnknown + "[]"
 		}
 		if elementType != "" {
-			typ = elementType + "[]"
+			typ = arrayOf(elementType)
 			for index := range elements {
 				elements[index] = coerceRuntimeValue(elements[index], elementType)
 			}
@@ -699,6 +710,8 @@ func (p *program) evalExpression(expression expressionNode, frame *runtimeFrame)
 		return runtimeValue{typ: "string", scalar: text}, err
 	case *nameExpression:
 		return p.evalName(node, frame)
+	case *lambdaExpression:
+		return p.evalLambda(node, frame)
 	case *objectExpression:
 		return p.evalObject(node, frame)
 	case *callExpression:
@@ -782,6 +795,9 @@ func (p *program) evalName(node *nameExpression, frame *runtimeFrame) (runtimeVa
 			if constant, evaluated := p.constantRuntimeValue(decl); evaluated {
 				return constant, nil
 			}
+		}
+		if function := p.resolveFunction(frame.function, node.name); function != nil {
+			return p.functionValue(function), nil
 		}
 		return runtimeValue{}, runtimeError(node.pos, "unknown value %s", node.name)
 	}
@@ -878,7 +894,35 @@ func (p *program) prepareAsyncCall(node *callExpression, frame *runtimeFrame) (f
 	}, nil
 }
 
+// evalCallableCall invokes a callable value. The callee is evaluated exactly
+// once and before any argument, and the arguments follow in source order.
+func (p *program) evalCallableCall(node *callExpression, frame *runtimeFrame) (runtimeValue, error) {
+	callee, err := p.evalExpression(node.callee, frame)
+	if err != nil {
+		return runtimeValue{}, err
+	}
+	callable, ok := callableValueOf(callee)
+	if !ok {
+		return runtimeValue{}, runtimeError(node.pos, "%s is not callable", displayName(callee.typ))
+	}
+	args := make([]runtimeValue, 0, len(node.args))
+	for index, argument := range node.args {
+		value, err := p.evalExpression(argument, frame)
+		if err != nil {
+			return runtimeValue{}, err
+		}
+		if index < len(node.resolvedParams) {
+			value = coerceRuntimeValue(value, node.resolvedParams[index])
+		}
+		args = append(args, value)
+	}
+	return p.callRuntimeCallable(frame.ctx, callable, args, node.pos)
+}
+
 func (p *program) evalCall(node *callExpression, frame *runtimeFrame) (runtimeValue, error) {
+	if node.resolvedCallable {
+		return p.evalCallableCall(node, frame)
+	}
 	name, ok := node.callee.(*nameExpression)
 	if !ok {
 		return runtimeValue{}, runtimeError(node.pos, "call target is not callable")
@@ -1457,6 +1501,11 @@ func runtimeEqual(left, right runtimeValue) bool {
 		}
 		return !leftPresent || runtimeEqual(leftValue, rightValue)
 	}
+	// Callables are neither comparable nor orderable; the checker rejects the
+	// comparison, and identity never leaks in as a fallback.
+	if left.callable != nil || right.callable != nil {
+		return false
+	}
 	if left.typ == "bytes" && right.typ == "bytes" {
 		return bytes.Equal(left.scalar.([]byte), right.scalar.([]byte))
 	}
@@ -1537,6 +1586,12 @@ func formatRuntimeValue(value runtimeValue) string {
 	case "bool":
 		return strconv.FormatBool(value.scalar.(bool))
 	default:
+		// A callable has no printable contents, and the Go backend cannot
+		// recover its Slick type from a function value, so both print the same
+		// marker and stay deterministic.
+		if value.callable != nil {
+			return callableDisplayValue
+		}
 		if value.buffer != nil {
 			return "Buffer"
 		}
@@ -1547,13 +1602,16 @@ func formatRuntimeValue(value runtimeValue) string {
 			}
 			return "map {" + strings.Join(items, ", ") + "}"
 		}
-		if strings.HasSuffix(value.typ, "[]") || strings.HasPrefix(value.typ, "(") {
+		// The shape decides the brackets, not the first character: an array of
+		// callables spells its element in parentheses and would otherwise read
+		// as a tuple.
+		if kind := parseTypeName(value.typ).kind; kind == typeKindArray || kind == typeKindTuple {
 			items := make([]string, 0, len(value.elements))
 			for _, element := range value.elements {
 				items = append(items, formatRuntimeValue(element))
 			}
 			open, close := "[", "]"
-			if strings.HasPrefix(value.typ, "(") {
+			if kind == typeKindTuple {
 				open, close = "(", ")"
 			}
 			return open + strings.Join(items, ", ") + close

@@ -89,3 +89,24 @@ function main() -> int {
 		t.Fatalf("expected one declaration of Used<int>, found %d", count)
 	}
 }
+
+func TestCallableTypesInstantiateTheirGenericComponents(t *testing.T) {
+	program := compileGenericProgram(t, `
+class Box<T> {
+    Value: T
+}
+
+class Holder {
+    Operation: (Box<int>) -> Box<string>
+}
+
+function main() -> null {
+    null
+}
+`)
+	for _, name := range []string{"root.Box<int>", "root.Box<string>"} {
+		if program.classes[name] == nil {
+			t.Fatalf("%s was not instantiated from callable type", name)
+		}
+	}
+}

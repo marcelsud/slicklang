@@ -101,6 +101,13 @@ const (
 	diagnosticCodeTypeParameter            diagnosticCode = "SLK409"
 	diagnosticCodeUnboundTypeParameter     diagnosticCode = "SLK410"
 	diagnosticCodeGenericExpansion         diagnosticCode = "SLK411"
+	diagnosticCodeNotCallable              diagnosticCode = "SLK412"
+	diagnosticCodeMethodValue              diagnosticCode = "SLK413"
+	diagnosticCodeLambdaCapture            diagnosticCode = "SLK414"
+	diagnosticCodeAnnotation               diagnosticCode = "SLK415"
+	diagnosticCodeAnnotationTarget         diagnosticCode = "SLK416"
+	diagnosticCodeAnnotationArgument       diagnosticCode = "SLK417"
+	diagnosticCodeAnnotationCycle          diagnosticCode = "SLK418"
 )
 
 var ErrUnknownDiagnostic = errors.New("unknown diagnostic")
@@ -550,6 +557,51 @@ var diagnosticDefinitions = []diagnosticDefinition{
 		"A recursive generic may contain itself only at the same type arguments, so the set of instantiations stays finite.",
 		"A declaration instantiates itself with a type argument built from its own parameter.",
 		"Hold the recursive value at the same type arguments, such as Node<T> inside Node<T>."),
+	defineDiagnostic(diagnosticCodeNotCallable, DiagnosticPhaseTypeCheck,
+		"Value is not callable",
+		"Call syntax applies to a named function, a method of the receiver's type, or any expression whose static type is a callable.",
+		"A call target names or produces a value that is not a callable type.",
+		"Call a function, a method, or a value declared with a callable type such as (int, int) -> int.",
+		"Remove the call parentheses when the value itself was intended.").
+		withRelated(diagnosticCodeMethodValue, diagnosticCodeUnknownCallable),
+	defineDiagnostic(diagnosticCodeMethodValue, DiagnosticPhaseTypeCheck,
+		"Method is not a value",
+		"Methods are invoked through their receiver; Slick has no bound or unbound method value.",
+		"A method name is read without being called.",
+		"Call the method with its arguments.",
+		"Wrap the call in a lambda when a callable value is required.").
+		withExamples("Record.Transform", "(Value: int) -> int {\n  Record.Transform(Value)\n}").
+		withRelated(diagnosticCodeNotCallable),
+	defineDiagnostic(diagnosticCodeLambdaCapture, DiagnosticPhaseTypeCheck,
+		"Invalid lambda capture",
+		"A lambda copies the surrounding bindings it reads by value when it is created, so a capture is read-only, cannot be a pending or actively managed binding, and cannot be the binding the lambda itself initializes.",
+		"A lambda assigns a captured binding, captures a pending async or active using binding, or refers to the let binding whose initializer it is.",
+		"Bind a separate local instead of assigning the captured value.",
+		"Await the pending binding or consume the resource before creating the lambda.",
+		"Use a named function when the callable has to refer to itself.").
+		withRelated(diagnosticCodePendingUse, diagnosticCodeUsingEscape),
+	defineDiagnostic(diagnosticCodeAnnotation, DiagnosticPhaseNameResolution,
+		"Annotation cannot be resolved",
+		"Every annotation application and alias target must resolve through the ordinary namespace, visibility, and exact-alias rules.",
+		"An annotation name is unknown, inaccessible, or conflicts with another declaration.",
+		"Declare or import the annotation and use its visible canonical name."),
+	defineDiagnostic(diagnosticCodeAnnotationTarget, DiagnosticPhaseTypeCheck,
+		"Annotation target is invalid",
+		"A compiler-owned terminal annotation declares its allowed targets and repeatability; source aliases inherit that contract.",
+		"An annotation is applied to an unsupported target or a non-repeatable terminal is applied more than once.",
+		"Move the annotation to an allowed class, method, or parameter target.",
+		"Remove the duplicate application."),
+	defineDiagnostic(diagnosticCodeAnnotationArgument, DiagnosticPhaseTypeCheck,
+		"Annotation argument is invalid",
+		"Annotation arguments are checked compile-time values: literals, constants, fieldless union variants, alias parameters, or non-generic named functions.",
+		"An argument has the wrong arity or type, or uses an expression form annotations do not execute.",
+		"Pass a value assignable to the declared annotation parameter.",
+		"Replace lambdas, method values, and generic functions with a compatible named function."),
+	defineDiagnostic(diagnosticCodeAnnotationCycle, DiagnosticPhaseNameResolution,
+		"Annotation aliases form a cycle",
+		"Alias expansion must reach one compiler-owned terminal through an acyclic deterministic chain.",
+		"An annotation alias reaches itself directly or indirectly.",
+		"Break the reported chain by targeting a terminal or another acyclic alias."),
 }
 
 var diagnosticRegistry = mustBuildDiagnosticRegistry(diagnosticDefinitions)

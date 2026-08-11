@@ -53,8 +53,9 @@ type typeRef struct {
 }
 
 type paramDecl struct {
-	name string
-	typ  typeRef
+	name        string
+	typ         typeRef
+	annotations []*annotationUse
 }
 
 type fieldDecl struct {
@@ -89,6 +90,7 @@ type methodSignature struct {
 	result         typeRef
 	throws         []typeRef
 	throwSet       map[string]struct{}
+	annotations    []*annotationUse
 	documentation  *string
 	pos            position
 }
@@ -109,6 +111,7 @@ type classDecl struct {
 	methods         map[string]*methodSignature
 	effective       map[string]*methodSignature
 	implementations map[string]*functionDecl
+	annotations     []*annotationUse
 	documentation   *string
 	pos             position
 }
@@ -120,6 +123,7 @@ type interfaceDecl struct {
 	typeParams    []string
 	instanceOf    string
 	methods       map[string]*methodSignature
+	annotations   []*annotationUse
 	documentation *string
 	pos           position
 }
@@ -141,6 +145,7 @@ type functionDecl struct {
 	inline            bool
 	instanceOf        string
 	native            nativeFunction
+	annotations       []*annotationUse
 	documentation     *string
 	pos               position
 }
@@ -156,6 +161,7 @@ type program struct {
 	genericInterfaces      map[string]*interfaceDecl
 	genericFunctions       map[string]*functionDecl
 	genericMethodImpls     []*functionDecl
+	annotations            map[string]*annotationDecl
 	namespaceDocumentation map[string]*string
 	methodImpls            []*functionDecl
 	diags                  []Diagnostic
@@ -171,8 +177,8 @@ type program struct {
 	usesAsync          bool
 }
 
-func newProgram() *program {
-	return &program{
+func newProgram(terminals ...terminalAnnotationDecl) *program {
+	program := &program{
 		classes:                make(map[string]*classDecl),
 		interfaces:             make(map[string]*interfaceDecl),
 		unions:                 make(map[string]*unionDecl),
@@ -182,8 +188,13 @@ func newProgram() *program {
 		genericInterfaces:      make(map[string]*interfaceDecl),
 		genericFunctions:       make(map[string]*functionDecl),
 		namespaceDocumentation: make(map[string]*string),
+		annotations:            make(map[string]*annotationDecl),
 		emitted:                make(map[Diagnostic]struct{}),
 	}
+	for index := range terminals {
+		program.registerTerminalAnnotation(&terminals[index])
+	}
+	return program
 }
 
 func CheckPath(path string) ([]Diagnostic, error) {
@@ -257,7 +268,11 @@ func Check(sources []Source) []Diagnostic {
 }
 
 func compile(sources []Source) (*program, []Diagnostic) {
-	prog := newProgram()
+	return compileWithTerminals(sources, nil)
+}
+
+func compileWithTerminals(sources []Source, terminals []terminalAnnotationDecl) (*program, []Diagnostic) {
+	prog := newProgram(terminals...)
 	registerStandardLibrary(prog)
 	for _, source := range sources {
 		if !validNamespace(source.Namespace) {
@@ -303,6 +318,10 @@ func parseSourceTokens(prog *program, source Source, tokens []token) {
 	}
 	for !p.atEnd() {
 		switch {
+		case p.current().text == "@":
+			p.parseAnnotatedTopLevel()
+		case p.acceptDocumented("annotation"):
+			p.parseAnnotationDeclaration()
 		case p.acceptDocumented("class"):
 			p.parseClass()
 		case p.acceptDocumented("interface"):
@@ -317,7 +336,7 @@ func parseSourceTokens(prog *program, source Source, tokens []token) {
 			p.parseUse()
 		default:
 			tok := p.current()
-			p.error(tok.pos, "expected 'use', 'const', 'class', 'interface', 'union', or 'function', found %q", tok.text)
+			p.error(tok.pos, "expected 'use', 'const', 'annotation', 'class', 'interface', 'union', or 'function', found %q", tok.text)
 			p.advance()
 		}
 	}
@@ -418,6 +437,7 @@ type parser struct {
 	aliases              map[string]aliasDecl
 	docByLine            map[int]*docBlock
 	pendingDocumentation *string
+	pendingAnnotations   []*annotationUse
 	index                int
 }
 
@@ -547,6 +567,7 @@ func (p *parser) parseClass() {
 		methods:         make(map[string]*methodSignature),
 		effective:       make(map[string]*methodSignature),
 		implementations: make(map[string]*functionDecl),
+		annotations:     p.consumeAnnotations(),
 		documentation:   p.consumeDocumentation(),
 		pos:             name.pos,
 	}
@@ -581,7 +602,7 @@ func (p *parser) parseClass() {
 				// An implemented generic carries type arguments; conformance is
 				// checked structurally at each concrete instantiation.
 				if p.current().text == "<" {
-					close := matching(p.tokens, p.index, "<", ">")
+					close := matchingAngle(p.tokens, p.index)
 					if close < 0 {
 						p.error(p.current().pos, "unterminated generic type")
 						return
@@ -618,6 +639,9 @@ func (p *parser) parseClass() {
 
 	for !p.atEnd() && p.current().text != "}" {
 		p.pendingDocumentation = p.takeDocumentation(p.current().pos.line)
+		if p.current().text == "@" {
+			p.pendingAnnotations = p.parseAnnotationUses()
+		}
 		if p.accept("function") {
 			p.parseClassMethod(class, registered)
 		} else {
@@ -646,6 +670,7 @@ func (p *parser) parseClassMethod(class *classDecl, registered bool) {
 		params:         params,
 		result:         result,
 		throws:         throws,
+		annotations:    p.consumeAnnotations(),
 		documentation:  p.consumeDocumentation(),
 		pos:            name.pos,
 	}
@@ -669,6 +694,7 @@ func (p *parser) parseClassMethod(class *classDecl, registered bool) {
 			receiver:          typeRef{name: class.qualified, pos: name.pos},
 			receiverCanonical: class.qualified,
 			inline:            true,
+			annotations:       signature.annotations,
 			documentation:     signature.documentation,
 			pos:               name.pos,
 		}
@@ -695,6 +721,10 @@ func (p *parser) parseClassField(class *classDecl) {
 		return
 	}
 	documentation := p.consumeDocumentation()
+	annotations := p.consumeAnnotations()
+	for _, annotation := range annotations {
+		p.prog.add(annotation.pos, diagnosticCodeAnnotationTarget, "annotations cannot target a field")
+	}
 	if previous, exists := class.fields[name.text]; exists {
 		p.reportDocumentationConflict(name.pos, class.qualified+"."+name.text, previous.documentation, documentation)
 		p.error(name.pos, "duplicate field %s.%s; first declared at %s:%d:%d", class.qualified, name.text, previous.pos.file, previous.pos.line, previous.pos.column)
@@ -727,6 +757,7 @@ func (p *parser) parseInterface() {
 		namespace:     p.source.Namespace,
 		typeParams:    typeParams,
 		methods:       make(map[string]*methodSignature),
+		annotations:   p.consumeAnnotations(),
 		documentation: p.consumeDocumentation(),
 		pos:           name.pos,
 	}
@@ -742,6 +773,9 @@ func (p *parser) parseInterface() {
 	}
 	for !p.atEnd() && p.current().text != "}" {
 		p.pendingDocumentation = p.takeDocumentation(p.current().pos.line)
+		if p.current().text == "@" {
+			p.pendingAnnotations = p.parseAnnotationUses()
+		}
 		if !p.accept("function") {
 			p.error(p.current().pos, "interfaces may contain only method declarations")
 			p.advance()
@@ -766,6 +800,7 @@ func (p *parser) parseInterface() {
 			params:         params,
 			result:         result,
 			throws:         throws,
+			annotations:    p.consumeAnnotations(),
 			documentation:  p.consumeDocumentation(),
 			pos:            methodName.pos,
 		}
@@ -848,6 +883,7 @@ func (p *parser) parseFunction() {
 			result:        result,
 			throws:        throws,
 			body:          body,
+			annotations:   p.consumeAnnotations(),
 			documentation: p.consumeDocumentation(),
 			pos:           ref.pos,
 		}
@@ -874,6 +910,7 @@ func (p *parser) parseFunction() {
 		result:        result,
 		throws:        throws,
 		body:          body,
+		annotations:   p.consumeAnnotations(),
 		receiver:      typeRef{name: receiverName, pos: ref.pos},
 		documentation: p.consumeDocumentation(),
 		pos:           ref.pos,
@@ -894,7 +931,9 @@ func (p *parser) parseCallableTail() ([]paramDecl, typeRef, []typeRef, []token, 
 		p.error(p.current().pos, "expected '->' and a return type")
 		return nil, typeRef{}, nil, nil, false, false
 	}
-	result, ok := p.parseType()
+	// The declaration owns the throws clause, so a returned callable that
+	// declares effects of its own is parenthesized.
+	result, ok := p.parseTypeAllowing(false)
 	if !ok {
 		return nil, typeRef{}, nil, nil, false, false
 	}
@@ -919,6 +958,7 @@ func (p *parser) parseParams() ([]paramDecl, bool) {
 	}
 	var params []paramDecl
 	for !p.atEnd() && p.current().text != ")" {
+		annotations := p.parseAnnotationUses()
 		name, ok := p.expectIdent("parameter name")
 		if !ok {
 			return nil, false
@@ -931,7 +971,7 @@ func (p *parser) parseParams() ([]paramDecl, bool) {
 		if !ok {
 			return nil, false
 		}
-		params = append(params, paramDecl{name: name.text, typ: typ})
+		params = append(params, paramDecl{name: name.text, typ: typ, annotations: annotations})
 		if !p.accept(",") {
 			break
 		}
@@ -944,47 +984,174 @@ func (p *parser) parseParams() ([]paramDecl, bool) {
 }
 
 func (p *parser) parseType() (typeRef, bool) {
-	start := p.index
+	return p.parseTypeAllowing(true)
+}
+
+// parseTypeAllowing reads one type. allowThrows is false where a throws clause
+// belongs to the enclosing declaration rather than to the type being read, so a
+// returned callable that declares its own effects is written in parentheses.
+func (p *parser) parseTypeAllowing(allowThrows bool) (typeRef, bool) {
 	pos := p.current().pos
-	if p.current().text == "(" {
-		close := matching(p.tokens, p.index, "(", ")")
-		if close < 0 {
-			p.error(pos, "unterminated tuple type")
-			return typeRef{}, false
-		}
-		p.index = close + 1
-	} else {
-		_, next, ok := readQualified(p.tokens, p.index)
-		if !ok {
-			p.error(pos, "expected type")
-			return typeRef{}, false
-		}
-		p.index = next
+	text, next, message, errorPos := parseTypeTokensAllowing(p.tokens, p.index, allowThrows)
+	if message != "" {
+		p.error(errorPos, "%s", message)
+		return typeRef{}, false
 	}
-	if p.current().text == "<" {
-		close := matching(p.tokens, p.index, "<", ">")
-		if close < 0 {
-			p.error(p.current().pos, "unterminated generic type")
-			return typeRef{}, false
-		}
-		p.index = close + 1
+	p.index = next
+	return typeRef{name: text, pos: pos}, true
+}
+
+// parseTypeTokens reads one type starting at index and returns its canonical
+// spelling. It is shared by every parser so a type has one grammar, and it
+// builds the text structurally rather than by joining tokens: a callable's ->
+// and throws clause need spacing that token text alone cannot supply.
+func parseTypeTokens(tokens []token, index int) (string, int, string, position) {
+	return parseTypeTokensAllowing(tokens, index, true)
+}
+
+func parseTypeTokensAllowing(tokens []token, index int, allowThrows bool) (string, int, string, position) {
+	text, next, message, errorPos := parseTypePrimary(tokens, index, allowThrows)
+	if message != "" {
+		return "", next, message, errorPos
 	}
-	for p.current().text == "?" || (p.current().text == "[" && p.index+1 < len(p.tokens) && p.tokens[p.index+1].text == "]") {
-		if p.accept("?") {
+	for next < len(tokens) {
+		if tokens[next].text == "?" {
+			text = groupType(text) + "?"
+			next++
 			continue
 		}
-		p.index += 2
+		if tokens[next].text == "[" && next+1 < len(tokens) && tokens[next+1].text == "]" {
+			text = arrayOf(text)
+			next += 2
+			continue
+		}
+		break
 	}
-	for p.accept("|") {
-		if _, ok := p.parseType(); !ok {
-			return typeRef{}, false
+	for next < len(tokens) && tokens[next].text == "|" {
+		right, after, message, errorPos := parseTypeTokensAllowing(tokens, next+1, allowThrows)
+		if message != "" {
+			return "", after, message, errorPos
+		}
+		text += "|" + right
+		next = after
+	}
+	return text, next, "", position{}
+}
+
+func parseTypePrimary(tokens []token, index int, allowThrows bool) (string, int, string, position) {
+	if index >= len(tokens) {
+		return "", index, "expected type", typeTokenPos(tokens, index)
+	}
+	if tokens[index].text == "(" {
+		close := matching(tokens, index, "(", ")")
+		if close < 0 {
+			return "", index, "unterminated tuple type", tokens[index].pos
+		}
+		elements, wellFormed := parseTypeTokenList(tokens, index+1, close)
+		if close+2 < len(tokens) && tokens[close+1].text == "-" && tokens[close+2].text == ">" {
+			if !wellFormed {
+				return "", index, "expected type", tokens[index].pos
+			}
+			return parseCallableTypeTail(tokens, elements, close+3, allowThrows)
+		}
+		// A malformed element keeps its written spelling, so the type checker
+		// reports one structural diagnostic instead of a parse cascade.
+		if !wellFormed {
+			return joinTokenText(tokens, index, close+1), close + 1, "", position{}
+		}
+		return "(" + strings.Join(elements, ",") + ")", close + 1, "", position{}
+	}
+	ref, next, ok := readQualified(tokens, index)
+	if !ok {
+		return "", index, "expected type", tokens[index].pos
+	}
+	text := ref.name
+	if next < len(tokens) && tokens[next].text == "<" {
+		close := matchingAngle(tokens, next)
+		if close < 0 {
+			return "", next, "unterminated generic type", tokens[next].pos
+		}
+		args, wellFormed := parseTypeTokenList(tokens, next+1, close)
+		if !wellFormed {
+			return joinTokenText(tokens, index, close+1), close + 1, "", position{}
+		}
+		text += "<" + strings.Join(args, ",") + ">"
+		next = close + 1
+	}
+	return text, next, "", position{}
+}
+
+// parseCallableTypeTail reads the result type and optional throws clause that
+// follow a callable type's parameter list.
+func parseCallableTypeTail(tokens []token, params []string, index int, allowThrows bool) (string, int, string, position) {
+	// The result is read without a throws clause of its own, so throws always
+	// binds to the outermost callable and never becomes ambiguous.
+	result, next, message, errorPos := parseTypeTokensAllowing(tokens, index, false)
+	if message != "" {
+		return "", next, message, errorPos
+	}
+	var throws []string
+	if allowThrows && next < len(tokens) && tokens[next].text == "throws" {
+		next++
+		for {
+			thrown, after, message, errorPos := parseThrownTypeTokens(tokens, next)
+			if message != "" {
+				return "", next, message, errorPos
+			}
+			throws = append(throws, thrown.name)
+			next = after
+			if next >= len(tokens) || tokens[next].text != "|" {
+				break
+			}
+			next++
 		}
 	}
+	return callableType(params, result, throws), next, "", position{}
+}
+
+// parseTypeTokenList reads the comma-separated types between start and end. It
+// reports whether the whole span is a well-formed list, so a caller can keep a
+// malformed spelling intact rather than inventing a shorter type from it.
+func parseTypeTokenList(tokens []token, start, end int) ([]string, bool) {
+	var elements []string
+	index := start
+	for index < end {
+		text, next, message, _ := parseTypeTokens(tokens, index)
+		if message != "" {
+			return nil, false
+		}
+		elements = append(elements, text)
+		index = next
+		if index >= end {
+			break
+		}
+		if tokens[index].text != "," {
+			return nil, false
+		}
+		index++
+		if index >= end {
+			return nil, false
+		}
+	}
+	return elements, index == end
+}
+
+func joinTokenText(tokens []token, start, end int) string {
 	var text strings.Builder
-	for _, tok := range p.tokens[start:p.index] {
+	for _, tok := range tokens[start:end] {
 		text.WriteString(tok.text)
 	}
-	return typeRef{name: text.String(), pos: pos}, true
+	return text.String()
+}
+
+func typeTokenPos(tokens []token, index int) position {
+	if index < len(tokens) {
+		return tokens[index].pos
+	}
+	if len(tokens) > 0 {
+		return tokens[len(tokens)-1].pos
+	}
+	return position{}
 }
 
 func (p *parser) parseThrows() []typeRef {
@@ -993,41 +1160,28 @@ func (p *parser) parseThrows() []typeRef {
 	}
 	var throws []typeRef
 	for {
-		ref, next, ok := readQualified(p.tokens, p.index)
-		if !ok {
-			p.error(p.current().pos, "expected error type after 'throws'")
+		thrown, next, message, errorPos := parseThrownTypeTokens(p.tokens, p.index)
+		if message != "" {
+			p.error(errorPos, "%s", message)
 			return throws
 		}
 		p.index = next
-		name, ok := p.readTypeArgumentSuffix(ref.name)
-		if !ok {
-			return throws
-		}
-		throws = append(throws, typeRef{name: name, pos: ref.pos})
+		throws = append(throws, thrown)
 		if !p.accept("|") {
 			return throws
 		}
 	}
 }
 
-// readTypeArgumentSuffix appends a <...> type argument list to base when one
-// follows, so a checked effect or caught type may name a generic instantiation.
-func (p *parser) readTypeArgumentSuffix(base string) (string, bool) {
-	if p.current().text != "<" {
-		return base, true
+func parseThrownTypeTokens(tokens []token, index int) (typeRef, int, string, position) {
+	if index >= len(tokens) || tokens[index].kind != scanner.Ident {
+		return typeRef{}, index, "expected error type after 'throws'", typeTokenPos(tokens, index)
 	}
-	close := matching(p.tokens, p.index, "<", ">")
-	if close < 0 {
-		p.error(p.current().pos, "unterminated generic type")
-		return base, false
+	name, next, message, errorPos := parseTypePrimary(tokens, index, false)
+	if message != "" {
+		return typeRef{}, next, message, errorPos
 	}
-	var text strings.Builder
-	text.WriteString(base)
-	for _, tok := range p.tokens[p.index : close+1] {
-		text.WriteString(tok.text)
-	}
-	p.index = close + 1
-	return text.String(), true
+	return typeRef{name: name, pos: tokens[index].pos}, next, "", position{}
 }
 
 func (p *parser) skipBlock() {
@@ -1143,6 +1297,7 @@ func (p *program) check() {
 	p.parseBodies()
 	p.checkAliases()
 	p.checkConstants()
+	p.checkAnnotations()
 	p.checkGenericDeclarations()
 	p.instantiateGenerics()
 	p.checkDeclaredTypes()
@@ -1165,7 +1320,8 @@ func (p *program) checkAliases() {
 		union := p.unions[alias.target]
 		function := p.functionDeclaration(alias.target)
 		constant := p.constants[alias.target]
-		if class == nil && iface == nil && union == nil && function == nil && constant == nil {
+		annotation := p.annotations[alias.target]
+		if class == nil && iface == nil && union == nil && function == nil && constant == nil && annotation == nil {
 			p.add(alias.pos, diagnosticCodeAlias, "alias target %s does not exist", alias.target)
 		} else if class != nil {
 			p.requireAccess(alias.pos, alias.namespace, class.namespace, class.name, "class")
@@ -1175,6 +1331,8 @@ func (p *program) checkAliases() {
 			p.requireAccess(alias.pos, alias.namespace, union.namespace, union.name, "union")
 		} else if constant != nil {
 			p.requireAccess(alias.pos, alias.namespace, constant.namespace, constant.name, "constant")
+		} else if annotation != nil {
+			p.requireAccess(alias.pos, alias.namespace, annotation.namespace, annotation.name, "annotation")
 		} else {
 			p.requireAccess(alias.pos, alias.namespace, function.namespace, function.name, "function")
 		}
@@ -1184,7 +1342,8 @@ func (p *program) checkAliases() {
 		localUnionExists := p.unions[local] != nil
 		localFunctionExists := p.functionDeclaration(local) != nil
 		localConstantExists := p.constants[local] != nil
-		if alias.target != local && (localClassExists || localInterfaceExists || localUnionExists || localFunctionExists || localConstantExists) {
+		localAnnotationExists := p.annotations[local] != nil
+		if alias.target != local && (localClassExists || localInterfaceExists || localUnionExists || localFunctionExists || localConstantExists || localAnnotationExists) {
 			p.add(alias.pos, diagnosticCodeAlias, "alias %s conflicts with a declaration in %s", alias.name, alias.namespace)
 		}
 	}
@@ -1255,6 +1414,30 @@ func (p *program) checkTypeRef(ref typeRef) {
 
 func (p *program) checkFunction(function *functionDecl) {
 	p.checkASTFunction(function)
+}
+
+// matchingAngle finds the > that closes the < at start. The > of a callable
+// type's -> is skipped, so a generic argument may itself be a callable.
+func matchingAngle(tokens []token, start int) int {
+	if start >= len(tokens) || tokens[start].text != "<" {
+		return -1
+	}
+	depth := 0
+	for index := start; index < len(tokens); index++ {
+		switch tokens[index].text {
+		case "<":
+			depth++
+		case ">":
+			if index > start && tokens[index-1].text == "-" {
+				continue
+			}
+			depth--
+			if depth == 0 {
+				return index
+			}
+		}
+	}
+	return -1
 }
 
 func matching(tokens []token, start int, open, close string) int {
@@ -1344,9 +1527,23 @@ func displayName(name string) string {
 	parsed := parseTypeName(name)
 	switch parsed.kind {
 	case typeKindOptional:
-		return displayName(parsed.base) + "?"
+		return groupDisplayName(parsed.base) + "?"
 	case typeKindArray:
-		return displayName(parsed.base) + "[]"
+		return groupDisplayName(parsed.base) + "[]"
+	case typeKindCallable:
+		short := make([]string, len(parsed.args))
+		for index, arg := range parsed.args {
+			short[index] = displayName(arg)
+		}
+		display := "(" + strings.Join(short, ", ") + ") -> " + displayName(parsed.base)
+		if len(parsed.throws) > 0 {
+			thrown := make([]string, len(parsed.throws))
+			for index, name := range parsed.throws {
+				thrown[index] = displayName(name)
+			}
+			display += " throws " + strings.Join(thrown, " | ")
+		}
+		return display
 	case typeKindTuple:
 		short := make([]string, len(parsed.args))
 		for index, arg := range parsed.args {
@@ -1364,6 +1561,15 @@ func displayName(name string) string {
 		return name[index+1:]
 	}
 	return name
+}
+
+// groupDisplayName keeps the parentheses a callable needs when a ? or []
+// suffix follows it, matching the canonical spelling.
+func groupDisplayName(name string) string {
+	if isCallableType(name) {
+		return "(" + displayName(name) + ")"
+	}
+	return displayName(name)
 }
 
 func validNamespace(namespace string) bool {

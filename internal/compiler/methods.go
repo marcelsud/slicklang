@@ -223,7 +223,17 @@ func (p *program) canonicalTypeName(namespace string, aliases map[string]aliasDe
 	case typeKindOptional:
 		return optionalOf(p.canonicalTypeName(namespace, aliases, parsed.base))
 	case typeKindArray:
-		return p.canonicalTypeName(namespace, aliases, parsed.base) + "[]"
+		return arrayOf(p.canonicalTypeName(namespace, aliases, parsed.base))
+	case typeKindCallable:
+		params := make([]string, len(parsed.args))
+		for index, param := range parsed.args {
+			params[index] = p.canonicalTypeName(namespace, aliases, param)
+		}
+		throws := make([]string, len(parsed.throws))
+		for index, thrown := range parsed.throws {
+			throws[index], _ = p.resolveErrorIn(namespace, aliases, thrown)
+		}
+		return callableType(params, p.canonicalTypeName(namespace, aliases, parsed.base), throws)
 	case typeKindTuple:
 		elements := make([]string, len(parsed.args))
 		for index, element := range parsed.args {

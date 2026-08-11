@@ -17,6 +17,7 @@ import (
 var exampleOutputs = map[string]string{
 	"hello":              "Ada: woof",
 	"bytes":              "Hello, 世界; 13; 72; bytes[13]",
+	"callables":          "42; 42; 44; 42; parsed 7; empty text",
 	"range-loop":         "0:Ada;2:Grace;",
 	"checked-errors":     "Ada: woof",
 	"constants":          "SLK001; 512; 3; true; -256; Strict",

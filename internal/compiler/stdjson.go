@@ -38,7 +38,17 @@ func substituteTypeParams(name string, params map[string]string) string {
 	case typeKindOptional:
 		return optionalOf(substituteTypeParams(parsed.base, params))
 	case typeKindArray:
-		return substituteTypeParams(parsed.base, params) + "[]"
+		return arrayOf(substituteTypeParams(parsed.base, params))
+	case typeKindCallable:
+		parameters := make([]string, len(parsed.args))
+		for index, arg := range parsed.args {
+			parameters[index] = substituteTypeParams(arg, params)
+		}
+		throws := make([]string, len(parsed.throws))
+		for index, thrown := range parsed.throws {
+			throws[index] = substituteTypeParams(thrown, params)
+		}
+		return callableType(parameters, substituteTypeParams(parsed.base, params), throws)
 	case typeKindTuple:
 		parts := make([]string, len(parsed.args))
 		for index, arg := range parsed.args {
@@ -148,6 +158,9 @@ func (p *program) jsonUnsupportedReason(name string, visiting map[string]bool) s
 	}
 	if strings.HasPrefix(name, "Iterable<") {
 		return "Iterable cannot be encoded or decoded as JSON"
+	}
+	if isCallableType(name) {
+		return "callables cannot be encoded or decoded as JSON"
 	}
 	if strings.HasPrefix(name, "(") {
 		return "tuples cannot be encoded or decoded as JSON"

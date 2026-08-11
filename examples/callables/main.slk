@@ -1,0 +1,72 @@
+// First-class callable types and lambdas
+// ======================================
+//
+// A callable type names parameter types, a result, and its checked effects:
+// `(int, int) -> int` and `(string) -> int throws Invalid`. A lambda is an
+// ordinary expression, so `let` binds it with `=` like any other value, and a
+// named function is already a value of its own callable type.
+//
+// The output is `42; 42; 44; 42; parsed 7; empty text`.
+
+/// Invalid reports text that carries no number.
+class Invalid implements Error {
+    /// Message states what went wrong.
+    Message: string
+}
+
+/// Apply invokes any operation that takes two ints and returns one.
+function Apply(Operation: (int, int) -> int, A: int, B: int) -> int {
+    Operation(A, B)
+}
+
+/// Add is an ordinary function, and therefore also a (int, int) -> int value.
+function Add(A: int, B: int) -> int {
+    A + B
+}
+
+/// Adder returns a callable, so a callable is an ordinary result type too.
+function Adder(Offset: int) -> ((int) -> int) {
+    (Value: int) -> int {
+        Value + Offset
+    }
+}
+
+/// Parse declares the error its callable type carries, so a caller of the
+/// callable must catch or declare it exactly as it would for a named function.
+function Parse(Operation: (string) -> int throws Invalid, Text: string) -> string {
+    let Value = Operation(Text) catch {
+        Invalid as Failure => 0 - 1
+    }
+    if (Value < 0) {
+        "empty text"
+    } else {
+        `parsed ${Value}`
+    }
+}
+
+function main() -> string {
+    let SumIt = (A: int, B: int) -> int {
+        A + B
+    }
+    let Inline = Apply(SumIt, 20, 22)
+    let Named = Apply(Add, 20, 22)
+    let Offset = 2
+    let AddOffset = (Value: int) -> int {
+        Value + Offset
+    }
+    Offset = 100
+    let Captured = AddOffset(42)
+    let Returned = Adder(10)(32)
+    let Count = (Text: string) -> int throws Invalid {
+        if (Text == "") {
+            throw Invalid {
+                Message: "no text"
+            }
+        }
+        let Parts = std.text.Split(Text, "-")
+        Parts.Length()
+    }
+    let Parsed = Parse(Count, "a-b-c-d-e-f-g")
+    let Rejected = Parse(Count, "")
+    `${Inline}; ${Named}; ${Captured}; ${Returned}; ${Parsed}; ${Rejected}`
+}

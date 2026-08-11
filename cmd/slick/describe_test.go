@@ -38,21 +38,26 @@ func TestDescribeJSONOutputContract(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q", status, stderr.String())
 	}
 	want := `{
-  "schema_version": 4,
+  "schema_version": 6,
   "symbol": {
     "canonical_name": "std.env.Get",
     "kind": "function",
     "visibility": "public",
     "documentation": "Returns the environment value for Name, or null when Name is unset.",
+    "annotations": [],
     "type": "",
+    "type_callable": null,
     "type_parameters": [],
     "parameters": [
       {
         "name": "Name",
-        "type": "string"
+        "type": "string",
+        "callable": null,
+        "annotations": []
       }
     ],
     "return_type": "string?",
+    "return_callable": null,
     "throws": [],
     "native": true,
     "fields": [],
@@ -79,7 +84,7 @@ func TestDescribeUnknownJSONErrorContract(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q", status, stderr.String())
 	}
 	want := `{
-  "schema_version": 4,
+  "schema_version": 6,
   "error": {
     "code": "unknown_symbol",
     "message": "unknown symbol \"std.env.Missing\"",
@@ -168,11 +173,11 @@ func TestDescribeJSONBudgetContract(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q", status, stderr.String())
 	}
 	want := `{
-  "schema_version": 4,
+  "schema_version": 6,
   "budget": {
     "unit": "lines",
     "limit": 39,
-    "required": 112,
+    "required": 115,
     "truncated": true,
     "omitted": [
       {
@@ -186,10 +191,13 @@ func TestDescribeJSONBudgetContract(t *testing.T) {
     "kind": "namespace",
     "visibility": "public",
     "documentation": "Provides compiler-owned portable standard-library components.",
+    "annotations": [],
     "type": "",
+    "type_callable": null,
     "type_parameters": [],
     "parameters": [],
     "return_type": "",
+    "return_callable": null,
     "throws": [],
     "native": false,
     "fields": [],
