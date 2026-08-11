@@ -39,6 +39,7 @@ type expressionInfo struct {
 
 type usingBinding struct {
 	outerLocals map[string]struct{}
+	owned       bool
 }
 
 type pendingState uint8
@@ -72,6 +73,7 @@ type astScope struct {
 	function      *functionDecl
 	locals        map[string]string
 	narrowed      map[string]string
+	bindingIDs    map[string]uint64
 	usingBindings map[string]usingBinding
 	pending       map[string]pendingBinding
 	// captured names the bindings a lambda copied by value, which its body may
@@ -80,20 +82,24 @@ type astScope struct {
 	// initializing names the let bindings whose value this scope is currently
 	// checking; recursive carries them into a lambda body, where referring to
 	// one is the rejected directly recursive lambda.
-	initializing []string
-	recursive    map[string]struct{}
-	currentBlock *blockNode
-	loopDepth    int
+	initializing  []string
+	recursive     map[string]struct{}
+	currentBlock  *blockNode
+	loopDepth     int
+	nextBindingID *uint64
 }
 
 func newASTScope(function *functionDecl, size int) *astScope {
+	nextBindingID := uint64(0)
 	return &astScope{
 		function:      function,
 		locals:        make(map[string]string, size),
 		narrowed:      make(map[string]string),
+		bindingIDs:    make(map[string]uint64, size),
 		usingBindings: make(map[string]usingBinding),
 		pending:       make(map[string]pendingBinding),
 		captured:      make(map[string]struct{}),
+		nextBindingID: &nextBindingID,
 	}
 }
 
@@ -111,7 +117,19 @@ func (scope *astScope) lookup(name string) (string, bool) {
 // binding declared inside a lambda also stops being a read-only capture: it is
 // the lambda's own storage, whatever the surrounding scope called it.
 func (scope *astScope) bind(name, typ string) {
+	if scope.nextBindingID == nil {
+		nextBindingID := uint64(0)
+		scope.nextBindingID = &nextBindingID
+	}
+	if scope.bindingIDs == nil {
+		scope.bindingIDs = make(map[string]uint64)
+	}
+	if scope.usingBindings == nil {
+		scope.usingBindings = make(map[string]usingBinding)
+	}
 	scope.locals[name] = typ
+	*scope.nextBindingID++
+	scope.bindingIDs[name] = *scope.nextBindingID
 	delete(scope.narrowed, name)
 	delete(scope.usingBindings, name)
 	delete(scope.captured, name)
@@ -210,7 +228,12 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		scope.initializing = previous
 		node.resolved = info.typ
 		if len(node.names) == 1 {
+			_, binding, aliasesUsing := directUsingBinding(node.value, scope)
 			scope.bind(node.names[0], info.typ)
+			if aliasesUsing {
+				binding.owned = false
+				scope.usingBindings[node.names[0]] = binding
+			}
 			return expressionInfo{typ: "null", effects: info.effects}
 		}
 		tupleTypes, tuple := tupleElementTypes(info.typ)
@@ -292,7 +315,8 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 			info := p.checkASTExpression(node.value, scope)
 			return expressionInfo{typ: "null", effects: info.effects}
 		}
-		if _, active := scope.usingBindings[node.name]; active {
+		targetBinding, targetsUsing := scope.usingBindings[node.name]
+		if targetsUsing && targetBinding.owned {
 			p.add(node.pos, diagnosticCodeUsingAssignment, "using binding %s is immutable", node.name)
 		}
 		if pending, exists := scope.pending[node.name]; exists && pending.state != pendingInvalid {
@@ -318,9 +342,18 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		}
 		// The stored value is no longer the one a branch proved non-null.
 		delete(scope.narrowed, node.name)
-		if resource, binding, ok := directUsingBinding(node.value, scope); ok {
-			if _, escapes := binding.outerLocals[node.name]; escapes && node.name != resource {
-				p.add(node.pos, diagnosticCodeUsingEscape, "using binding %s cannot be assigned outside its scope", resource)
+		_, sourceBinding, aliasesUsing := directUsingBinding(node.value, scope)
+		if aliasesUsing && (!targetsUsing || !targetBinding.owned) {
+			if _, escapes := sourceBinding.outerLocals[node.name]; escapes {
+				p.add(node.pos, diagnosticCodeUsingEscape, "using resource cannot be assigned outside its scope")
+			}
+		}
+		if !targetsUsing || !targetBinding.owned {
+			if aliasesUsing {
+				sourceBinding.owned = false
+				scope.usingBindings[node.name] = sourceBinding
+			} else {
+				delete(scope.usingBindings, node.name)
 			}
 		}
 		return expressionInfo{typ: "null", effects: info.effects}
@@ -355,6 +388,7 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 			}
 		}
 		body := p.checkASTBlock(node.body, loopScope, "")
+		mergeUsingPaths(scope, []pendingPath{{scope: scope, normal: true}, {scope: loopScope, normal: body.typ != typeNever}})
 		clearAssignedNarrowings(scope, node.body)
 		mergeEffects(iterable.effects, body.effects)
 		return expressionInfo{typ: "null", effects: iterable.effects}
@@ -806,7 +840,7 @@ func (p *program) checkUsingExpression(node *usingExpression, scope *astScope, e
 		outerLocals[name] = struct{}{}
 	}
 	bodyScope.bind(node.name, info.typ)
-	bodyScope.usingBindings[node.name] = usingBinding{outerLocals: outerLocals}
+	bodyScope.usingBindings[node.name] = usingBinding{outerLocals: outerLocals, owned: true}
 	body := p.checkASTBlock(node.body, bodyScope, expected)
 	mergeEffects(info.effects, body.effects)
 	info.typ = body.typ
@@ -1388,6 +1422,7 @@ func (p *program) checkIfExpression(node *ifExpression, scope *astScope, expecte
 		mergeEffects(info.effects, elseInfo.effects)
 	}
 	p.mergePendingBranches(scope, thenScope, elseScope, thenInfo.typ != typeNever, elseInfo.typ != typeNever, node.pos)
+	mergeUsingPaths(scope, []pendingPath{{scope: thenScope, normal: thenInfo.typ != typeNever}, {scope: elseScope, normal: elseInfo.typ != typeNever}})
 	if node.elseBlock == nil {
 		clearAssignedNarrowings(scope, node.thenBlock)
 		return info
@@ -1454,6 +1489,7 @@ func (p *program) checkCatchExpression(node *catchExpression, scope *astScope, e
 		p.add(node.pos, diagnosticCodeNonExhaustiveCatch, "non-exhaustive catch for %s; missing %s", expressionLabel(node.value), strings.Join(missing, ", "))
 	}
 	p.mergePendingPaths(scope, node.pos, paths)
+	mergeUsingPaths(scope, paths)
 	return result
 }
 
@@ -1580,6 +1616,7 @@ func (p *program) checkMatchExpression(node *matchExpression, scope *astScope, e
 		}
 	}
 	p.mergePendingPaths(scope, node.pos, paths)
+	mergeUsingPaths(scope, paths)
 	if armType != "" {
 		info.typ = armType
 	}
@@ -1731,6 +1768,10 @@ func (scope *astScope) clone() *astScope {
 	for name, typ := range scope.narrowed {
 		narrowed[name] = typ
 	}
+	bindingIDs := make(map[string]uint64, len(scope.bindingIDs))
+	for name, id := range scope.bindingIDs {
+		bindingIDs[name] = id
+	}
 	usingBindings := make(map[string]usingBinding, len(scope.usingBindings))
 	for name, binding := range scope.usingBindings {
 		usingBindings[name] = binding
@@ -1748,6 +1789,7 @@ func (scope *astScope) clone() *astScope {
 		function:      scope.function,
 		locals:        locals,
 		narrowed:      narrowed,
+		bindingIDs:    bindingIDs,
 		usingBindings: usingBindings,
 		pending:       pending,
 		captured:      captured,
@@ -1755,6 +1797,7 @@ func (scope *astScope) clone() *astScope {
 		recursive:     scope.recursive,
 		currentBlock:  scope.currentBlock,
 		loopDepth:     scope.loopDepth,
+		nextBindingID: scope.nextBindingID,
 	}
 }
 
@@ -1772,6 +1815,57 @@ func copyPendingStates(target, source *astScope) {
 		if exists && updated.owner == binding.owner {
 			binding.state = updated.state
 			target.pending[name] = binding
+		}
+	}
+}
+
+// mergeUsingPaths keeps provenance when any reachable path may leave an outer
+// binding holding a resource owned by an active using scope.
+func mergeUsingPaths(target *astScope, paths []pendingPath) {
+	haveNormal := false
+	for _, path := range paths {
+		if path.normal {
+			haveNormal = true
+			break
+		}
+	}
+	if !haveNormal {
+		return
+	}
+	for name := range target.locals {
+		current, exists := target.usingBindings[name]
+		if exists && current.owned {
+			continue
+		}
+		var merged usingBinding
+		found := false
+		for _, path := range paths {
+			if !path.normal || path.scope.bindingIDs[name] != target.bindingIDs[name] {
+				continue
+			}
+			binding, exists := path.scope.usingBindings[name]
+			if !exists {
+				continue
+			}
+			if !found {
+				merged = binding
+				merged.owned = false
+				found = true
+				continue
+			}
+			outerLocals := make(map[string]struct{}, len(merged.outerLocals)+len(binding.outerLocals))
+			for outer := range merged.outerLocals {
+				outerLocals[outer] = struct{}{}
+			}
+			for outer := range binding.outerLocals {
+				outerLocals[outer] = struct{}{}
+			}
+			merged.outerLocals = outerLocals
+		}
+		if found {
+			target.usingBindings[name] = merged
+		} else {
+			delete(target.usingBindings, name)
 		}
 	}
 }

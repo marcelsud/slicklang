@@ -312,6 +312,7 @@ func (p *program) checkUnionMatch(node *matchExpression, union *unionDecl, value
 		}
 	}
 	p.mergePendingPaths(scope, node.pos, paths)
+	mergeUsingPaths(scope, paths)
 	if armType != "" {
 		info.typ = armType
 	}

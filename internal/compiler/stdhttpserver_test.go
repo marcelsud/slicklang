@@ -1,10 +1,12 @@
 package compiler_test
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,6 +47,19 @@ class Echo implements std.http.server.Handler {
             return std.http.server.Response {
                 Status: 200
                 Body: std.bytes.FromUtf8("hit")
+            }
+        }
+        if (Request.Path == "/slow") {
+            let URL = std.env.Get("SLICK_HTTP_BLOCK_URL")
+            if (URL != null) {
+                let Result = std.http.Fetch(std.http.Request {
+                    Method: "GET"
+                    URL: URL
+                })
+            }
+            return std.http.server.Response {
+                Status: 200
+                Body: std.bytes.FromUtf8("slow")
             }
         }
         let Query = Request.Query
@@ -146,6 +161,88 @@ func startHTTPServerBinary(t *testing.T, binary, address string, env ...string) 
 	return command
 }
 
+func assertMalformedQueryAndConnectRejected(t *testing.T, address string) {
+	t.Helper()
+	request := func(method, target string) (*http.Response, string) {
+		connection, err := net.Dial("tcp", address)
+		if err != nil {
+			t.Fatalf("dial raw request: %v", err)
+		}
+		defer connection.Close()
+		if _, err := fmt.Fprintf(connection, "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", method, target, address); err != nil {
+			t.Fatalf("write raw request: %v", err)
+		}
+		response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+		if err != nil {
+			t.Fatalf("read raw response: %v", err)
+		}
+		body, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil {
+			t.Fatalf("read raw response body: %v", err)
+		}
+		return response, string(body)
+	}
+
+	malformed, body := request(http.MethodGet, "/count?q=%zz")
+	if malformed.StatusCode != http.StatusBadRequest || strings.Contains(body, "hit") {
+		t.Fatalf("malformed query status=%d body=%q", malformed.StatusCode, body)
+	}
+	connect, body := request(http.MethodConnect, address)
+	if connect.StatusCode != http.StatusInternalServerError || strings.Contains(body, "hit") {
+		t.Fatalf("CONNECT status=%d body=%q", connect.StatusCode, body)
+	}
+}
+
+func shutdownBlocker(t *testing.T) (string, <-chan struct{}) {
+	t.Helper()
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		close(started)
+		time.Sleep(150 * time.Millisecond)
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	return server.URL, started
+}
+
+func assertShutdownDeadlineSucceeds(t *testing.T, command *exec.Cmd, base string, started <-chan struct{}, output *strings.Builder) {
+	t.Helper()
+	requestDone := make(chan struct{})
+	go func() {
+		defer close(requestDone)
+		response, err := http.Get(base + "/slow")
+		if err == nil {
+			response.Body.Close()
+		}
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("slow handler did not start")
+	}
+	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal server: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("server exit after forced shutdown: %v output=%q", err, output.String())
+		}
+	case <-time.After(5 * time.Second):
+		_ = command.Process.Kill()
+		t.Fatalf("server did not exit after forced shutdown: %q", output.String())
+	}
+	command.Process = nil
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("slow request did not finish")
+	}
+}
+
 func TestStdHTTPServerConfigAndBindFailuresEverywhere(t *testing.T) {
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -217,15 +314,17 @@ function main() -> Result<null, std.http.server.Failure> {
             ReadTimeoutMilliseconds: 1000
             WriteTimeoutMilliseconds: 1000
             IdleTimeoutMilliseconds: 1000
-            ShutdownTimeoutMilliseconds: 2000
+            ShutdownTimeoutMilliseconds: 10
         }, Echo {})
     }
 }
 `
 	binary := buildHTTPServerBinary(t, source)
-	command := startHTTPServerBinary(t, binary, address)
+	blockURL, blockerStarted := shutdownBlocker(t)
+	command := startHTTPServerBinary(t, binary, address, "SLICK_HTTP_BLOCK_URL="+blockURL)
 	base := "http://" + address
 	waitForHTTP(t, base+"/count")
+	assertMalformedQueryAndConnectRejected(t, address)
 
 	// Methods including an extension token, query, headers, and body.
 	request, err := http.NewRequest("PROPFIND", base+"/items?q=one&q=two&flag=1", strings.NewReader("payload"))
@@ -365,22 +464,8 @@ function main() -> Result<null, std.http.server.Failure> {
 		t.Fatalf("post-failure status %d", alive.StatusCode)
 	}
 
-	// Graceful SIGTERM shutdown returns success (exit 0).
-	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("signal server: %v", err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- command.Wait() }()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("server exit: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		_ = command.Process.Kill()
-		t.Fatal("server did not exit after SIGTERM")
-	}
-	command.Process = nil
+	// A handler outliving the graceful deadline is force-closed and still exits successfully.
+	assertShutdownDeadlineSucceeds(t, command, base, blockerStarted, &strings.Builder{})
 }
 
 func TestStdHTTPServerServeContractsInterpreter(t *testing.T) {
@@ -398,7 +483,7 @@ function main() -> Result<null, std.http.server.Failure> {
         std.http.server.Serve(std.http.server.Config {
             Address: Address
             MaxBodyBytes: 64
-            ShutdownTimeoutMilliseconds: 2000
+            ShutdownTimeoutMilliseconds: 10
         }, Echo {})
     }
 }
@@ -410,7 +495,8 @@ function main() -> Result<null, std.http.server.Failure> {
 	}
 	slick := buildSlickTool(t)
 	command := exec.Command(slick, "run", path)
-	command.Env = append(os.Environ(), "SLICK_HTTP_SERVER_ADDR="+address)
+	blockURL, blockerStarted := shutdownBlocker(t)
+	command.Env = append(os.Environ(), "SLICK_HTTP_SERVER_ADDR="+address, "SLICK_HTTP_BLOCK_URL="+blockURL)
 	var output strings.Builder
 	command.Stdout = &output
 	command.Stderr = &output
@@ -426,6 +512,7 @@ function main() -> Result<null, std.http.server.Failure> {
 
 	base := "http://" + address
 	waitForHTTP(t, base+"/count")
+	assertMalformedQueryAndConnectRejected(t, address)
 
 	response, err := http.Post(base+"/echo?q=one&q=two", "text/plain", strings.NewReader("hi"))
 	if err != nil {
@@ -464,21 +551,7 @@ function main() -> Result<null, std.http.server.Failure> {
 		t.Fatalf("interpreter concurrent failures: %d output=%q", failures.Load(), output.String())
 	}
 
-	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("signal interpreter server: %v", err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- command.Wait() }()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("interpreter server exit: %v output=%q", err, output.String())
-		}
-	case <-time.After(5 * time.Second):
-		_ = command.Process.Kill()
-		t.Fatalf("interpreter server did not exit: %q", output.String())
-	}
-	command.Process = nil
+	assertShutdownDeadlineSucceeds(t, command, base, blockerStarted, &output)
 }
 
 func buildSlickTool(t *testing.T) string {

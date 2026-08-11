@@ -19,13 +19,13 @@ import (
 )
 
 const (
-	defaultHTTPServerMaxHeaderBytes                 int64 = 1 << 20
-	defaultHTTPServerMaxBodyBytes                   int64 = 8 << 20
-	defaultHTTPServerReadHeaderTimeoutMilliseconds  int64 = 10_000
-	defaultHTTPServerReadTimeoutMilliseconds        int64 = 30_000
-	defaultHTTPServerWriteTimeoutMilliseconds       int64 = 30_000
-	defaultHTTPServerIdleTimeoutMilliseconds        int64 = 120_000
-	defaultHTTPServerShutdownTimeoutMilliseconds    int64 = 30_000
+	defaultHTTPServerMaxHeaderBytes                int64 = 1 << 20
+	defaultHTTPServerMaxBodyBytes                  int64 = 8 << 20
+	defaultHTTPServerReadHeaderTimeoutMilliseconds int64 = 10_000
+	defaultHTTPServerReadTimeoutMilliseconds       int64 = 30_000
+	defaultHTTPServerWriteTimeoutMilliseconds      int64 = 30_000
+	defaultHTTPServerIdleTimeoutMilliseconds       int64 = 120_000
+	defaultHTTPServerShutdownTimeoutMilliseconds   int64 = 30_000
 )
 
 // markUsesStdHTTP records whether a type or name pulls in the outbound client
@@ -63,14 +63,14 @@ func (g *goGenerator) skipStdHTTP(name string) bool {
 }
 
 type httpServerConfigData struct {
-	address                   string
-	maxHeaderBytes            int64
-	maxBodyBytes              int64
-	readHeaderTimeoutMillis   int64
-	readTimeoutMillis         int64
-	writeTimeoutMillis        int64
-	idleTimeoutMillis         int64
-	shutdownTimeoutMillis     int64
+	address                 string
+	maxHeaderBytes          int64
+	maxBodyBytes            int64
+	readHeaderTimeoutMillis int64
+	readTimeoutMillis       int64
+	writeTimeoutMillis      int64
+	idleTimeoutMillis       int64
+	shutdownTimeoutMillis   int64
 }
 
 type httpServerRequestData struct {
@@ -175,9 +175,9 @@ func isHopByHopHeader(name string) bool {
 	return hopByHopHeaderNames[http.CanonicalHeaderKey(name)]
 }
 
-func parseHTTPServerQuery(raw string) []httpHeaderData {
+func parseHTTPServerQuery(raw string) ([]httpHeaderData, error) {
 	if raw == "" {
-		return nil
+		return nil, nil
 	}
 	order := make([]string, 0)
 	seen := make(map[string]int)
@@ -198,11 +198,11 @@ func parseHTTPServerQuery(raw string) []httpHeaderData {
 		}
 		decodedKey, err := url.QueryUnescape(key)
 		if err != nil {
-			decodedKey = key
+			return nil, err
 		}
 		decodedValue, err := url.QueryUnescape(value)
 		if err != nil {
-			decodedValue = value
+			return nil, err
 		}
 		if _, exists := seen[decodedKey]; !exists {
 			seen[decodedKey] = len(order)
@@ -214,7 +214,7 @@ func parseHTTPServerQuery(raw string) []httpHeaderData {
 	for index, key := range order {
 		result[index] = httpHeaderData{name: key, values: values[key]}
 	}
-	return result
+	return result, nil
 }
 
 func requestHTTPServerHeaders(headers http.Header) []httpHeaderData {
@@ -268,6 +268,10 @@ func readHTTPServerBody(request *http.Request, maxBodyBytes int64) ([]byte, int,
 }
 
 func convertHTTPServerRequest(request *http.Request, maxBodyBytes int64) (httpServerRequestData, int, error) {
+	query, err := parseHTTPServerQuery(request.URL.RawQuery)
+	if err != nil {
+		return httpServerRequestData{}, http.StatusBadRequest, err
+	}
 	body, status, err := readHTTPServerBody(request, maxBodyBytes)
 	if err != nil {
 		return httpServerRequestData{}, status, err
@@ -279,7 +283,7 @@ func convertHTTPServerRequest(request *http.Request, maxBodyBytes int64) (httpSe
 	return httpServerRequestData{
 		method:  request.Method,
 		path:    path,
-		query:   parseHTTPServerQuery(request.URL.RawQuery),
+		query:   query,
 		headers: requestHTTPServerHeaders(request.Header),
 		body:    body,
 	}, 0, nil
@@ -324,6 +328,10 @@ func suppressHTTPServerBody(method string, status int64, body []byte) []byte {
 }
 
 func writeHTTPServerResponse(writer http.ResponseWriter, method string, response httpServerResponseData) {
+	if method == http.MethodConnect && response.status >= 200 && response.status < 300 {
+		writer.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 	if err := validateHTTPServerResponse(response); err != nil {
 		writer.WriteHeader(http.StatusInternalServerError)
 		return
@@ -515,9 +523,12 @@ func (p *program) serveHTTP(ctx context.Context, config httpServerConfigData, ha
 	shutdownContext, cancel := context.WithTimeout(context.Background(), httpServerTimeoutDuration(config.shutdownTimeoutMillis))
 	defer cancel()
 	if err := server.Shutdown(shutdownContext); err != nil {
-		_ = server.Close()
-		waitGroup.Wait()
-		return httpServerFailure("Shutdown", config.address, "graceful shutdown failed")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			return httpServerFailure("Shutdown", config.address, "graceful shutdown failed")
+		}
+		if err := server.Close(); err != nil {
+			return httpServerFailure("Shutdown", config.address, "forced shutdown failed")
+		}
 	}
 	waitGroup.Wait()
 	if err := <-serveErrors; err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -571,8 +582,8 @@ func (g *goGenerator) emitHTTPServerRuntimeSupport() {
 	g.line(`for _, check := range checks { if check.value <= 0 { return slickHTTPServerFailure("Config", config.address, check.name + " must be positive") } }`)
 	g.line(`return nil`)
 	g.line(`}`)
-	g.line(`func slickHTTPServerParseQuery(raw string) []slickHTTPServerHeader {`)
-	g.line(`if raw == "" { return nil }`)
+	g.line(`func slickHTTPServerParseQuery(raw string) ([]slickHTTPServerHeader, error) {`)
+	g.line(`if raw == "" { return nil, nil }`)
 	g.line(`order := make([]string, 0); seen := make(map[string]int); values := make(map[string][]string)`)
 	g.line(`for raw != "" {`)
 	g.line(`pair := raw`)
@@ -580,12 +591,12 @@ func (g *goGenerator) emitHTTPServerRuntimeSupport() {
 	g.line(`if pair == "" { continue }`)
 	g.line(`key, value := pair, ""`)
 	g.line(`if index := strings.IndexByte(pair, '='); index >= 0 { key, value = pair[:index], pair[index+1:] }`)
-	g.line(`decodedKey, err := url.QueryUnescape(key); if err != nil { decodedKey = key }`)
-	g.line(`decodedValue, err := url.QueryUnescape(value); if err != nil { decodedValue = value }`)
+	g.line(`decodedKey, err := url.QueryUnescape(key); if err != nil { return nil, err }`)
+	g.line(`decodedValue, err := url.QueryUnescape(value); if err != nil { return nil, err }`)
 	g.line(`if _, exists := seen[decodedKey]; !exists { seen[decodedKey] = len(order); order = append(order, decodedKey) }`)
 	g.line(`values[decodedKey] = append(values[decodedKey], decodedValue)`)
 	g.line(`}`)
-	g.line(`result := make([]slickHTTPServerHeader, len(order)); for index, key := range order { result[index] = slickHTTPServerHeader{name: key, values: values[key]} }; return result`)
+	g.line(`result := make([]slickHTTPServerHeader, len(order)); for index, key := range order { result[index] = slickHTTPServerHeader{name: key, values: values[key]} }; return result, nil`)
 	g.line(`}`)
 	g.line(`func slickHTTPServerRequestHeaders(headers http.Header) []slickHTTPServerHeader {`)
 	g.line(`sourceNames := make([]string, 0, len(headers)); for name := range headers { if slickHTTPServerIsHopByHop(name) { continue }; sourceNames = append(sourceNames, name) }`)
@@ -607,9 +618,10 @@ func (g *goGenerator) emitHTTPServerRuntimeSupport() {
 	g.line(`return append(slickBytes(nil), contents...), 0, nil`)
 	g.line(`}`)
 	g.line(`func slickHTTPServerConvertRequest(request *http.Request, maxBodyBytes int64) (slickHTTPServerRequestData, int, error) {`)
+	g.line(`query, err := slickHTTPServerParseQuery(request.URL.RawQuery); if err != nil { return slickHTTPServerRequestData{}, http.StatusBadRequest, err }`)
 	g.line(`body, status, err := slickHTTPServerReadBody(request, maxBodyBytes); if err != nil { return slickHTTPServerRequestData{}, status, err }`)
 	g.line(`path := request.URL.Path; if path == "" { path = "/" }`)
-	g.line(`return slickHTTPServerRequestData{method: request.Method, path: path, query: slickHTTPServerParseQuery(request.URL.RawQuery), headers: slickHTTPServerRequestHeaders(request.Header), body: body}, 0, nil`)
+	g.line(`return slickHTTPServerRequestData{method: request.Method, path: path, query: query, headers: slickHTTPServerRequestHeaders(request.Header), body: body}, 0, nil`)
 	g.line(`}`)
 	g.line(`func slickHTTPServerValidateResponse(response slickHTTPServerResponseData) error {`)
 	g.line(`if response.status < 100 || response.status > 999 { return errors.New("response status must be between 100 and 999") }`)
@@ -629,6 +641,7 @@ func (g *goGenerator) emitHTTPServerRuntimeSupport() {
 	g.line(`return body`)
 	g.line(`}`)
 	g.line(`func slickHTTPServerWriteResponse(writer http.ResponseWriter, method string, response slickHTTPServerResponseData) {`)
+	g.line(`if method == http.MethodConnect && response.status >= 200 && response.status < 300 { writer.WriteHeader(http.StatusInternalServerError); return }`)
 	g.line(`if err := slickHTTPServerValidateResponse(response); err != nil { writer.WriteHeader(http.StatusInternalServerError); return }`)
 	g.line(`body := slickHTTPServerSuppressBody(method, response.status, response.body)`)
 	g.line(`header := writer.Header()`)
@@ -724,10 +737,14 @@ func (g *goGenerator) emitHTTPServerRuntimeSupport() {
 	g.line(`shutdownContext, cancel := context.WithTimeout(context.Background(), slickHTTPServerTimeoutDuration(data.shutdownTimeoutMillis))`)
 	g.line(`defer cancel()`)
 	g.line(`if err := server.Shutdown(shutdownContext); err != nil {`)
-	g.line(`_ = server.Close()`)
-	g.line(`waitGroup.Wait()`)
+	g.line(`if !errors.Is(err, context.DeadlineExceeded) {`)
 	g.line("return %s{failure: &%s{%s: %q, %s: data.address, %s: %q}}, nil",
 		resultType, failureClass, operationField, "Shutdown", addressField, messageField, "graceful shutdown failed")
+	g.line(`}`)
+	g.line(`if err := server.Close(); err != nil {`)
+	g.line("return %s{failure: &%s{%s: %q, %s: data.address, %s: %q}}, nil",
+		resultType, failureClass, operationField, "Shutdown", addressField, messageField, "forced shutdown failed")
+	g.line(`}`)
 	g.line(`}`)
 	g.line(`waitGroup.Wait()`)
 	g.line(`if err := <-serveErrors; err != nil && !errors.Is(err, http.ErrServerClosed) {`)

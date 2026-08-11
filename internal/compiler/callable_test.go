@@ -1112,6 +1112,73 @@ function main() -> int {
 			message: "cannot capture using binding Resource",
 		},
 		{
+			name: "an alias of a using binding cannot be captured",
+			source: `
+class Handle {
+    Name: string
+    function Close() -> null { null }
+}
+
+function main() -> int {
+    using Resource = Handle { Name: "one" } {
+        let Alias = Resource
+        let Operation = () -> string {
+            Alias.Name
+        }
+        1
+    }
+}
+`,
+			code:    "SLK414",
+			message: "cannot capture using binding Alias",
+		},
+		{
+			name: "an assigned using alias cannot be captured",
+			source: `
+class Handle {
+    Name: string
+    function Close() -> null { null }
+}
+
+function main() -> int {
+    using Resource = Handle { Name: "one" } {
+        let Alias = Handle { Name: "two" }
+        Alias = Resource
+        let Operation = () -> string {
+            Alias.Name
+        }
+        1
+    }
+}
+`,
+			code:    "SLK414",
+			message: "cannot capture using binding Alias",
+		},
+		{
+			name: "a branch-assigned using alias cannot be captured",
+			source: `
+class Handle {
+    Name: string
+    function Close() -> null { null }
+}
+
+function main() -> int {
+    using Resource = Handle { Name: "one" } {
+        let Alias = Handle { Name: "two" }
+        if (true) {
+            Alias = Resource
+        }
+        let Operation = () -> string {
+            Alias.Name
+        }
+        1
+    }
+}
+`,
+			code:    "SLK414",
+			message: "cannot capture using binding Alias",
+		},
+		{
 			name: "a lambda cannot call the binding it initializes",
 			source: `
 function main() -> int {
