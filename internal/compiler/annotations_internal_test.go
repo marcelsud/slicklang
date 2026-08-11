@@ -683,3 +683,34 @@ class Later {}
 		t.Fatalf("annotation highlighting keyword=%t punct=%t", keyword, punct)
 	}
 }
+
+func TestAnnotatedDetachedMethodFormattingFixedPoint(t *testing.T) {
+	source := Source{Name: "main.slk", Namespace: "root", Text: `class Service { function Run ( Value : int ) -> int }
+@std.test.Marker function Service.Run ( Value : int ) -> int { Value }
+function main ( ) -> int { let App = Service { } App.Run ( 42 ) }`}
+	want := `class Service {
+    function Run(Value: int) -> int
+}
+
+@std.test.Marker
+function Service.Run(Value: int) -> int {
+    Value
+}
+
+function main() -> int {
+    let App = Service {}
+    App.Run(42)
+}
+`
+	formatted, diagnostics, err := Format(source)
+	if err != nil || len(diagnostics) > 0 {
+		t.Fatalf("format detached annotation: output=%q diagnostics=%+v err=%v", formatted, diagnostics, err)
+	}
+	if formatted != want {
+		t.Fatalf("formatted detached annotation:\n%s\nwant:\n%s", formatted, want)
+	}
+	again, diagnostics, err := Format(Source{Name: source.Name, Namespace: source.Namespace, Text: formatted})
+	if err != nil || len(diagnostics) > 0 || again != formatted {
+		t.Fatalf("format fixed point: output=%q diagnostics=%+v err=%v", again, diagnostics, err)
+	}
+}

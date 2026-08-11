@@ -217,24 +217,37 @@ func (f *sourceFormatter) collectBreaks() {
 		}
 	}
 	for _, target := range f.source.prog.annotationTargets() {
-		if len(target.annotations) == 0 {
-			continue
+		formatTargets := []annotationTargetRef{target}
+		if target.kind == annotationTargetMethod && target.method != nil && target.function != nil && !target.function.inline {
+			declaration := target
+			declaration.annotations = target.method.annotations
+			implementation := target
+			implementation.pos = target.function.pos
+			implementation.namespace = target.function.namespace
+			implementation.aliases = target.function.aliases
+			implementation.annotations = target.function.annotations
+			formatTargets = []annotationTargetRef{declaration, implementation}
 		}
-		if target.kind != annotationTargetParameter {
-			for _, annotation := range target.annotations {
-				f.addBreak(annotation.pos)
+		for _, target := range formatTargets {
+			if len(target.annotations) == 0 {
+				continue
 			}
-			first := target.annotations[0].pos
-			kind := "class"
-			if target.kind == annotationTargetFunction || target.kind == annotationTargetMethod {
-				kind = "function"
+			if target.kind != annotationTargetParameter {
+				for _, annotation := range target.annotations {
+					f.addBreak(annotation.pos)
+				}
+				first := target.annotations[0].pos
+				kind := "class"
+				if target.kind == annotationTargetFunction || target.kind == annotationTargetMethod {
+					kind = "function"
+				}
+				f.annotationStarts[sourcePoint{line: first.line, column: first.column}] = kind
 			}
-			f.annotationStarts[sourcePoint{line: first.line, column: first.column}] = kind
-		}
-		point, found := f.annotationTargetPoint(target)
-		if found {
-			f.breakBefore[point] = struct{}{}
-			f.annotatedTargets[point] = struct{}{}
+			point, found := f.annotationTargetPoint(target)
+			if found {
+				f.breakBefore[point] = struct{}{}
+				f.annotatedTargets[point] = struct{}{}
+			}
 		}
 	}
 	for _, annotation := range f.source.prog.annotations {
