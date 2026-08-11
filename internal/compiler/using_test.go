@@ -363,6 +363,26 @@ func TestUsingDiagnostics(t *testing.T) {
 			code:    "SLK389",
 			message: "cannot be assigned outside its scope",
 		},
+		"buffer push retention escape": {
+			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function main() -> null { let Saved = std.buffer.New<Resource>() using Handle = Open() { std.buffer.Push<Resource>(Saved, Handle) } }`,
+			code:    "SLK389",
+			message: "cannot be retained outside its scope",
+		},
+		"buffer set retention escape": {
+			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function main() -> null { let Saved = std.buffer.New<Resource>() std.buffer.Push<Resource>(Saved, Open()) using Handle = Open() { let Updated = std.buffer.Set<Resource>(Saved, 0, Handle) null } }`,
+			code:    "SLK389",
+			message: "cannot be retained outside its scope",
+		},
+		"buffer wrapper retention escape": {
+			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function Save(Target: Buffer<Resource>, Value: Resource) -> null { std.buffer.Push<Resource>(Target, Value) } function main() -> null { let Saved = std.buffer.New<Resource>() using Handle = Open() { Save(Saved, Handle) } }`,
+			code:    "SLK389",
+			message: "cannot be retained outside its scope",
+		},
+		"checked effect escape": {
+			source:  `class Resource implements Error { function Close() -> null { null } } function Open() -> Resource { Resource {} } function Raise(Value: Resource) -> null throws Resource { throw Value } function main() -> null throws Resource { using Handle = Open() { Raise(Handle) } }`,
+			code:    "SLK389",
+			message: "cannot escape its scope through Resource",
+		},
 		"block value escape": {
 			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function main() -> Resource { using Handle = Open() { Handle } }`,
 			code:    "SLK389",
@@ -516,6 +536,21 @@ function main() -> int {
         let Pair = (1, Handle)
         let (Number, _) = Pair
         Number
+    }
+}
+`)
+	assertNoDiagnostics(t, diagnostics)
+
+	diagnostics = checkResult(t, `
+class Resource {
+    function Close() -> null { null }
+}
+function Open() -> Resource { Resource {} }
+function main() -> Resource {
+    using Handle = Open() {
+        let Pair = (Open(), Handle)
+        let (Fresh, _) = Pair
+        Fresh
     }
 }
 `)

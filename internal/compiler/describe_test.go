@@ -93,6 +93,9 @@ class User implements Greeter {
 function Load(Name: string) -> User throws Failure {
     User { Name: Name secret: "hidden" }
 }
+union Choice {
+    Value(Item: string)
+}
 `,
 	})
 
@@ -121,6 +124,12 @@ function Load(Name: string) -> User throws Failure {
 	assertDescriptionResult(t, diagnostics, err)
 	if function.Symbol.ReturnType != "root.models.User" || !reflect.DeepEqual(function.Symbol.Throws, []string{"root.models.Failure"}) {
 		t.Fatalf("root.models.Load = %+v", function.Symbol)
+	}
+
+	variant, diagnostics, err := compiler.DescribePath("root.models.Choice.Value", path)
+	assertDescriptionResult(t, diagnostics, err)
+	if len(variant.Symbol.Fields) != 1 || variant.Symbol.Fields[0].Annotations == nil || len(variant.Symbol.Fields[0].Annotations) != 0 {
+		t.Fatalf("root.models.Choice.Value fields = %+v", variant.Symbol.Fields)
 	}
 }
 

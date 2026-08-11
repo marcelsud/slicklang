@@ -362,6 +362,12 @@ func (p *program) resolveErrorIn(namespace string, aliases map[string]aliasDecl,
 	if strings.ContainsRune(name, '<') {
 		canonical := p.canonicalTypeName(namespace, aliases, name)
 		decl := p.classes[canonical]
+		if decl == nil {
+			base, _, generic := genericType(canonical)
+			if generic {
+				decl = p.genericClasses[base]
+			}
+		}
 		return canonical, decl != nil && decl.isError
 	}
 	if !isAbsoluteCanonicalName(name) {

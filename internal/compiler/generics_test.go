@@ -422,6 +422,33 @@ func TestPrivateGenericDeclarationStaysInsideItsNamespace(t *testing.T) {
 	assertDiagnostic(t, diagnostics, "SLK330", "class box is private to root.deep")
 }
 
+func TestGenericCallableTypesKeepGenericEffectsAndScope(t *testing.T) {
+	diagnostics := checkGenerics(t, `
+class Box<T> {
+    Value: T
+}
+
+class Empty<T> implements Error {}
+
+class Holder<T> {
+    Transform: (Box<T>) -> Box<T> throws Empty<T>
+}
+
+function main() -> int {
+    let Held = Holder<int> {
+        Transform: (Value: Box<int>) -> Box<int> throws Empty<int> {
+            Value
+        }
+    }
+    let Output = Held.Transform(Box<int> { Value: 42 }) catch {
+        Empty<int> => Box<int> { Value: 0 }
+    }
+    Output.Value
+}
+`)
+	assertNoDiagnostics(t, diagnostics)
+}
+
 // TestRecursiveGenericConverges pins that a declaration containing itself at
 // the same type arguments is a finite, ordinary program, while one that wraps
 // its own parameter is rejected instead of expanding forever.

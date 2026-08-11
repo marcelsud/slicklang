@@ -1110,6 +1110,27 @@ func parseCallableTypeTail(tokens []token, params []string, index int, allowThro
 	return callableType(params, result, throws), next, "", position{}
 }
 
+func parseEffectTypeTokens(tokens []token, index int) (typeRef, int, string, position) {
+	ref, next, ok := readQualified(tokens, index)
+	if !ok {
+		return typeRef{}, index, "expected error type after 'throws'", typeTokenPos(tokens, index)
+	}
+	name := ref.name
+	if next < len(tokens) && tokens[next].text == "<" {
+		close := matchingAngle(tokens, next)
+		if close < 0 {
+			return typeRef{}, next, "unterminated generic type", tokens[next].pos
+		}
+		args, wellFormed := parseTypeTokenList(tokens, next+1, close)
+		if !wellFormed {
+			return typeRef{}, next, "malformed generic type", tokens[next].pos
+		}
+		name += "<" + strings.Join(args, ",") + ">"
+		next = close + 1
+	}
+	return typeRef{name: name, pos: ref.pos}, next, "", position{}
+}
+
 // parseTypeTokenList reads the comma-separated types between start and end. It
 // reports whether the whole span is a well-formed list, so a caller can keep a
 // malformed spelling intact rather than inventing a shorter type from it.
@@ -1184,7 +1205,6 @@ func parseThrownTypeTokens(tokens []token, index int) (typeRef, int, string, pos
 	}
 	return typeRef{name: name, pos: tokens[index].pos}, next, "", position{}
 }
-
 func (p *parser) skipBlock() {
 	p.skipDelimited("{", "}")
 }

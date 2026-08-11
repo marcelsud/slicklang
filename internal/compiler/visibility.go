@@ -122,6 +122,7 @@ func (p *program) checkTypeNameScoped(pos position, namespace string, scope *typ
 		}
 		p.checkTypeNameScoped(pos, namespace, scope, named, parsed.base)
 		for _, thrown := range parsed.throws {
+			p.checkTypeNameScoped(pos, namespace, scope, named, thrown)
 			if thrown == errorTypeName {
 				continue
 			}
