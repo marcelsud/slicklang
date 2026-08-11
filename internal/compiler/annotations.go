@@ -433,7 +433,11 @@ func (p *program) expandAnnotation(target annotationTargetRef, use *annotationUs
 	for index, param := range decl.params {
 		bound[param.name] = values[index]
 	}
-	return p.expandAnnotation(target, decl.target, decl.namespace, decl.aliases, bound, append(chain, decl.qualified))
+	resolved, ok := p.expandAnnotation(target, decl.target, decl.namespace, decl.aliases, bound, append(chain, decl.qualified))
+	if ok {
+		resolved.authored = use
+	}
+	return resolved, ok
 }
 
 func (p *program) checkAnnotationArguments(pos position, name string, values []annotationValue, expected []string, namespace string) bool {

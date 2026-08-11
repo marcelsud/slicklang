@@ -69,8 +69,12 @@ func substitutionsFor(params, args []string) map[string]string {
 // instantiationDepth is how deeply angle brackets nest in a canonical name.
 func instantiationDepth(name string) int {
 	depth, deepest := 0, 0
-	for _, character := range name {
-		switch character {
+	for index := 0; index < len(name); index++ {
+		if isTypeArrow(name, index) {
+			index++
+			continue
+		}
+		switch name[index] {
 		case '<':
 			depth++
 			if depth > deepest {

@@ -602,7 +602,7 @@ func (p *parser) parseClass() {
 				// An implemented generic carries type arguments; conformance is
 				// checked structurally at each concrete instantiation.
 				if p.current().text == "<" {
-					close := matching(p.tokens, p.index, "<", ">")
+					close := matchingAngle(p.tokens, p.index)
 					if close < 0 {
 						p.error(p.current().pos, "unterminated generic type")
 						return

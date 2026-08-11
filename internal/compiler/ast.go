@@ -1204,7 +1204,7 @@ func (p *bodyParser) tryParseObjectTypeArguments(name string) (string, bool) {
 	if p.atEnd() || p.current().text != "<" {
 		return "", false
 	}
-	close := matching(p.tokens, p.index, "<", ">")
+	close := matchingAngle(p.tokens, p.index)
 	if close < 0 || close+1 >= len(p.tokens) || p.tokens[close+1].text != "{" {
 		return "", false
 	}
@@ -1223,7 +1223,7 @@ func (p *bodyParser) readTypeArgumentSuffix(base string) (string, bool) {
 	if p.atEnd() || p.current().text != "<" {
 		return base, true
 	}
-	close := matching(p.tokens, p.index, "<", ">")
+	close := matchingAngle(p.tokens, p.index)
 	if close < 0 {
 		p.error(p.current().pos, "unterminated generic type")
 		return base, false

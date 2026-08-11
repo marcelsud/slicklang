@@ -333,6 +333,42 @@ function main() -> int {
 	}
 }
 
+func TestAnnotationAliasesPreserveApplicationOrderAndPosition(t *testing.T) {
+	var values []string
+	var lines []int
+	terminals := append(testAnnotationTerminals(), terminalAnnotationDecl{
+		canonical:  "std.test.Order",
+		params:     []string{"string"},
+		targets:    []annotationTarget{annotationTargetClass},
+		repeatable: true,
+		apply: func(_ *program, _ annotationTargetRef, annotation resolvedAnnotation) {
+			values = append(values, annotation.values[0].value.(string))
+			lines = append(lines, annotation.authored.pos.line)
+		},
+	})
+	_, diagnostics := compileWithTerminals([]Source{{Name: "main.slk", Namespace: "root", Text: `
+annotation Ordered(Value: string) =
+    @std.test.Order(Value)
+
+@std.test.Order("first")
+@Ordered("second")
+class Service {}
+
+function main() -> null {
+    null
+}
+`}}, terminals)
+	if len(diagnostics) > 0 {
+		t.Fatalf("compile ordered aliases: %+v", diagnostics)
+	}
+	if strings.Join(values, ",") != "first,second" {
+		t.Fatalf("terminal order = %v, want [first second]", values)
+	}
+	if len(lines) != 2 || lines[0] != 5 || lines[1] != 6 {
+		t.Fatalf("terminal application lines = %v, want [5 6]", lines)
+	}
+}
+
 func TestAnnotationAliasesFollowVisibilityAndExactImports(t *testing.T) {
 	public := Source{Name: "meta.slk", Namespace: "root.meta", Text: `
 annotation Public =
