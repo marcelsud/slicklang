@@ -304,14 +304,6 @@ func (p *program) collectFromBody(function *functionDecl, found *[]instantiation
 			for _, arm := range value.arms {
 				p.collectFromType(arm.errorType.pos, function.namespace, function.aliases, arm.errorType.name, found)
 			}
-		case *lambdaExpression:
-			for _, param := range value.params {
-				p.collectFromType(param.typ.pos, function.namespace, function.aliases, param.typ.name, found)
-			}
-			p.collectFromType(value.result.pos, function.namespace, function.aliases, value.result.name, found)
-			for _, thrown := range value.throws {
-				p.collectFromType(thrown.pos, function.namespace, function.aliases, thrown.name, found)
-			}
 		}
 	})
 }
@@ -697,14 +689,6 @@ func substituteASTTypes(block *blockNode, substitutions map[string]string) {
 			for index := range value.arms {
 				value.arms[index].errorType.name = substituteTypeParams(value.arms[index].errorType.name, substitutions)
 			}
-		case *lambdaExpression:
-			for index := range value.params {
-				value.params[index].typ.name = substituteTypeParams(value.params[index].typ.name, substitutions)
-			}
-			value.result.name = substituteTypeParams(value.result.name, substitutions)
-			for index := range value.throws {
-				value.throws[index].name = substituteTypeParams(value.throws[index].name, substitutions)
-			}
 		}
 	})
 }
@@ -857,9 +841,6 @@ func walkAST(node any, visit func(any)) {
 		for _, arm := range value.arms {
 			walkAST(arm.value, visit)
 		}
-	case *lambdaExpression:
-		visit(value)
-		walkAST(value.body, visit)
 	default:
 		visit(node)
 	}
