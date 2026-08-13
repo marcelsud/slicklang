@@ -1,5 +1,0 @@
-# Per-repo no-mistakes overrides.
-# CI is not configured for this repository yet; treat the CI step as
-# zero-check / all-passed rather than waiting on missing workflows.
-# Honored only from the default-branch (trusted) copy of this file.
-no_ci: true
