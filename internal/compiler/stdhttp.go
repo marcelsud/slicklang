@@ -98,6 +98,16 @@ func validHTTPToken(value string) bool {
 	return true
 }
 
+func validHTTPFieldValue(value string) bool {
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if character != '\t' && (character < ' ' || character == 0x7f) {
+			return false
+		}
+	}
+	return true
+}
+
 func validateHTTPRequest(request httpRequestData) (*url.URL, http.Header, *httpFailureData) {
 	if !validHTTPToken(request.method) {
 		return nil, nil, invalidHTTPRequest(request.url, "method must be a non-empty HTTP token")
@@ -137,8 +147,8 @@ func validateHTTPRequest(request httpRequestData) (*url.URL, http.Header, *httpF
 			return nil, nil, invalidHTTPRequest(request.url, canonical+" header values must not be empty")
 		}
 		for _, value := range header.values {
-			if strings.ContainsAny(value, "\r\n") {
-				return nil, nil, invalidHTTPRequest(request.url, canonical+" header values must not contain CR or LF")
+			if !validHTTPFieldValue(value) {
+				return nil, nil, invalidHTTPRequest(request.url, canonical+" header value contains a forbidden control byte")
 			}
 			headers.Add(canonical, value)
 		}
@@ -403,6 +413,7 @@ func (g *goGenerator) emitHTTPRuntimeSupport() {
 	g.line(`}`)
 	g.line(`func slickHTTPInvalid(rawURL, message string) *slickHTTPFailureData { return &slickHTTPFailureData{kind: "InvalidRequest", url: slickHTTPSanitizedURL(rawURL), message: message} }`)
 	g.line("func slickHTTPValidToken(value string) bool { if value == \"\" { return false }; for index := 0; index < len(value); index++ { character := value[index]; if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || strings.ContainsRune(\"!#$%%&'*+-.^_`|~\", rune(character)) { continue }; return false }; return true }")
+	g.line(`func slickHTTPValidFieldValue(value string) bool { for index := 0; index < len(value); index++ { character := value[index]; if character != '\t' && (character < ' ' || character == 0x7f) { return false } }; return true }`)
 	g.line(`func slickHTTPValidate(request slickHTTPRequestData) (*url.URL, http.Header, *slickHTTPFailureData) {`)
 	g.line(`if !slickHTTPValidToken(request.method) { return nil, nil, slickHTTPInvalid(request.url, "method must be a non-empty HTTP token") }`)
 	g.line(`parsed, err := url.Parse(request.url)`)
@@ -420,7 +431,7 @@ func (g *goGenerator) emitHTTPRuntimeSupport() {
 	g.line(`if !slickHTTPValidToken(header.name) || canonical == "" { return nil, nil, slickHTTPInvalid(request.url, "invalid header name") }`)
 	g.line(`if restricted[canonical] { return nil, nil, slickHTTPInvalid(request.url, canonical + " header cannot be controlled") }`)
 	g.line(`if len(header.values) == 0 { return nil, nil, slickHTTPInvalid(request.url, canonical + " header values must not be empty") }`)
-	g.line(`for _, value := range header.values { if strings.ContainsAny(value, "\r\n") { return nil, nil, slickHTTPInvalid(request.url, canonical + " header values must not contain CR or LF") }; headers.Add(canonical, value) }`)
+	g.line(`for _, value := range header.values { if !slickHTTPValidFieldValue(value) { return nil, nil, slickHTTPInvalid(request.url, canonical + " header value contains a forbidden control byte") }; headers.Add(canonical, value) }`)
 	g.line(`}`)
 	g.line(`if _, present := headers["User-Agent"]; !present { headers.Set("User-Agent", "Slick") }`)
 	g.line(`return parsed, headers, nil`)

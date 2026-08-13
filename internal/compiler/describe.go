@@ -318,10 +318,11 @@ func (p *program) describeVariant(name string, union *unionDecl, variant *unionV
 	for _, field := range variant.fields {
 		fieldType := p.canonicalType(union.namespace, union.aliases, field.typ)
 		description.Fields = append(description.Fields, FieldDescription{
-			Name:       field.name,
-			Type:       fieldType,
-			Callable:   describeCallable(fieldType),
-			Visibility: visibility(field.name),
+			Name:        field.name,
+			Type:        fieldType,
+			Callable:    describeCallable(fieldType),
+			Annotations: []AnnotationDescription{},
+			Visibility:  visibility(field.name),
 		})
 	}
 	return description

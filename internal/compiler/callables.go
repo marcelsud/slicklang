@@ -74,7 +74,11 @@ func (p *program) checkLambdaExpression(node *lambdaExpression, scope *astScope)
 
 	lambdaScope := newASTScope(function, len(node.params)+len(scope.locals))
 	lambdaScope.recursive = recursiveNames(scope)
-	node.captures = p.bindLambdaCaptures(node, scope, lambdaScope)
+	bound := make(map[string]struct{}, len(node.params))
+	for _, param := range node.params {
+		bound[param.name] = struct{}{}
+	}
+	node.captures = p.bindLambdaCaptures(node, scope, lambdaScope, bound)
 
 	paramTypes := make([]string, len(node.params))
 	seen := make(map[string]struct{}, len(node.params))
@@ -104,12 +108,9 @@ func (p *program) checkLambdaExpression(node *lambdaExpression, scope *astScope)
 // lambda scope and reports the ones a lambda may not hold: a pending async
 // binding has no value yet, and an active using binding is owned by the scope
 // that must close it.
-func (p *program) bindLambdaCaptures(node *lambdaExpression, scope, lambdaScope *astScope) []string {
+func (p *program) bindLambdaCaptures(node *lambdaExpression, scope, lambdaScope *astScope, bound map[string]struct{}) []string {
 	referenced := make(map[string]struct{})
-	bound := make(map[string]struct{}, len(node.params))
-	for _, param := range node.params {
-		bound[param.name] = struct{}{}
-	}
+
 	collectReferencedNames(node.body, referenced, bound)
 	captures := make([]string, 0, len(referenced))
 	for _, name := range sortedKeys(referenced) {
@@ -356,20 +357,26 @@ func (p *program) checkCallableInvocation(node *callExpression, scope *astScope,
 		p.add(node.pos, diagnosticCodeCallArgument, "%s expects %d arguments, found %d", label, len(params), len(node.args))
 	}
 	node.resolvedArgumentTypes = make([]string, len(node.args))
+	argumentInfos := make([]expressionInfo, len(node.args))
 	for index, argument := range node.args {
 		expected := ""
 		if index < len(params) {
 			expected = params[index]
 		}
 		argumentInfo := p.checkASTExpressionExpecting(argument, scope, expected)
+		argumentInfos[index] = argumentInfo
 		node.resolvedArgumentTypes[index] = argumentInfo.typ
 		mergeEffects(info.effects, argumentInfo.effects)
+		info.using = mergeUsingValues(info.using, argumentInfo.using)
 		if index < len(params) {
 			// The position matches a named call's, so both call forms report an
 			// argument mismatch the same way.
 			p.checkAssignable(node.pos, argumentInfo.typ, expected, label, index+1)
 		}
 	}
+	p.attachUsingToEffects(node.resolvedThrows, info.using)
+	p.retainCallArguments(node, scope, argumentInfos)
+	info.using = p.usingForType(info.typ, info.using)
 	if includeThrows {
 		mergeEffects(info.effects, node.resolvedThrows)
 	}

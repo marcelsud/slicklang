@@ -29,6 +29,71 @@ function main() -> int {
 			want: "42",
 		},
 		{
+			name: "lambda parameter shadows a pending outer binding",
+			source: `
+function Compute() -> int {
+    42
+}
+
+function main() -> int {
+    async let Value = Compute()
+    let Identity = (Value: int) -> int {
+        Value
+    }
+    let Ready = await Value
+    Identity(Ready)
+}
+`,
+			want: "42",
+		},
+		{
+			name: "lambda local shadows an active using binding",
+			source: `
+class Handle {
+    function Close() -> null {
+        null
+    }
+}
+
+function main() -> int {
+    using Value = Handle {} {
+        let Read = () -> int {
+            let Value = 42
+            Value
+        }
+        Read()
+    }
+}
+`,
+			want: "42",
+		},
+		{
+			name: "local callable shadows iterable builtin",
+			source: `
+function main() -> int {
+    let zip = (A: int, B: int) -> int {
+        A + B
+    }
+    zip(20, 22)
+}
+`,
+			want: "42",
+		},
+		{
+			name: "local callable shadows error constructor",
+			source: `
+class Failure implements Error {}
+
+function main() -> int {
+    let Failure = (Value: int) -> int {
+        Value + 2
+    }
+    Failure(40)
+}
+`,
+			want: "42",
+		},
+		{
 			name: "zero parameters",
 			source: `
 function main() -> string {
@@ -1110,6 +1175,177 @@ function main() -> int {
 `,
 			code:    "SLK414",
 			message: "cannot capture using binding Resource",
+		},
+		{
+			name: "an alias of a using binding cannot be captured",
+			source: `
+class Handle {
+    Name: string
+    function Close() -> null { null }
+}
+
+function main() -> int {
+    using Resource = Handle { Name: "one" } {
+        let Alias = Resource
+        let Operation = () -> string {
+            Alias.Name
+        }
+        1
+    }
+}
+`,
+			code:    "SLK414",
+			message: "cannot capture using binding Alias",
+		},
+		{
+			name: "an assigned using alias cannot be captured",
+			source: `
+class Handle {
+    Name: string
+    function Close() -> null { null }
+}
+
+function main() -> int {
+    using Resource = Handle { Name: "one" } {
+        let Alias = Handle { Name: "two" }
+        Alias = Resource
+        let Operation = () -> string {
+            Alias.Name
+        }
+        1
+    }
+}
+`,
+			code:    "SLK414",
+			message: "cannot capture using binding Alias",
+		},
+		{
+			name: "a branch-assigned using alias cannot be captured",
+			source: `
+class Handle {
+    Name: string
+    function Close() -> null { null }
+}
+
+function main() -> int {
+    using Resource = Handle { Name: "one" } {
+        let Alias = Handle { Name: "two" }
+        if (true) {
+            Alias = Resource
+        }
+        let Operation = () -> string {
+            Alias.Name
+        }
+        1
+    }
+}
+`,
+			code:    "SLK414",
+			message: "cannot capture using binding Alias",
+		},
+		{
+			name: "a shadowed branch assignment still cannot be captured",
+			source: `
+class Handle {
+    Name: string
+    function Close() -> null { null }
+}
+
+function main() -> int {
+    using Resource = Handle { Name: "one" } {
+        let Alias = Handle { Name: "two" }
+        if (true) {
+            Alias = Resource
+            let Alias = Handle { Name: "three" }
+            Alias.Name
+        }
+        let Operation = () -> string {
+            Alias.Name
+        }
+        1
+    }
+}
+`,
+			code:    "SLK414",
+			message: "cannot capture using binding Alias",
+		},
+		{
+			name: "a branch-selected using alias cannot be captured",
+			source: `
+class Handle {
+    Name: string
+    function Close() -> null { null }
+}
+
+function main() -> int {
+    using Resource = Handle { Name: "one" } {
+        let Alias = if (true) {
+            Resource
+        } else {
+            Handle { Name: "two" }
+        }
+        let Operation = () -> string {
+            Alias.Name
+        }
+        1
+    }
+}
+`,
+			code:    "SLK414",
+			message: "cannot capture using binding Alias",
+		},
+		{
+			name: "a match-expression using alias cannot be captured",
+			source: `
+class Handle {
+    Name: string
+    function Close() -> null { null }
+}
+
+class Failure implements Error {
+    Message: string
+}
+
+function Load() -> Result<int, Failure> {
+    Ok(1)
+}
+
+function main() -> int {
+    using Resource = Handle { Name: "one" } {
+        let Alias = match Load() {
+            Ok(_) => Resource
+            Err(_) => Resource
+        }
+        let Operation = () -> string {
+            Alias.Name
+        }
+        1
+    }
+}
+`,
+			code:    "SLK414",
+			message: "cannot capture using binding Alias",
+		},
+		{
+			name: "a destructured using alias cannot be captured",
+			source: `
+class Handle {
+    Name: string
+    function Close() -> null { null }
+}
+
+function main() -> int {
+    using Resource = Handle { Name: "one" } {
+        let (Alias, Count) = (Resource, 1)
+        let Operation = () -> string {
+            Alias.Name
+        }
+        Count
+    }
+}
+`,
+			code:    "SLK414",
+			message: "cannot capture using binding Alias",
 		},
 		{
 			name: "a lambda cannot call the binding it initializes",

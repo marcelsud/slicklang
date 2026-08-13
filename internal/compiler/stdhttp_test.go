@@ -331,6 +331,7 @@ function main() -> string {
                     Kind(std.http.Request { Method: "BAD METHOD" URL: Base + "/validation" }),
                     Kind(std.http.Request { Method: "GET" URL: Base + "/validation" Headers: map { "Bad Name": ["value"] } }),
                     Kind(std.http.Request { Method: "GET" URL: Base + "/validation" Headers: map { "X-Test": ["safe\r\nInjected: yes"] } }),
+					Kind(std.http.Request { Method: "GET" URL: Base + "/validation" Headers: map { "X-Test": ["nul\u0000del\u007f"] } }),
                     Kind(std.http.Request { Method: "GET" URL: Base + "/validation" Headers: EmptyHeaders() }),
                     Kind(std.http.Request { Method: "GET" URL: Base + "/validation" Headers: map { "Content-Length": ["3"] } }),
                     Kind(std.http.Request { Method: "GET" URL: Base + "/validation" TimeoutMilliseconds: 0 }),
@@ -353,7 +354,7 @@ function main() -> string {
 	parts := strings.Split(output, "|")
 	want := []string{
 		"InvalidRequest", "InvalidRequest", "InvalidRequest:http://example.com/path:URL userinfo is not allowed",
-		"InvalidRequest", "InvalidRequest", "InvalidRequest", "InvalidRequest", "InvalidRequest", "InvalidRequest", "InvalidRequest", "InvalidRequest",
+		"InvalidRequest", "InvalidRequest", "InvalidRequest", "InvalidRequest", "InvalidRequest", "InvalidRequest", "InvalidRequest", "InvalidRequest", "InvalidRequest",
 		"Transport:null", "Transport:null", "Timeout:null", "Timeout:200", "BodyTooLarge:200", "BodyRead:200", "Redirect:302", "Redirect:302",
 	}
 	if fmt.Sprint(parts) != fmt.Sprint(want) {

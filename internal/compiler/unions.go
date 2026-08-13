@@ -223,10 +223,12 @@ func (p *program) checkVariantConstruction(node *callExpression, name *nameExpre
 		argumentInfo := p.checkASTExpressionExpecting(argument, scope, expected)
 		node.resolvedArgumentTypes[index] = argumentInfo.typ
 		mergeEffects(info.effects, argumentInfo.effects)
+		info.using = mergeUsingValues(info.using, argumentInfo.using)
 		if index < len(declared) {
 			p.checkAssignable(node.pos, argumentInfo.typ, expected, union.name+"."+resolved.name, index+1)
 		}
 	}
+	info.using = p.usingForType(info.typ, info.using)
 	return info
 }
 
@@ -234,7 +236,7 @@ func (p *program) checkVariantConstruction(node *callExpression, name *nameExpre
 // variant must be handled or a wildcard must close the set, payload bindings
 // are scoped to their arm, and every reachable arm produces one type using the
 // same rule Result matches use.
-func (p *program) checkUnionMatch(node *matchExpression, union *unionDecl, valueEffects effectSet, scope *astScope, expected string) expressionInfo {
+func (p *program) checkUnionMatch(node *matchExpression, union *unionDecl, valueEffects effectSet, valueUsing *usingValue, scope *astScope, expected string) expressionInfo {
 	info := expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	mergeEffects(info.effects, valueEffects)
 	handled := make(map[string]position, len(union.order))
@@ -274,10 +276,11 @@ func (p *program) checkUnionMatch(node *matchExpression, union *unionDecl, value
 			}
 			handled[variant.name] = arm.pos
 			arm.resolvedVariant = variant.name
-			p.bindVariantPayload(arm, union, variant, armScope)
+			p.bindVariantPayload(arm, union, variant, armScope, valueUsing)
 		}
 		armInfo := p.checkASTExpressionExpecting(arm.value, armScope, expected)
 		mergeEffects(info.effects, armInfo.effects)
+		info.using = mergeUsingValues(info.using, armInfo.using)
 		paths = append(paths, pendingPath{scope: armScope, normal: armInfo.typ != typeNever})
 		clearAssignedNarrowings(scope, arm.value)
 		if armInfo.typ == typeNever || armInfo.typ == typeUnknown {
@@ -312,6 +315,7 @@ func (p *program) checkUnionMatch(node *matchExpression, union *unionDecl, value
 		}
 	}
 	p.mergePendingPaths(scope, node.pos, paths)
+	mergeUsingPaths(scope, paths)
 	if armType != "" {
 		info.typ = armType
 	}
@@ -343,7 +347,7 @@ func (p *program) matchedVariant(arm *matchArm, union *unionDecl, scope *astScop
 	return resolved
 }
 
-func (p *program) bindVariantPayload(arm *matchArm, union *unionDecl, variant *unionVariantDecl, armScope *astScope) {
+func (p *program) bindVariantPayload(arm *matchArm, union *unionDecl, variant *unionVariantDecl, armScope *astScope, valueUsing *usingValue) {
 	types := p.variantFieldTypes(union, variant)
 	seen := make(map[string]struct{}, len(arm.bindings))
 	for index, binding := range arm.bindings {
@@ -355,7 +359,7 @@ func (p *program) bindVariantPayload(arm *matchArm, union *unionDecl, variant *u
 			continue
 		}
 		seen[binding] = struct{}{}
-		armScope.bind(binding, types[index])
+		p.bindUsingLocal(armScope, binding, types[index], valueUsing)
 	}
 }
 

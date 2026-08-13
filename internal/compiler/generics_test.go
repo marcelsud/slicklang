@@ -136,6 +136,49 @@ function main() -> string {
 `,
 			expected: "7;seven",
 		},
+		"generic nested only in callable signature": {
+			source: `
+class Box<T> {
+    Value: T
+}
+
+function Accept(Operation: (Box<int>) -> Box<int>) -> null {
+    null
+}
+
+function main() -> int {
+    42
+}
+`,
+			expected: "42",
+		},
+		"generic constructed only inside lambda": {
+			source: genericBox + `
+function main() -> int {
+    let Make = () -> Box<int> {
+        Box<int> { Value: 42 }
+    }
+    let Value = Make()
+    Value.Get()
+}
+`,
+			expected: "42",
+		},
+		"enclosing generic substitutes lambda signature": {
+			source: `
+function Make<T>(Value: T) -> (() -> T) {
+    () -> T {
+        Value
+    }
+}
+
+function main() -> int {
+    let Read = Make<int>(42)
+    Read()
+}
+`,
+			expected: "42",
+		},
 		"detached method keeps the receiver parameters": {
 			source: `
 class Box<T> {
@@ -377,6 +420,33 @@ func TestPrivateGenericDeclarationStaysInsideItsNamespace(t *testing.T) {
 		{Name: "main.slk", Namespace: "root", Text: "function main() -> string {\n    let B = root.deep.box<int> { Value: 1 }\n    \"x\"\n}\n"},
 	})
 	assertDiagnostic(t, diagnostics, "SLK330", "class box is private to root.deep")
+}
+
+func TestGenericCallableTypesKeepGenericEffectsAndScope(t *testing.T) {
+	diagnostics := checkGenerics(t, `
+class Box<T> {
+    Value: T
+}
+
+class Empty<T> implements Error {}
+
+class Holder<T> {
+    Transform: (Box<T>) -> Box<T> throws Empty<T>
+}
+
+function main() -> int {
+    let Held = Holder<int> {
+        Transform: (Value: Box<int>) -> Box<int> throws Empty<int> {
+            Value
+        }
+    }
+    let Output = Held.Transform(Box<int> { Value: 42 }) catch {
+        Empty<int> => Box<int> { Value: 0 }
+    }
+    Output.Value
+}
+`)
+	assertNoDiagnostics(t, diagnostics)
 }
 
 // TestRecursiveGenericConverges pins that a declaration containing itself at

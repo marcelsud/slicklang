@@ -102,8 +102,8 @@ func (p *program) checkTypeNameScoped(pos position, namespace string, scope *typ
 	if pos.file != "" && strings.Contains(name, "std.io.") {
 		p.usesStdIO = true
 	}
-	if pos.file != "" && strings.Contains(name, "std.http.") {
-		p.usesStdHTTP = true
+	if pos.file != "" {
+		markUsesStdHTTP(p, name)
 	}
 	if pos.file != "" && usesStdFSDirectoryName(name) {
 		p.usesStdFSDirectory = true
@@ -122,6 +122,7 @@ func (p *program) checkTypeNameScoped(pos position, namespace string, scope *typ
 		}
 		p.checkTypeNameScoped(pos, namespace, scope, named, parsed.base)
 		for _, thrown := range parsed.throws {
+			p.checkTypeNameScoped(pos, namespace, scope, named, thrown)
 			if thrown == errorTypeName {
 				continue
 			}

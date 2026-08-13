@@ -41,6 +41,7 @@ func testAnnotationTerminals() []terminalAnnotationDecl {
 		{canonical: "std.test.Marker", targets: []annotationTarget{annotationTargetClass, annotationTargetMethod, annotationTargetParameter}},
 		{canonical: "std.test.Tag", params: []string{"string"}, targets: []annotationTarget{annotationTargetClass}, repeatable: true},
 		{canonical: "std.test.Choice", params: []string{"root.Method"}, targets: []annotationTarget{annotationTargetClass}},
+		{canonical: "std.test.MetaChoice", params: []string{"root.meta.Method"}, targets: []annotationTarget{annotationTargetClass}},
 	}
 }
 
@@ -570,6 +571,7 @@ class Service {
         null
     }
 }
+
 function main() -> null { null }
 `,
 			code: "SLK417", message: "inline lambdas are not allowed",
@@ -637,6 +639,28 @@ function main() -> null { null }
 			requireAnnotationDiagnostic(t, diagnostics, test.code, test.message)
 		})
 	}
+}
+
+func TestDetachedMethodParameterAnnotationsAreChecked(t *testing.T) {
+	diagnostics := checkAnnotationProgram(Source{Name: "main.slk", Namespace: "root", Text: `
+interface Service {
+    function Run(Value: int) -> int
+}
+
+class Application implements Service {
+    function Run(Value: int) -> int
+}
+
+function Application.Run(@Missing Value: int) -> int {
+    Value
+}
+
+function main() -> int {
+    let App = Application {}
+    App.Run(42)
+}
+`})
+	requireAnnotationDiagnostic(t, diagnostics, "SLK415", "unknown annotation Missing")
 }
 
 func TestGenericAnnotationDiagnosticsAreDeduplicated(t *testing.T) {

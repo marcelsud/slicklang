@@ -281,11 +281,18 @@ func (p *program) collectFromCallable(function *functionDecl, found *[]instantia
 	p.collectFromBody(function, found)
 }
 
-// collectFromBody finds the instantiations a function body names: type
-// arguments, object constructions, and caught error types.
+// collectFromBody finds the instantiations a function body names.
 func (p *program) collectFromBody(function *functionDecl, found *[]instantiation) {
 	walkAST(function.ast, func(node any) {
 		switch value := node.(type) {
+		case *lambdaExpression:
+			for _, param := range value.params {
+				p.collectFromType(param.typ.pos, function.namespace, function.aliases, param.typ.name, found)
+			}
+			p.collectFromType(value.result.pos, function.namespace, function.aliases, value.result.name, found)
+			for _, thrown := range value.throws {
+				p.collectFromType(thrown.pos, function.namespace, function.aliases, thrown.name, found)
+			}
 		case *callExpression:
 			for _, typeArg := range value.typeArgs {
 				p.collectFromType(typeArg.pos, function.namespace, function.aliases, typeArg.name, found)
@@ -296,14 +303,6 @@ func (p *program) collectFromBody(function *functionDecl, found *[]instantiation
 		case *catchExpression:
 			for _, arm := range value.arms {
 				p.collectFromType(arm.errorType.pos, function.namespace, function.aliases, arm.errorType.name, found)
-			}
-		case *lambdaExpression:
-			for _, param := range value.params {
-				p.collectFromType(param.typ.pos, function.namespace, function.aliases, param.typ.name, found)
-			}
-			p.collectFromType(value.result.pos, function.namespace, function.aliases, value.result.name, found)
-			for _, thrown := range value.throws {
-				p.collectFromType(thrown.pos, function.namespace, function.aliases, thrown.name, found)
 			}
 		}
 	})
@@ -669,10 +668,17 @@ func cloneExpressions(expressions []expressionNode) []expressionNode {
 	}
 	return clones
 }
-
 func substituteASTTypes(block *blockNode, substitutions map[string]string) {
 	walkAST(block, func(node any) {
 		switch value := node.(type) {
+		case *lambdaExpression:
+			for index := range value.params {
+				value.params[index].typ.name = substituteTypeParams(value.params[index].typ.name, substitutions)
+			}
+			value.result.name = substituteTypeParams(value.result.name, substitutions)
+			for index := range value.throws {
+				value.throws[index].name = substituteTypeParams(value.throws[index].name, substitutions)
+			}
 		case *objectExpression:
 			value.typeName = substituteTypeParams(value.typeName, substitutions)
 		case *callExpression:
@@ -682,14 +688,6 @@ func substituteASTTypes(block *blockNode, substitutions map[string]string) {
 		case *catchExpression:
 			for index := range value.arms {
 				value.arms[index].errorType.name = substituteTypeParams(value.arms[index].errorType.name, substitutions)
-			}
-		case *lambdaExpression:
-			for index := range value.params {
-				value.params[index].typ.name = substituteTypeParams(value.params[index].typ.name, substitutions)
-			}
-			value.result.name = substituteTypeParams(value.result.name, substitutions)
-			for index := range value.throws {
-				value.throws[index].name = substituteTypeParams(value.throws[index].name, substitutions)
 			}
 		}
 	})
@@ -800,6 +798,9 @@ func walkAST(node any, visit func(any)) {
 		for _, field := range value.fields {
 			walkAST(field.value, visit)
 		}
+	case *lambdaExpression:
+		visit(value)
+		walkAST(value.body, visit)
 	case *callExpression:
 		visit(value)
 		walkAST(value.callee, visit)
@@ -840,9 +841,6 @@ func walkAST(node any, visit func(any)) {
 		for _, arm := range value.arms {
 			walkAST(arm.value, visit)
 		}
-	case *lambdaExpression:
-		visit(value)
-		walkAST(value.body, visit)
 	default:
 		visit(node)
 	}

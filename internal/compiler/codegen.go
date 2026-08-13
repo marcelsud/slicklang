@@ -145,6 +145,11 @@ func (p *program) generateGo() (string, error) {
 			generator.imports[name] = true
 		}
 	}
+	if p.usesStdHTTPServer {
+		for _, name := range []string{"context", "io", "math", "net", "net/http", "net/url", "os", "os/signal", "sort", "strings", "syscall", "time"} {
+			generator.imports[name] = true
+		}
+	}
 	if p.usesStdProcess {
 		generator.imports["os/exec"] = true
 		generator.imports["sync"] = true
@@ -236,6 +241,9 @@ func (g *goGenerator) emitRuntime() {
 	}
 	if g.program.usesStdHTTP {
 		g.emitHTTPRuntimeSupport()
+	}
+	if g.program.usesStdHTTPServer {
+		g.emitHTTPServerRuntimeSupport()
 	}
 	if g.program.usesStdFSDirectory {
 		g.emitStdFSRuntime()
@@ -472,6 +480,9 @@ func (g *goGenerator) emitDeclarations() error {
 		if !g.program.usesStdIO && strings.HasPrefix(name, "std.io.") {
 			continue
 		}
+		if g.skipStdHTTP(name) {
+			continue
+		}
 		iface := g.program.interfaces[name]
 		g.line("type %s interface {", goInterfaceName(name))
 		methodNames := sortedKeys(iface.methods)
@@ -498,7 +509,7 @@ func (g *goGenerator) emitDeclarations() error {
 		if !g.program.usesStdIO && strings.HasPrefix(name, "std.io.") {
 			continue
 		}
-		if !g.program.usesStdHTTP && strings.HasPrefix(name, "std.http.") {
+		if g.skipStdHTTP(name) {
 			continue
 		}
 		if g.skipStdFSDirectory(name) {
@@ -532,6 +543,9 @@ func (g *goGenerator) emitDeclarations() error {
 			receiver = "*"
 		}
 		g.line("func (%s%s) slickTypeName() string { return %s }", receiver, goClassName(name), strconv.Quote(name))
+		if g.program.usesStdHTTPServer && g.program.taskSafeClass(name, make(map[string]bool)) {
+			g.line("func (%s%s) slickHTTPServerTaskSafe() {}", receiver, goClassName(name))
+		}
 		if class.isError {
 			g.line("func (value *%s) Error() string {", goClassName(name))
 			g.line("if value == nil { return %s }", strconv.Quote(name))
@@ -564,7 +578,7 @@ func (g *goGenerator) emitFunctions() error {
 		if !g.program.usesStdIO && strings.HasPrefix(name, "std.io.") {
 			continue
 		}
-		if !g.program.usesStdHTTP && strings.HasPrefix(name, "std.http.") {
+		if g.skipStdHTTP(name) {
 			continue
 		}
 		if g.skipStdFSDirectory(name) {
@@ -589,7 +603,7 @@ func (g *goGenerator) emitFunctions() error {
 		if !g.program.usesStdIO && strings.HasPrefix(className, "std.io.") {
 			continue
 		}
-		if !g.program.usesStdHTTP && strings.HasPrefix(className, "std.http.") {
+		if g.skipStdHTTP(className) {
 			continue
 		}
 		if g.skipStdFSDirectory(className) {

@@ -519,6 +519,10 @@ func (p *program) annotationArgument(namespace string, aliases map[string]aliasD
 			if variant == nil {
 				return annotationValue{}, false
 			}
+			variant = p.requireVariant(node.pos, namespace, node.name, union, variant)
+			if variant == nil {
+				return annotationValue{}, false
+			}
 			if len(variant.fields) != 0 {
 				p.add(node.pos, diagnosticCodeAnnotationArgument, "payload variant %s is not a compile-time annotation value", node.name)
 				return annotationValue{}, false
