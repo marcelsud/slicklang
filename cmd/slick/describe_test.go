@@ -38,7 +38,7 @@ func TestDescribeJSONOutputContract(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q", status, stderr.String())
 	}
 	want := `{
-  "schema_version": 6,
+  "schema_version": 7,
   "symbol": {
     "canonical_name": "std.env.Get",
     "kind": "function",
@@ -84,7 +84,7 @@ func TestDescribeUnknownJSONErrorContract(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q", status, stderr.String())
 	}
 	want := `{
-  "schema_version": 6,
+  "schema_version": 7,
   "error": {
     "code": "unknown_symbol",
     "message": "unknown symbol \"std.env.Missing\"",
@@ -173,7 +173,7 @@ func TestDescribeJSONBudgetContract(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q", status, stderr.String())
 	}
 	want := `{
-  "schema_version": 6,
+  "schema_version": 7,
   "budget": {
     "unit": "lines",
     "limit": 39,

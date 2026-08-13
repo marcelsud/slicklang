@@ -32,6 +32,59 @@ func jsonPathIndex(path string, index int) string {
 	return fmt.Sprintf("%s[%d]", path, index)
 }
 
+func (field fieldDecl) jsonWireName() string {
+	if field.jsonName != "" {
+		return field.jsonName
+	}
+	return field.name
+}
+
+func jsonFieldForWire(class *classDecl, wire string) (fieldDecl, bool) {
+	for _, name := range sortedKeys(class.fields) {
+		field := class.fields[name]
+		if field.jsonWireName() == wire {
+			return field, true
+		}
+	}
+	return fieldDecl{}, false
+}
+
+func applyStdJSONName(p *program, target annotationTargetRef, annotation resolvedAnnotation) {
+	if target.class == nil || target.fieldName == "" {
+		p.add(annotation.authored.pos, diagnosticCodeAnnotationTarget, "annotation std.json.Name requires a class field")
+		return
+	}
+	field, ok := target.class.fields[target.fieldName]
+	if !ok {
+		return
+	}
+	name, _ := annotation.values[0].value.(string)
+	if name == "" {
+		p.add(annotation.authored.pos, diagnosticCodeAnnotationArgument, "annotation std.json.Name requires a non-empty string")
+		return
+	}
+	if !isPublic(field.name) {
+		p.add(annotation.authored.pos, diagnosticCodeAnnotationTarget, "annotation std.json.Name can only target a public field")
+		return
+	}
+	if !p.jsonTypeSupported(target.class.qualified, make(map[string]bool)) {
+		p.add(annotation.authored.pos, diagnosticCodeAnnotationTarget, "annotation std.json.Name requires a class accepted by std.json")
+		return
+	}
+	for _, otherName := range sortedKeys(target.class.fields) {
+		if otherName == field.name {
+			continue
+		}
+		other := target.class.fields[otherName]
+		if other.jsonWireName() == name {
+			p.add(annotation.authored.pos, diagnosticCodeAnnotation, "JSON wire name %q is already used by field %s", name, other.name)
+			return
+		}
+	}
+	field.jsonName = name
+	target.class.fields[target.fieldName] = field
+}
+
 func substituteTypeParams(name string, params map[string]string) string {
 	parsed := parseTypeName(name)
 	switch parsed.kind {
@@ -456,7 +509,7 @@ func (p *program) convertJSONToRuntime(value jsonValue, target, path string) (ru
 	result := runtimeValue{typ: target, fields: make(map[string]runtimeValue, len(class.fields))}
 	seen := make(map[string]bool, len(value.object))
 	for _, field := range value.object {
-		decl, ok := class.fields[field.key]
+		decl, ok := jsonFieldForWire(class, field.key)
 		if !ok {
 			return runtimeValue{}, jsonFailure{Operation: "Decode", Path: jsonPathField(path, field.key), Message: "unknown field"}
 		}
@@ -465,8 +518,8 @@ func (p *program) convertJSONToRuntime(value jsonValue, target, path string) (ru
 		if err != nil {
 			return runtimeValue{}, err
 		}
-		result.fields[field.key] = converted
-		seen[field.key] = true
+		result.fields[decl.name] = converted
+		seen[decl.name] = true
 	}
 	for _, fieldName := range sortedKeys(class.fields) {
 		if seen[fieldName] {
@@ -478,7 +531,7 @@ func (p *program) convertJSONToRuntime(value jsonValue, target, path string) (ru
 			result.fields[fieldName] = runtimeValue{typ: fieldType, optional: &runtimeOptional{}}
 			continue
 		}
-		return runtimeValue{}, jsonFailure{Operation: "Decode", Path: jsonPathField(path, fieldName), Message: "missing required field"}
+		return runtimeValue{}, jsonFailure{Operation: "Decode", Path: jsonPathField(path, field.jsonWireName()), Message: "missing required field"}
 	}
 	return result, nil
 }
@@ -548,14 +601,12 @@ func (p *program) convertRuntimeToJSON(value runtimeValue, target, path string) 
 	if class == nil {
 		return nil, jsonFailure{Operation: "Encode", Path: path, Message: "unsupported JSON source type"}
 	}
-	// Emit keys in sorted field-declaration order for deterministic output.
-	// sortedKeys already sorts alphabetically; class field order is alphabetical
-	// via the map, matching the deterministic Go backend.
 	names := sortedKeys(class.fields)
 	object := make(map[string]any, len(names))
 	for _, fieldName := range names {
 		field := class.fields[fieldName]
 		fieldType := p.resolveType(class.namespace, class.aliases, field.typ)
+		wire := field.jsonWireName()
 		fieldValue, ok := value.fields[fieldName]
 		if !ok {
 			fieldValue = coerceRuntimeValue(nullRuntimeValue(), fieldType)
@@ -565,18 +616,18 @@ func (p *program) convertRuntimeToJSON(value runtimeValue, target, path string) 
 			if fieldValue.optional == nil || !fieldValue.optional.present {
 				continue
 			}
-			converted, err := p.convertRuntimeToJSON(fieldValue.optional.value, base, jsonPathField(path, fieldName))
+			converted, err := p.convertRuntimeToJSON(fieldValue.optional.value, base, jsonPathField(path, wire))
 			if err != nil {
 				return nil, err
 			}
-			object[fieldName] = converted
+			object[wire] = converted
 			continue
 		}
-		converted, err := p.convertRuntimeToJSON(fieldValue, fieldType, jsonPathField(path, fieldName))
+		converted, err := p.convertRuntimeToJSON(fieldValue, fieldType, jsonPathField(path, wire))
 		if err != nil {
 			return nil, err
 		}
-		object[fieldName] = converted
+		object[wire] = converted
 	}
 	return object, nil
 }
@@ -966,14 +1017,11 @@ func (g *goGenerator) emitJSONDecodeBody(typ string) error {
 		if err != nil {
 			return err
 		}
-		g.line("case %q:", fieldName)
-		g.line("converted, failure := %s(field.value, path+\".\"+%q)", goJSONHelperName("DecodeInto", fieldType), fieldName)
+		wire := field.jsonWireName()
+		g.line("case %q:", wire)
+		g.line("converted, failure := %s(field.value, path+\".\"+%q)", goJSONHelperName("DecodeInto", fieldType), wire)
 		g.line("if failure != nil { return %s, failure }", g.zero(typ))
-		if strings.HasPrefix(receiver, "*") {
-			g.line("out.%s = converted", goFieldName(fieldName))
-		} else {
-			g.line("out.%s = converted", goFieldName(fieldName))
-		}
+		g.line("out.%s = converted", goFieldName(fieldName))
 		g.line("seen[%q] = true", fieldName)
 	}
 	g.line("default:")
@@ -989,7 +1037,7 @@ func (g *goGenerator) emitJSONDecodeBody(typ string) error {
 		if _, optional := optionalBase(fieldType); optional {
 			continue
 		}
-		g.line("if !seen[%q] { return %s, slickJSONFail(\"Decode\", path+\".\"+%q, \"missing required field\") }", fieldName, g.zero(typ), fieldName)
+		g.line("if !seen[%q] { return %s, slickJSONFail(\"Decode\", path+\".\"+%q, \"missing required field\") }", fieldName, g.zero(typ), field.jsonWireName())
 	}
 	if strings.HasPrefix(receiver, "*") {
 		g.line("return out, nil")
@@ -1045,20 +1093,21 @@ func (g *goGenerator) emitJSONEncodeBody(typ string) error {
 		if err != nil {
 			return err
 		}
+		wire := field.jsonWireName()
 		fieldExpr := receiver + "." + goFieldName(fieldName)
 		if _, optional := optionalBase(fieldType); optional {
 			base, _ := optionalBase(fieldType)
 			g.line("if %s.present {", fieldExpr)
-			g.line("converted, failure := %s(%s.value, path+\".\"+%q)", goJSONHelperName("EncodeFrom", base), fieldExpr, fieldName)
+			g.line("converted, failure := %s(%s.value, path+\".\"+%q)", goJSONHelperName("EncodeFrom", base), fieldExpr, wire)
 			g.line("if failure != nil { return nil, failure }")
-			g.line("object[%q] = converted", fieldName)
+			g.line("object[%q] = converted", wire)
 			g.line("}")
 			continue
 		}
 		g.line("{")
-		g.line("converted, failure := %s(%s, path+\".\"+%q)", goJSONHelperName("EncodeFrom", fieldType), fieldExpr, fieldName)
+		g.line("converted, failure := %s(%s, path+\".\"+%q)", goJSONHelperName("EncodeFrom", fieldType), fieldExpr, wire)
 		g.line("if failure != nil { return nil, failure }")
-		g.line("object[%q] = converted", fieldName)
+		g.line("object[%q] = converted", wire)
 		g.line("}")
 	}
 	g.line("return object, nil")

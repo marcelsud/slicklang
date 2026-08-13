@@ -1464,8 +1464,14 @@ func registerStandardLibrary(p *program) {
 		fields: []fieldDecl{{name: "Value", typ: typeRef{name: "bytes"}, documentation: &valFieldDoc}},
 	}
 	p.unions[stdSQLiteValueName] = valueUnion
+	p.registerTerminalAnnotation(&terminalAnnotationDecl{
+		canonical:     "std.json.Name",
+		params:        []string{"string"},
+		targets:       []annotationTarget{annotationTargetField},
+		documentation: "Sets the JSON object key for a public class field.",
+		apply:         applyStdJSONName,
+	})
 }
-
 func standardMethodSignature(namespace string, declaration standardMethodDecl) *methodSignature {
 	documentation := declaration.documentation
 	return &methodSignature{
@@ -1528,6 +1534,12 @@ func (p *program) undocumentedStandardLibrarySymbols() []string {
 			if isPublic(methodName) {
 				require(name+"."+methodName, method.documentation)
 			}
+		}
+	}
+	for name, annotation := range p.annotations {
+		if strings.HasPrefix(name, "std.") && isPublic(annotation.name) {
+			requireNamespaces(name)
+			require(name, annotation.documentation)
 		}
 	}
 	return sortedKeys(undocumented)
