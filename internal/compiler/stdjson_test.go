@@ -742,6 +742,78 @@ function main() -> string {
 	}
 }
 
+func TestStdJsonNameOnGenericField(t *testing.T) {
+	output := runResultEverywhere(t, `
+class Box<T> {
+    Value: T
+}
+
+class Payload {
+    @std.json.Name("box")
+    Box: Box<int>
+}
+
+function main() -> string {
+    match std.json.Decode<Payload>("{\"box\":{\"Value\":3}}") {
+        Ok(Value) => match std.json.Encode<Payload>(Value) {
+            Ok(Text) => Text
+            Err(Failure) => Failure.Message
+        }
+        Err(Failure) => Failure.Path + ":" + Failure.Message
+    }
+}
+`)
+	if output != `{"box":{"Value":3}}` {
+		t.Fatalf("generic field JSON %q", output)
+	}
+}
+
+func TestStdJsonNameOnGenericClass(t *testing.T) {
+	output := runResultEverywhere(t, `
+class Box<T> {
+    @std.json.Name("v")
+    Value: T
+}
+
+function main() -> string {
+    match std.json.Decode<Box<int>>("{\"v\":9}") {
+        Ok(Value) => match std.json.Encode<Box<int>>(Value) {
+            Ok(Text) => Text
+            Err(Failure) => Failure.Message
+        }
+        Err(Failure) => Failure.Path + ":" + Failure.Message
+    }
+}
+`)
+	if output != `{"v":9}` {
+		t.Fatalf("generic class JSON %q", output)
+	}
+}
+
+func TestStdJsonNameSwap(t *testing.T) {
+	output := runResultEverywhere(t, `
+class Pair {
+    @std.json.Name("B")
+    A: int
+    @std.json.Name("A")
+    B: int
+}
+
+function main() -> string {
+    match std.json.Decode<Pair>("{\"A\":2,\"B\":1}") {
+        Ok(Value) => match std.json.Encode<Pair>(Value) {
+            Ok(Text) => Text
+            Err(Failure) => Failure.Message
+        }
+        Err(Failure) => Failure.Path + ":" + Failure.Message
+    }
+}
+`)
+	if output != `{"A":2,"B":1}` {
+		t.Fatalf("swapped JSON %q", output)
+	}
+}
+
 func TestStdJsonNameDiagnostics(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -810,6 +882,19 @@ function main() -> null { null }
 `,
 			code:    "SLK416",
 			message: "can only target a public field",
+		},
+		{
+			name: "never-json generic",
+			source: `
+class Bag<T> {
+    @std.json.Name("raw")
+    Data: bytes
+    Extra: T
+}
+function main() -> null { null }
+`,
+			code:    "SLK416",
+			message: "requires a class accepted by std.json",
 		},
 	}
 	for _, test := range tests {

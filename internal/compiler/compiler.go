@@ -1321,6 +1321,7 @@ func (p *program) check() {
 	p.checkAnnotations()
 	p.checkGenericDeclarations()
 	p.instantiateGenerics()
+	p.checkJSONFieldNames()
 	p.checkDeclaredTypes()
 	p.checkVisibility()
 	p.resolveThrowSets()

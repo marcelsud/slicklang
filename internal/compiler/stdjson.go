@@ -67,22 +67,82 @@ func applyStdJSONName(p *program, target annotationTargetRef, annotation resolve
 		p.add(annotation.authored.pos, diagnosticCodeAnnotationTarget, "annotation std.json.Name can only target a public field")
 		return
 	}
-	if !p.jsonTypeSupported(target.class.qualified, make(map[string]bool)) {
-		p.add(annotation.authored.pos, diagnosticCodeAnnotationTarget, "annotation std.json.Name requires a class accepted by std.json")
-		return
-	}
-	for _, otherName := range sortedKeys(target.class.fields) {
-		if otherName == field.name {
-			continue
-		}
-		other := target.class.fields[otherName]
-		if other.jsonWireName() == name {
-			p.add(annotation.authored.pos, diagnosticCodeAnnotation, "JSON wire name %q is already used by field %s", name, other.name)
-			return
-		}
-	}
 	field.jsonName = name
 	target.class.fields[target.fieldName] = field
+}
+
+func (p *program) checkJSONFieldNames() {
+	for _, classes := range []map[string]*classDecl{p.genericClasses, p.classes} {
+		for _, name := range sortedKeys(classes) {
+			class := classes[name]
+			p.checkingInstance(class.instanceOf != "", func() {
+				p.checkClassJSONFieldNames(class)
+			})
+		}
+	}
+}
+
+func (p *program) checkClassJSONFieldNames(class *classDecl) {
+	named := false
+	for _, fieldName := range sortedKeys(class.fields) {
+		if class.fields[fieldName].jsonName != "" {
+			named = true
+			break
+		}
+	}
+	if !named {
+		return
+	}
+	supported := false
+	if len(class.typeParams) > 0 {
+		supported = p.jsonShapeSupported(class, make(map[string]bool))
+	} else {
+		supported = p.jsonTypeSupported(class.qualified, make(map[string]bool))
+	}
+	if !supported {
+		for _, fieldName := range sortedKeys(class.fields) {
+			field := class.fields[fieldName]
+			if field.jsonName == "" {
+				continue
+			}
+			p.reportJSONNameUnsupported(class, field)
+		}
+		return
+	}
+	owners := map[string][]string{}
+	for _, fieldName := range sortedKeys(class.fields) {
+		wire := class.fields[fieldName].jsonWireName()
+		owners[wire] = append(owners[wire], fieldName)
+	}
+	for _, fieldName := range sortedKeys(class.fields) {
+		field := class.fields[fieldName]
+		if field.jsonName == "" {
+			continue
+		}
+		names := owners[field.jsonName]
+		if len(names) < 2 {
+			continue
+		}
+		other := names[0]
+		if other == field.name {
+			other = names[1]
+		}
+		p.add(field.pos, diagnosticCodeAnnotation, "JSON wire name %q is already used by field %s", field.jsonName, other)
+	}
+}
+
+func (p *program) reportJSONNameUnsupported(class *classDecl, field fieldDecl) {
+	for _, authored := range field.annotations {
+		if len(authored.resolved) == 0 || authored.resolved[0].terminal == nil {
+			continue
+		}
+		if authored.resolved[0].terminal.canonical != "std.json.Name" {
+			continue
+		}
+		p.add(authored.pos, diagnosticCodeAnnotationTarget, "annotation std.json.Name requires a class accepted by std.json")
+		return
+	}
+	p.add(field.pos, diagnosticCodeAnnotationTarget, "annotation std.json.Name requires a class accepted by std.json")
 }
 
 func substituteTypeParams(name string, params map[string]string) string {
@@ -179,6 +239,55 @@ func (p *program) jsonTypeSupported(name string, visiting map[string]bool) bool 
 		}
 	}
 	return true
+}
+
+func (p *program) jsonShapeSupported(class *classDecl, visiting map[string]bool) bool {
+	if class == nil {
+		return false
+	}
+	if visiting[class.qualified] {
+		return true
+	}
+	visiting[class.qualified] = true
+	defer delete(visiting, class.qualified)
+	params := map[string]bool{}
+	for _, param := range class.typeParams {
+		params[param] = true
+	}
+	for _, fieldName := range sortedKeys(class.fields) {
+		field := class.fields[fieldName]
+		if !isPublic(field.name) {
+			return false
+		}
+		fieldType := p.resolveType(class.namespace, class.aliases, field.typ)
+		if !p.jsonShapeTypeSupported(fieldType, params, visiting) {
+			return false
+		}
+	}
+	return true
+}
+
+func (p *program) jsonShapeTypeSupported(name string, params map[string]bool, visiting map[string]bool) bool {
+	if params[name] {
+		return true
+	}
+	if base, optional := optionalBase(name); optional {
+		return p.jsonShapeTypeSupported(base, params, visiting)
+	}
+	if element, isArray := arrayElementType(name); isArray {
+		return p.jsonShapeTypeSupported(element, params, visiting)
+	}
+	if root, args, generic := genericType(name); generic {
+		if open := p.genericClasses[root]; open != nil {
+			for _, arg := range args {
+				if !p.jsonShapeTypeSupported(arg, params, visiting) {
+					return false
+				}
+			}
+			return p.jsonShapeSupported(open, visiting)
+		}
+	}
+	return p.jsonTypeSupported(name, visiting)
 }
 
 func (p *program) jsonUnsupportedReason(name string, visiting map[string]bool) string {
