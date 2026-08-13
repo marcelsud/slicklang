@@ -176,6 +176,22 @@ func isHopByHopHeader(name string) bool {
 	return hopByHopHeaderNames[http.CanonicalHeaderKey(name)]
 }
 
+func hopByHopRequestHeaders(headers http.Header) map[string]bool {
+	names := make(map[string]bool, len(hopByHopHeaderNames))
+	for name, hop := range hopByHopHeaderNames {
+		names[name] = hop
+	}
+	for _, value := range headers.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			token = http.CanonicalHeaderKey(strings.TrimSpace(token))
+			if token != "" {
+				names[token] = true
+			}
+		}
+	}
+	return names
+}
+
 func parseHTTPServerQuery(raw string) ([]httpHeaderData, error) {
 	if raw == "" {
 		return nil, nil
@@ -219,9 +235,10 @@ func parseHTTPServerQuery(raw string) ([]httpHeaderData, error) {
 }
 
 func requestHTTPServerHeaders(headers http.Header) []httpHeaderData {
+	hopByHop := hopByHopRequestHeaders(headers)
 	sourceNames := make([]string, 0, len(headers))
 	for name := range headers {
-		if isHopByHopHeader(name) {
+		if hopByHop[http.CanonicalHeaderKey(name)] {
 			continue
 		}
 		sourceNames = append(sourceNames, name)
@@ -571,6 +588,7 @@ func (g *goGenerator) emitHTTPServerRuntimeSupport() {
 	g.line("func slickHTTPServerTimeoutDuration(milliseconds int64) time.Duration { if milliseconds > int64(math.MaxInt64 / time.Millisecond) { return time.Duration(math.MaxInt64) }; return time.Duration(milliseconds) * time.Millisecond }")
 	g.line(`var slickHTTPServerHopByHop = map[string]bool{"Connection": true, "Keep-Alive": true, "Proxy-Connection": true, "Transfer-Encoding": true, "Te": true, "Trailer": true, "Upgrade": true}`)
 	g.line(`func slickHTTPServerIsHopByHop(name string) bool { return slickHTTPServerHopByHop[http.CanonicalHeaderKey(name)] }`)
+	g.line(`func slickHTTPServerRequestHopByHop(headers http.Header) map[string]bool { names := make(map[string]bool, len(slickHTTPServerHopByHop)); for name, hop := range slickHTTPServerHopByHop { names[name] = hop }; for _, value := range headers.Values("Connection") { for _, token := range strings.Split(value, ",") { token = http.CanonicalHeaderKey(strings.TrimSpace(token)); if token != "" { names[token] = true } } }; return names }`)
 	g.line(`func slickHTTPServerValidateConfig(config slickHTTPServerConfigData) *slickHTTPServerFailureData {`)
 	g.line(`if strings.TrimSpace(config.address) == "" { return slickHTTPServerFailure("Config", config.address, "Address must not be empty") }`)
 	g.line(`checks := []struct{ name string; value int64 }{`)
@@ -599,7 +617,7 @@ func (g *goGenerator) emitHTTPServerRuntimeSupport() {
 	g.line(`result := make([]slickHTTPServerHeader, len(order)); for index, key := range order { result[index] = slickHTTPServerHeader{name: key, values: values[key]} }; return result, nil`)
 	g.line(`}`)
 	g.line(`func slickHTTPServerRequestHeaders(headers http.Header) []slickHTTPServerHeader {`)
-	g.line(`sourceNames := make([]string, 0, len(headers)); for name := range headers { if slickHTTPServerIsHopByHop(name) { continue }; sourceNames = append(sourceNames, name) }`)
+	g.line(`hopByHop := slickHTTPServerRequestHopByHop(headers); sourceNames := make([]string, 0, len(headers)); for name := range headers { if hopByHop[http.CanonicalHeaderKey(name)] { continue }; sourceNames = append(sourceNames, name) }`)
 	g.line(`sort.Slice(sourceNames, func(left, right int) bool { leftCanonical := http.CanonicalHeaderKey(sourceNames[left]); rightCanonical := http.CanonicalHeaderKey(sourceNames[right]); if leftCanonical == rightCanonical { return sourceNames[left] < sourceNames[right] }; return leftCanonical < rightCanonical })`)
 	g.line(`merged := make(map[string][]string); for _, name := range sourceNames { canonical := http.CanonicalHeaderKey(name); merged[canonical] = append(merged[canonical], headers[name]...) }`)
 	g.line(`names := make([]string, 0, len(merged)); for name := range merged { names = append(names, name) }; sort.Strings(names)`)

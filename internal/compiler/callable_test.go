@@ -1244,6 +1244,32 @@ function main() -> int {
 			message: "cannot capture using binding Alias",
 		},
 		{
+			name: "a shadowed branch assignment still cannot be captured",
+			source: `
+class Handle {
+    Name: string
+    function Close() -> null { null }
+}
+
+function main() -> int {
+    using Resource = Handle { Name: "one" } {
+        let Alias = Handle { Name: "two" }
+        if (true) {
+            Alias = Resource
+            let Alias = Handle { Name: "three" }
+            Alias.Name
+        }
+        let Operation = () -> string {
+            Alias.Name
+        }
+        1
+    }
+}
+`,
+			code:    "SLK414",
+			message: "cannot capture using binding Alias",
+		},
+		{
 			name: "a branch-selected using alias cannot be captured",
 			source: `
 class Handle {

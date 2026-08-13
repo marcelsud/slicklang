@@ -88,7 +88,10 @@ type astScope struct {
 	narrowed      map[string]string
 	bindingIDs    map[string]uint64
 	usingBindings map[string]usingBinding
-	pending       map[string]pendingBinding
+	// priorUsing keeps the last using provenance a name held before bind
+	// rebound it, so a branch that assigned then shadowed still merges.
+	priorUsing map[string]usingBinding
+	pending    map[string]pendingBinding
 	// captured names the bindings a lambda copied by value, which its body may
 	// read but never write.
 	captured map[string]struct{}
@@ -110,6 +113,7 @@ func newASTScope(function *functionDecl, size int) *astScope {
 		narrowed:      make(map[string]string),
 		bindingIDs:    make(map[string]uint64, size),
 		usingBindings: make(map[string]usingBinding),
+		priorUsing:    make(map[string]usingBinding),
 		pending:       make(map[string]pendingBinding),
 		captured:      make(map[string]struct{}),
 		nextBindingID: &nextBindingID,
@@ -139,6 +143,12 @@ func (scope *astScope) bind(name, typ string) {
 	}
 	if scope.usingBindings == nil {
 		scope.usingBindings = make(map[string]usingBinding)
+	}
+	if binding, exists := scope.usingBindings[name]; exists {
+		if scope.priorUsing == nil {
+			scope.priorUsing = make(map[string]usingBinding)
+		}
+		scope.priorUsing[name] = binding
 	}
 	scope.locals[name] = typ
 	*scope.nextBindingID++
@@ -1833,6 +1843,10 @@ func (scope *astScope) clone() *astScope {
 	for name, binding := range scope.usingBindings {
 		usingBindings[name] = binding
 	}
+	priorUsing := make(map[string]usingBinding, len(scope.priorUsing))
+	for name, binding := range scope.priorUsing {
+		priorUsing[name] = binding
+	}
 	pending := make(map[string]pendingBinding, len(scope.pending))
 	for name, binding := range scope.pending {
 		binding.effects = cloneEffects(binding.effects)
@@ -1848,6 +1862,7 @@ func (scope *astScope) clone() *astScope {
 		narrowed:      narrowed,
 		bindingIDs:    bindingIDs,
 		usingBindings: usingBindings,
+		priorUsing:    priorUsing,
 		pending:       pending,
 		captured:      captured,
 		initializing:  scope.initializing,
@@ -2015,11 +2030,14 @@ func mergeUsingPaths(target *astScope, paths []pendingPath) {
 		}
 		var merged *usingValue
 		for _, path := range paths {
-			if !path.normal || path.scope.bindingIDs[name] != target.bindingIDs[name] {
+			if !path.normal {
 				continue
 			}
-			binding, exists := path.scope.usingBindings[name]
-			if !exists {
+			binding, found := path.scope.usingBindings[name]
+			if !found || path.scope.bindingIDs[name] != target.bindingIDs[name] {
+				binding, found = path.scope.priorUsing[name]
+			}
+			if !found {
 				continue
 			}
 			merged = mergeUsingValues(merged, &usingValue{name: name, binding: binding})

@@ -182,7 +182,7 @@ func buildHTTPServerBinary(t *testing.T, source string) string {
 	return binary
 }
 
-func startHTTPServerBinary(t *testing.T, binary, address string, env ...string) *exec.Cmd {
+func startHTTPServerBinary(t *testing.T, binary, address string, env ...string) (*exec.Cmd, *strings.Builder) {
 	t.Helper()
 	command := exec.Command(binary)
 	command.Env = append(os.Environ(), env...)
@@ -199,7 +199,7 @@ func startHTTPServerBinary(t *testing.T, binary, address string, env ...string) 
 			_, _ = command.Process.Wait()
 		}
 	})
-	return command
+	return command, &output
 }
 
 func assertMalformedQueryAndConnectRejected(t *testing.T, address string) {
@@ -232,6 +232,25 @@ func assertMalformedQueryAndConnectRejected(t *testing.T, address string) {
 	connect, body := request(http.MethodConnect, address)
 	if connect.StatusCode != http.StatusInternalServerError || strings.Contains(body, "hit") {
 		t.Fatalf("CONNECT status=%d body=%q", connect.StatusCode, body)
+	}
+}
+
+func assertConnectionNominatedHeaderDropped(t *testing.T, base string) {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, base+"/items", nil)
+	if err != nil {
+		t.Fatalf("build hop-by-hop request: %v", err)
+	}
+	request.Header.Set("Connection", "X-Trace")
+	request.Header.Add("X-Trace", "secret")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("hop-by-hop request: %v", err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != 200 || string(body) != "GET|/items||||0" {
+		t.Fatalf("connection-nominated header reached handler: status=%d body=%q", response.StatusCode, body)
 	}
 }
 
@@ -318,6 +337,9 @@ func assertShutdownDeadlineSucceeds(t *testing.T, command *exec.Cmd, base string
 	case err := <-done:
 		if err != nil {
 			t.Fatalf("server exit after forced shutdown: %v output=%q", err, output.String())
+		}
+		if got := strings.TrimSpace(output.String()); got != "Ok()" {
+			t.Fatalf("forced shutdown result %q, want Ok()", got)
 		}
 	case <-time.After(5 * time.Second):
 		_ = command.Process.Kill()
@@ -409,12 +431,13 @@ function main() -> Result<null, std.http.server.Failure> {
 `
 	binary := buildHTTPServerBinary(t, source)
 	blockURL, blockerStarted := shutdownBlocker(t)
-	command := startHTTPServerBinary(t, binary, address, "SLICK_HTTP_BLOCK_URL="+blockURL)
+	command, output := startHTTPServerBinary(t, binary, address, "SLICK_HTTP_BLOCK_URL="+blockURL)
 	base := "http://" + address
 	waitForHTTP(t, base+"/count")
 	assertHandlerCancellation(t, base, blockerStarted)
 	assertReentrantHandler(t, base)
 	assertMalformedQueryAndConnectRejected(t, address)
+	assertConnectionNominatedHeaderDropped(t, base)
 
 	// Methods including an extension token, query, headers, and body.
 	request, err := http.NewRequest("PROPFIND", base+"/items?q=one&q=two&flag=1", strings.NewReader("payload"))
@@ -584,8 +607,7 @@ function main() -> Result<null, std.http.server.Failure> {
 		t.Fatalf("post-failure status %d", alive.StatusCode)
 	}
 
-	// A handler outliving the graceful deadline is force-closed and still exits successfully.
-	assertShutdownDeadlineSucceeds(t, command, base, blockerStarted, &strings.Builder{})
+	assertShutdownDeadlineSucceeds(t, command, base, blockerStarted, output)
 }
 
 func TestStdHTTPServerServeContractsInterpreter(t *testing.T) {
@@ -635,6 +657,7 @@ function main() -> Result<null, std.http.server.Failure> {
 	assertHandlerCancellation(t, base, blockerStarted)
 	assertReentrantHandler(t, base)
 	assertMalformedQueryAndConnectRejected(t, address)
+	assertConnectionNominatedHeaderDropped(t, base)
 
 	response, err := http.Post(base+"/echo?q=one&q=two", "text/plain", strings.NewReader("hi"))
 	if err != nil {
