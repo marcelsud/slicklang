@@ -1269,6 +1269,59 @@ function main() -> int {
 			message: "cannot capture using binding Alias",
 		},
 		{
+			name: "a match-expression using alias cannot be captured",
+			source: `
+class Handle {
+    Name: string
+    function Close() -> null { null }
+}
+
+class Failure implements Error {
+    Message: string
+}
+
+function Load() -> Result<int, Failure> {
+    Ok(1)
+}
+
+function main() -> int {
+    using Resource = Handle { Name: "one" } {
+        let Alias = match Load() {
+            Ok(_) => Resource
+            Err(_) => Resource
+        }
+        let Operation = () -> string {
+            Alias.Name
+        }
+        1
+    }
+}
+`,
+			code:    "SLK414",
+			message: "cannot capture using binding Alias",
+		},
+		{
+			name: "a destructured using alias cannot be captured",
+			source: `
+class Handle {
+    Name: string
+    function Close() -> null { null }
+}
+
+function main() -> int {
+    using Resource = Handle { Name: "one" } {
+        let (Alias, Count) = (Resource, 1)
+        let Operation = () -> string {
+            Alias.Name
+        }
+        Count
+    }
+}
+`,
+			code:    "SLK414",
+			message: "cannot capture using binding Alias",
+		},
+		{
 			name: "a lambda cannot call the binding it initializes",
 			source: `
 function main() -> int {
