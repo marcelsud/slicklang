@@ -108,6 +108,7 @@ const (
 	diagnosticCodeAnnotationTarget         diagnosticCode = "SLK416"
 	diagnosticCodeAnnotationArgument       diagnosticCode = "SLK417"
 	diagnosticCodeAnnotationCycle          diagnosticCode = "SLK418"
+	diagnosticCodeUnwrapValue              diagnosticCode = "SLK419"
 )
 
 var ErrUnknownDiagnostic = errors.New("unknown diagnostic")
@@ -602,6 +603,12 @@ var diagnosticDefinitions = []diagnosticDefinition{
 		"Alias expansion must reach one compiler-owned terminal through an acyclic deterministic chain.",
 		"An annotation alias reaches itself directly or indirectly.",
 		"Break the reported chain by targeting a terminal or another acyclic alias."),
+	defineDiagnostic(diagnosticCodeUnwrapValue, DiagnosticPhaseTypeCheck,
+		"Unwrap requires a Result",
+		"unwrap extracts the success payload from a Result and throws the failure. It is not optional-null coalescing.",
+		"The argument to unwrap is not a Result value.",
+		"Pass a Result<T, E> whose E implements Error.",
+		"Match the value, or compare an optional with null."),
 }
 
 var diagnosticRegistry = mustBuildDiagnosticRegistry(diagnosticDefinitions)

@@ -657,6 +657,80 @@ function main() -> null { null }
 	})
 }
 
+func TestResultUnwrapExtractsOkAndThrowsErr(t *testing.T) {
+	output := runResultEverywhere(t, resultLookup+`
+function user_name(Found: bool) -> string throws LookupError {
+    let User = unwrap(find_user(Found))
+    User.Name
+}
+
+function main() -> string {
+    user_name(true)
+    catch (error) {
+        LookupError as Failure => Failure.Message
+    }
+}
+`)
+	if output != "Ada" {
+		t.Fatalf("expected unwrapped success value, found %q", output)
+	}
+
+	failed := runResultEverywhere(t, resultLookup+`
+function user_name(Found: bool) -> string throws LookupError {
+    let User = unwrap(find_user(Found))
+    User.Name
+}
+
+function main() -> string {
+    user_name(false)
+    catch (error) {
+        LookupError as Failure => Failure.Message
+    }
+}
+`)
+	if failed != "missing user" {
+		t.Fatalf("expected thrown Err payload, found %q", failed)
+	}
+}
+
+func TestResultUnwrapIsRejectedOnInvalidUse(t *testing.T) {
+	t.Run("non-Result operand", func(t *testing.T) {
+		diagnostics := checkResult(t, `
+class Failure implements Error {}
+function main() -> int throws Failure {
+    unwrap(42)
+}
+`)
+		assertDiagnostic(t, diagnostics, "SLK419", "unwrap requires a Result value, found int")
+	})
+	t.Run("undeclared throw", func(t *testing.T) {
+		diagnostics := checkResult(t, resultLookup+`
+function main() -> string {
+    let User = unwrap(find_user(true))
+    User.Name
+}
+`)
+		assertDiagnostic(t, diagnostics, "SLK201", "unhandled LookupError from unwrap")
+	})
+	t.Run("type arguments", func(t *testing.T) {
+		diagnostics := checkResult(t, resultLookup+`
+function main() -> string throws LookupError {
+    let User = unwrap<User, LookupError>(find_user(true))
+    User.Name
+}
+`)
+		assertDiagnostic(t, diagnostics, "SLK380", "unwrap does not take type arguments")
+	})
+	t.Run("arity", func(t *testing.T) {
+		diagnostics := checkResult(t, `
+function main() -> int {
+    unwrap()
+}
+`)
+		assertDiagnostic(t, diagnostics, "SLK320", "unwrap expects 1 argument, found 0")
+	})
+}
+
 func TestResultMatchIsRejectedOnInvalidUse(t *testing.T) {
 	const failure = `
 class Failure implements Error {

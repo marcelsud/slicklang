@@ -1435,6 +1435,9 @@ func (g *goGenerator) emitCallExpression(body *strings.Builder, node *callExpres
 	if emitted, err := g.emitBufferCallExpression(body, node, arguments, argumentTypes); emitted || err != nil {
 		return err
 	}
+	if name.name == "unwrap" {
+		return g.emitUnwrapCall(body, arguments[0], argumentTypes[0], resultType)
+	}
 	if name.name == "enumerate" {
 		sequence := g.sequenceExpression(arguments[0], argumentTypes[0])
 		fmt.Fprintf(body, "return slickEnumerateSeq{source: %s}, nil\n", sequence)
@@ -1735,6 +1738,16 @@ func (g *goGenerator) emitResultExpression(body *strings.Builder, node *resultEx
 		field, declared = "failure", failure
 	}
 	fmt.Fprintf(body, "return %s{ok: %t, %s: %s}, nil\n", g.goType(typ), node.ok, field, g.convert(payload, payloadType, declared))
+	return nil
+}
+
+func (g *goGenerator) emitUnwrapCall(body *strings.Builder, operand, operandType, resultType string) error {
+	success, _, ok := resultTypeArgs(operandType)
+	if !ok {
+		return fmt.Errorf("generated unwrap on non-Result type %s", operandType)
+	}
+	fmt.Fprintf(body, "if !%s.ok { return %s, %s.failure }\n", operand, g.zero(resultType), operand)
+	fmt.Fprintf(body, "return %s, nil\n", g.convert(operand+".value", success, resultType))
 	return nil
 }
 

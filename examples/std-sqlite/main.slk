@@ -1,14 +1,3 @@
-function Must<T>(Value: Result<T, std.sqlite.Failure>) -> T throws std.sqlite.Failure {
-    match Value {
-        Ok(Payload) => Payload
-        Err(Failure) => Abort<T>(Failure)
-    }
-}
-
-function Abort<T>(Failure: std.sqlite.Failure) -> T throws std.sqlite.Failure {
-    throw Failure
-}
-
 function ExtractTitle(Row: std.sqlite.Row) -> string {
     let Vals = Row.Values
     let Val = Vals.Get("title")
@@ -23,18 +12,18 @@ function ExtractTitle(Row: std.sqlite.Row) -> string {
 }
 
 function Exercise() -> string throws std.sqlite.Failure {
-    using DB = Must<std.sqlite.Database>(std.sqlite.Open(":memory:")) {
+    using DB = unwrap(std.sqlite.Open(":memory:")) {
         let CreateStmt = std.sqlite.Statement {
             SQL: "CREATE TABLE todos (id INTEGER PRIMARY KEY, title TEXT)"
             Parameters: []
         }
-        Must<std.sqlite.Execution>(DB.Execute(CreateStmt))
+        unwrap(DB.Execute(CreateStmt))
 
         let InsertStmt = std.sqlite.Statement {
             SQL: "INSERT INTO todos (id, title) VALUES (?, ?)"
             Parameters: [std.sqlite.Value.Integer(1), std.sqlite.Value.Text("ship sqlite")]
         }
-        Must<std.sqlite.Execution>(DB.Execute(InsertStmt))
+        unwrap(DB.Execute(InsertStmt))
 
         let Query = std.sqlite.Query {
             SQL: "SELECT title FROM todos WHERE id = 1"
@@ -42,7 +31,7 @@ function Exercise() -> string throws std.sqlite.Failure {
             MaxRows: 10
             MaxBytes: 1024
         }
-        let Rows = Must<std.sqlite.Row[]>(DB.Query(Query))
+        let Rows = unwrap(DB.Query(Query))
         let First = Rows.Get(0)
         if (First == null) {
             "none"

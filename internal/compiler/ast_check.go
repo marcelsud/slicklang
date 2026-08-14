@@ -988,6 +988,9 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 		}
 		return info
 	}
+	if info, builtin := p.checkUnwrapCall(node, scope, name); builtin {
+		return info
+	}
 	if _, shadowed := scope.lookup(parts[0]); !shadowed {
 		if union, variant, named := p.resolveVariant(scope.function.namespace, scope.function.aliases, name.name); named {
 			return p.checkVariantConstruction(node, name, union, variant, scope)
@@ -2211,6 +2214,42 @@ func literalType(value any) string {
 	default:
 		return typeUnknown
 	}
+}
+
+func (p *program) checkUnwrapCall(node *callExpression, scope *astScope, name *nameExpression) (expressionInfo, bool) {
+	if name.name != "unwrap" {
+		return expressionInfo{}, false
+	}
+	info := expressionInfo{typ: typeUnknown, effects: make(effectSet)}
+	if len(node.typeArgs) > 0 {
+		p.add(node.pos, diagnosticCodeTypeArguments, "unwrap does not take type arguments")
+	}
+	if len(node.args) != 1 {
+		p.add(node.pos, diagnosticCodeCallArgument, "unwrap expects 1 argument, found %d", len(node.args))
+		for _, argument := range node.args {
+			mergeEffects(info.effects, p.checkASTExpression(argument, scope).effects)
+		}
+		return info, true
+	}
+	argument := p.checkASTExpression(node.args[0], scope)
+	mergeEffects(info.effects, argument.effects)
+	info.using = argument.using
+	success, failure, isResult := resultTypeArgs(argument.typ)
+	if !isResult {
+		if argument.typ != typeUnknown {
+			p.add(node.pos, diagnosticCodeUnwrapValue, "unwrap requires a Result value, found %s", displayName(argument.typ))
+		}
+		return info, true
+	}
+	if class := p.classes[failure]; class == nil || !class.isError {
+		p.add(node.pos, diagnosticCodeErrorValue, "unwrap cannot throw %s; it does not implement Error", displayName(failure))
+		info.typ = success
+		return info, true
+	}
+	info.typ = success
+	info.effects[failure] = effectOrigin{pos: node.pos, origin: "unwrap"}
+	info.using = p.usingForType(success, info.using)
+	return info, true
 }
 
 func isIterableBuiltin(name string) bool {
