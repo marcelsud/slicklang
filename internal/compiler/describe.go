@@ -7,9 +7,9 @@ import (
 	"strings"
 )
 
-// DescriptionSchemaVersion is 6 because annotations expose authored and
-// terminal-resolved metadata on declarations and parameters.
-const DescriptionSchemaVersion = 6
+// DescriptionSchemaVersion is 7 because field annotations appear on class
+// fields through the same authored/resolved annotation schema.
+const DescriptionSchemaVersion = 7
 
 var ErrUnknownSymbol = errors.New("unknown symbol")
 
@@ -223,7 +223,7 @@ func (p *program) describeClass(class *classDecl) SymbolDescription {
 			Name:          field.name,
 			Type:          fieldType,
 			Callable:      describeCallable(fieldType),
-			Annotations:   []AnnotationDescription{},
+			Annotations:   p.describeAnnotations(field.annotations),
 			Visibility:    visibility(field.name),
 			Documentation: field.documentation,
 			Source:        describeSource(field.pos),
@@ -357,7 +357,7 @@ func (p *program) describeMember(name string) (SymbolDescription, bool) {
 		if field, ok := class.fields[member]; ok {
 			description := emptySymbol(name, "field", visibility(field.name))
 			description.Documentation = field.documentation
-			description.Annotations = []AnnotationDescription{}
+			description.Annotations = p.describeAnnotations(field.annotations)
 			description.Type = p.canonicalType(class.namespace, class.aliases, field.typ)
 			description.TypeCallable = describeCallable(description.Type)
 			description.Source = describeSource(field.pos)

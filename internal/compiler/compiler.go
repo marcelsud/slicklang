@@ -61,6 +61,8 @@ type paramDecl struct {
 type fieldDecl struct {
 	name          string
 	typ           typeRef
+	jsonName      string
+	annotations   []*annotationUse
 	documentation *string
 	pos           position
 }
@@ -724,14 +726,11 @@ func (p *parser) parseClassField(class *classDecl) {
 	}
 	documentation := p.consumeDocumentation()
 	annotations := p.consumeAnnotations()
-	for _, annotation := range annotations {
-		p.prog.add(annotation.pos, diagnosticCodeAnnotationTarget, "annotations cannot target a field")
-	}
 	if previous, exists := class.fields[name.text]; exists {
 		p.reportDocumentationConflict(name.pos, class.qualified+"."+name.text, previous.documentation, documentation)
 		p.error(name.pos, "duplicate field %s.%s; first declared at %s:%d:%d", class.qualified, name.text, previous.pos.file, previous.pos.line, previous.pos.column)
 	} else {
-		class.fields[name.text] = fieldDecl{name: name.text, typ: typ, documentation: documentation, pos: name.pos}
+		class.fields[name.text] = fieldDecl{name: name.text, typ: typ, annotations: annotations, documentation: documentation, pos: name.pos}
 	}
 	p.accept(",")
 	p.accept(";")
@@ -1322,6 +1321,7 @@ func (p *program) check() {
 	p.checkAnnotations()
 	p.checkGenericDeclarations()
 	p.instantiateGenerics()
+	p.checkJSONFieldNames()
 	p.checkDeclaredTypes()
 	p.checkVisibility()
 	p.resolveThrowSets()
