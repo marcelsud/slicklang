@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 
 	"slick/internal/compiler"
@@ -734,25 +733,42 @@ function main() -> string {
 	}
 }
 
-func TestStdSQLiteConcurrentAccess(t *testing.T) {
-	var wg sync.WaitGroup
-	for range 5 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			res, diags, err := compiler.Run([]compiler.Source{{
-				Name:      "main.slk",
-				Namespace: "root",
-				Text: `
+func TestStdSQLiteSharedHandleConcurrentWrites(t *testing.T) {
+	source := `
+function WriteOne(DB: std.sqlite.Database, Value: int) -> Result<null, std.sqlite.Failure> {
+    let Stmt = std.sqlite.Statement {
+        SQL: "INSERT INTO t(x) VALUES (?)"
+        Parameters: [std.sqlite.Value.Integer(Value)]
+    }
+    DB.Execute(Stmt)?
+    Ok(null)
+}
+
 function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure {
     using DB = std.sqlite.Open(":memory:")? {
-        let Stmt1 = std.sqlite.Statement { SQL: "CREATE TABLE t(x INT)", Parameters: [] }
-        DB.Execute(Stmt1)?
-        let Stmt2 = std.sqlite.Statement { SQL: "INSERT INTO t VALUES (1)", Parameters: [] }
-        DB.Execute(Stmt2)?
-        let Q = std.sqlite.Query { SQL: "SELECT x FROM t", Parameters: [], MaxRows: 10, MaxBytes: 100 }
+        let Create = std.sqlite.Statement { SQL: "CREATE TABLE t(x INT)", Parameters: [] }
+        DB.Execute(Create)?
+        async let A = WriteOne(DB, 1)
+        async let B = WriteOne(DB, 2)
+        let FirstWrite = await A?
+        let SecondWrite = await B?
+        let Q = std.sqlite.Query { SQL: "SELECT COUNT(*) as c FROM t", Parameters: [], MaxRows: 10, MaxBytes: 1024 }
         let Rows = DB.Query(Q)?
-        Ok("ok")
+        let First = Rows.Get(0)
+        if (First == null) {
+            Ok("none")
+        } else {
+            let Vals = First.Values
+            let Val = Vals.Get("c")
+            if (Val == null) {
+                Ok("missing")
+            } else {
+                match Val {
+                    std.sqlite.Value.Integer(C) => Ok(std.convert.IntToString(C))
+                    _ => Ok("bad")
+                }
+            }
+        }
     }
 }
 
@@ -762,12 +778,147 @@ function main() -> string throws std.sqlite.Failure {
         Err(F) => F.Message
     }
 }
-`,
-			}})
-			if len(diags) != 0 || err != nil || res != "ok" {
-				t.Errorf("concurrent run failed: %v %v res=%q", diags, err, res)
-			}
-		}()
+`
+	output := runSQLiteEverywhere(t, source)
+	if output != "2" {
+		t.Fatalf("shared-handle concurrent writes = %q, want 2", output)
 	}
-	wg.Wait()
+}
+
+func TestStdSQLiteMemoryTransactionDoesNotHang(t *testing.T) {
+	source := `
+function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure {
+    using DB = std.sqlite.Open(":memory:")? {
+        let Create = std.sqlite.Statement { SQL: "CREATE TABLE t(x INT)", Parameters: [] }
+        DB.Execute(Create)?
+        using Tx = DB.Begin()? {
+            let Insert = std.sqlite.Statement { SQL: "INSERT INTO t VALUES (1)", Parameters: [] }
+            Tx.Execute(Insert)?
+            let Outside = std.sqlite.Statement { SQL: "INSERT INTO t VALUES (2)", Parameters: [] }
+            let During = match DB.Execute(Outside) {
+                Ok(_) => "ok"
+                Err(_) => "fail"
+            }
+            Tx.Commit()?
+            Ok(During)
+        }
+    }
+}
+
+function main() -> string throws std.sqlite.Failure {
+    match Exercise() {
+        Ok(S) => S
+        Err(F) => F.Message
+    }
+}
+`
+	output := runSQLiteEverywhere(t, source)
+	if output != "fail" {
+		t.Fatalf("database execute during transaction = %q, want fail", output)
+	}
+}
+
+func TestStdSQLiteCloseInvalidatesTransaction(t *testing.T) {
+	source := `
+function AfterClose(Tx: std.sqlite.Transaction) -> string {
+    let Stmt = std.sqlite.Statement { SQL: "INSERT INTO t VALUES (1)", Parameters: [] }
+    match Tx.Execute(Stmt) {
+        Ok(_) => "executed"
+        Err(_) => "inactive"
+    }
+}
+
+function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure {
+    let DB = std.sqlite.Open(":memory:")?
+    let Create = std.sqlite.Statement { SQL: "CREATE TABLE t(x INT)", Parameters: [] }
+    DB.Execute(Create)?
+    let Tx = DB.Begin()?
+    DB.Close()
+    Ok(AfterClose(Tx))
+}
+
+function main() -> string throws std.sqlite.Failure {
+    match Exercise() {
+        Ok(S) => S
+        Err(F) => F.Message
+    }
+}
+`
+	output := runSQLiteEverywhere(t, source)
+	if output != "inactive" {
+		t.Fatalf("transaction after database close = %q, want inactive", output)
+	}
+}
+
+func TestStdSQLiteValueOnlyProgramBuilds(t *testing.T) {
+	source := `
+function main() -> string {
+    match std.sqlite.Value.Integer(1) {
+        std.sqlite.Value.Integer(V) => std.convert.IntToString(V)
+        _ => "other"
+    }
+}
+`
+	output := runSQLiteEverywhere(t, source)
+	if output != "1" {
+		t.Fatalf("value-only program = %q, want 1", output)
+	}
+}
+
+func TestStdSQLiteRejectsInvalidResultCells(t *testing.T) {
+	source := `
+function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure {
+    using DB = std.sqlite.Open(":memory:")? {
+        let Inf = std.sqlite.Query { SQL: "SELECT 1e308 * 1e308 as v", Parameters: [], MaxRows: 10, MaxBytes: 1024 }
+        match DB.Query(Inf) {
+            Ok(_) => Ok("inf-ok")
+            Err(_) => Ok("inf-fail")
+        }
+    }
+}
+
+function main() -> string throws std.sqlite.Failure {
+    match Exercise() {
+        Ok(S) => S
+        Err(F) => F.Message
+    }
+}
+`
+	output := runSQLiteEverywhere(t, source)
+	if output != "inf-fail" {
+		t.Fatalf("non-finite query cell = %q, want inf-fail", output)
+	}
+}
+
+func TestStdSQLitePreservesZeroLastInsertId(t *testing.T) {
+	source := `
+function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure {
+    using DB = std.sqlite.Open(":memory:")? {
+        let Create = std.sqlite.Statement { SQL: "CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)", Parameters: [] }
+        DB.Execute(Create)?
+        let Insert = std.sqlite.Statement {
+            SQL: "INSERT INTO t(id, name) VALUES (?, ?)"
+            Parameters: [std.sqlite.Value.Integer(0), std.sqlite.Value.Text("zero")]
+        }
+        let Res = DB.Execute(Insert)?
+        let Id = Res.LastInsertId
+        if (Id == null) {
+            Ok("absent")
+        } else {
+            Ok(std.convert.IntToString(Id))
+        }
+    }
+}
+
+function main() -> string throws std.sqlite.Failure {
+    match Exercise() {
+        Ok(S) => S
+        Err(F) => F.Message
+    }
+}
+`
+	output := runSQLiteEverywhere(t, source)
+	if output != "0" {
+		t.Fatalf("LastInsertId after explicit 0 = %q, want 0", output)
+	}
 }

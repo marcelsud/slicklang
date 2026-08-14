@@ -2163,6 +2163,9 @@ func (p *program) taskSafeType(name string, visiting map[string]bool) bool {
 }
 
 func (p *program) taskSafeClass(name string, visiting map[string]bool) bool {
+	if name == stdSQLiteDatabaseName {
+		return true
+	}
 	class := p.classes[name]
 	if class == nil || class.nativeResource != "" {
 		return false

@@ -1502,10 +1502,17 @@ func runtimeEqual(left, right runtimeValue) bool {
 		}
 		return !leftPresent || runtimeEqual(leftValue, rightValue)
 	}
-	// Callables are neither comparable nor orderable; the checker rejects the
-	// comparison, and identity never leaks in as a fallback.
 	if left.callable != nil || right.callable != nil {
 		return false
+	}
+	if left.sqlite != nil || right.sqlite != nil {
+		return left.sqlite != nil && right.sqlite != nil && left.sqlite == right.sqlite
+	}
+	if left.native != nil || right.native != nil {
+		return left.native != nil && right.native != nil && left.native == right.native
+	}
+	if left.directory != nil || right.directory != nil {
+		return left.directory != nil && right.directory != nil && left.directory == right.directory
 	}
 	if left.typ == "bytes" && right.typ == "bytes" {
 		return bytes.Equal(left.scalar.([]byte), right.scalar.([]byte))

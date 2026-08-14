@@ -164,7 +164,7 @@ func (p *program) generateGo() (string, error) {
 		generator.imports["sync"] = true
 	}
 	if p.usesStdSQLite {
-		for _, name := range []string{"database/sql", "errors", "fmt", "math", "modernc.org/sqlite", "os", "path/filepath", "strings", "sync", "unicode/utf8"} {
+		for _, name := range []string{"database/sql", "errors", "fmt", "math", "modernc.org/sqlite", "os", "path/filepath", "strings", "sync", "sync/atomic", "unicode/utf8"} {
 			generator.imports[name] = true
 		}
 	}

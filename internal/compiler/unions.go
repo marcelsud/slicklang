@@ -177,6 +177,9 @@ func (p *program) variantFieldTypes(union *unionDecl, variant *unionVariantDecl)
 // checkVariantValue types a fieldless variant reference such as
 // Expression.Missing.
 func (p *program) checkVariantValue(node *nameExpression, union *unionDecl, variant *unionVariantDecl, scope *astScope) expressionInfo {
+	if strings.HasPrefix(union.qualified, "std.sqlite.") {
+		p.usesStdSQLite = true
+	}
 	resolved := p.requireVariant(node.pos, scope.function.namespace, node.name, union, variant)
 	if resolved == nil {
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
@@ -192,6 +195,9 @@ func (p *program) checkVariantValue(node *nameExpression, union *unionDecl, vari
 // Expression.Binary(Left, "+", Right). Arity and payload assignability follow
 // the ordinary call rules.
 func (p *program) checkVariantConstruction(node *callExpression, name *nameExpression, union *unionDecl, variant *unionVariantDecl, scope *astScope) expressionInfo {
+	if strings.HasPrefix(union.qualified, "std.sqlite.") {
+		p.usesStdSQLite = true
+	}
 	info := expressionInfo{typ: union.qualified, effects: make(effectSet)}
 	resolved := p.requireVariant(name.pos, scope.function.namespace, name.name, union, variant)
 	if resolved == nil {

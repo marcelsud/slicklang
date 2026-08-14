@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
@@ -145,18 +146,38 @@ type nativeSQLiteResource struct {
 }
 
 type nativeSQLiteDatabase struct {
-	mu     sync.Mutex
-	db     *sql.DB
-	path   string
-	closed bool
+	mu       sync.Mutex
+	db       *sql.DB
+	path     string
+	closed   bool
+	activeTx *nativeSQLiteTransaction
 }
 
 type nativeSQLiteTransaction struct {
 	mu     sync.Mutex
 	tx     *sql.Tx
 	db     *nativeSQLiteDatabase
-	state  int // 0: active, 1: committed, 2: rolled back, 3: closed
+	state  int // 0: active, 1: committed, 2: rolled back
 	closed bool
+}
+
+var sqliteMemorySeq atomic.Uint64
+
+func sqliteOpenDSN(path string) string {
+	if path != ":memory:" {
+		return path
+	}
+	return fmt.Sprintf("file:slick-memory-%d?mode=memory&cache=shared", sqliteMemorySeq.Add(1))
+}
+
+func sqliteTxInactive(tx *nativeSQLiteTransaction) bool {
+	return tx == nil || tx.closed || tx.state != 0 || tx.db == nil || tx.db.closed
+}
+
+func sqliteClearActiveTx(db *nativeSQLiteDatabase, tx *nativeSQLiteTransaction) {
+	if db != nil && db.activeTx == tx {
+		db.activeTx = nil
+	}
 }
 
 // validateSingleSQL verifies that sql contains exactly one statement.
@@ -303,37 +324,43 @@ func convertSlickValueToSQL(val runtimeValue) (any, error) {
 		return nil, fmt.Errorf("unknown SQLite Value variant %s", val.variant.name)
 	}
 }
-
-func convertSQLValueToSlick(p *program, val any) runtimeValue {
+func convertSQLValueToSlick(p *program, val any) (runtimeValue, *sqliteFailureData) {
 	union := p.unions[stdSQLiteValueName]
 	if val == nil {
-		variant := union.variants["Null"]
-		return p.runtimeVariantValue(union, variant, nil)
+		return p.runtimeVariantValue(union, union.variants["Null"], nil), nil
 	}
 	switch v := val.(type) {
 	case int64:
-		variant := union.variants["Integer"]
-		return p.runtimeVariantValue(union, variant, []runtimeValue{{typ: "int", scalar: v}})
+		return p.runtimeVariantValue(union, union.variants["Integer"], []runtimeValue{{typ: "int", scalar: v}}), nil
 	case float64:
-		variant := union.variants["Float"]
-		return p.runtimeVariantValue(union, variant, []runtimeValue{{typ: "float", scalar: v}})
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return runtimeValue{}, sqliteFailure("Query", nil, "query returned a non-finite floating-point value")
+		}
+		return p.runtimeVariantValue(union, union.variants["Float"], []runtimeValue{{typ: "float", scalar: v}}), nil
 	case string:
-		variant := union.variants["Text"]
-		return p.runtimeVariantValue(union, variant, []runtimeValue{{typ: "string", scalar: v}})
+		if !utf8.ValidString(v) {
+			return runtimeValue{}, sqliteFailure("Query", nil, "query returned invalid UTF-8 text")
+		}
+		return p.runtimeVariantValue(union, union.variants["Text"], []runtimeValue{{typ: "string", scalar: v}}), nil
 	case []byte:
-		variant := union.variants["Blob"]
-		return p.runtimeVariantValue(union, variant, []runtimeValue{{typ: "bytes", scalar: append([]byte(nil), v...)}})
+		return p.runtimeVariantValue(union, union.variants["Blob"], []runtimeValue{{typ: "bytes", scalar: append([]byte(nil), v...)}}), nil
 	case bool:
-		variant := union.variants["Integer"]
 		intVal := int64(0)
 		if v {
 			intVal = 1
 		}
-		return p.runtimeVariantValue(union, variant, []runtimeValue{{typ: "int", scalar: intVal}})
+		return p.runtimeVariantValue(union, union.variants["Integer"], []runtimeValue{{typ: "int", scalar: intVal}}), nil
 	default:
-		variant := union.variants["Text"]
-		return p.runtimeVariantValue(union, variant, []runtimeValue{{typ: "string", scalar: fmt.Sprint(v)}})
+		return runtimeValue{}, sqliteFailure("Query", nil, "query returned an unsupported SQLite value")
 	}
+}
+
+func sqliteLastInsertID(res sql.Result) *runtimeOptional {
+	lastInsertId, err := res.LastInsertId()
+	if err != nil {
+		return &runtimeOptional{}
+	}
+	return &runtimeOptional{present: true, value: runtimeValue{typ: "int", scalar: lastInsertId}}
 }
 
 func runtimeSQLiteFailureValue(failure *sqliteFailureData) runtimeValue {
@@ -372,28 +399,14 @@ func (p *program) callNativeStdSQLite(function *functionDecl, frame *runtimeFram
 				}
 			}
 		}
-
-		var dsn string
-		if path == ":memory:" {
-			dsn = ":memory:"
-		} else {
-			dsn = path
-		}
-
-		db, err := sql.Open("sqlite", dsn)
+		db, err := sql.Open("sqlite", sqliteOpenDSN(path))
 		if err != nil {
 			return runtimeSQLiteFailureResult(resultType, sqliteFailureFromError("Open", err)), nil, true
 		}
-
-		if path == ":memory:" {
-			db.SetMaxOpenConns(1)
-		}
-
 		if err := db.Ping(); err != nil {
 			_ = db.Close()
 			return runtimeSQLiteFailureResult(resultType, sqliteFailureFromError("Open", err)), nil, true
 		}
-
 		nativeDB := &nativeSQLiteDatabase{
 			db:   db,
 			path: path,
@@ -430,6 +443,9 @@ func (p *program) callNativeStdSQLite(function *functionDecl, frame *runtimeFram
 		if self.database.closed {
 			return runtimeSQLiteFailureResult(resultType, sqliteFailure("Execute", nil, "database is closed")), nil, true
 		}
+		if self.database.activeTx != nil && !self.database.activeTx.closed && self.database.activeTx.state == 0 {
+			return runtimeSQLiteFailureResult(resultType, sqliteFailure("Execute", nil, "a transaction is already active")), nil, true
+		}
 
 		res, err := self.database.db.Exec(sqlText, params...)
 		if err != nil {
@@ -437,19 +453,11 @@ func (p *program) callNativeStdSQLite(function *functionDecl, frame *runtimeFram
 		}
 
 		rowsAffected, _ := res.RowsAffected()
-		lastInsertId, _ := res.LastInsertId()
-
-		optionalId := &runtimeOptional{}
-		if lastInsertId != 0 {
-			optionalId.present = true
-			optionalId.value = runtimeValue{typ: "int", scalar: lastInsertId}
-		}
-
 		execVal := runtimeValue{
 			typ: stdSQLiteExecutionName,
 			fields: map[string]runtimeValue{
 				"RowsAffected": {typ: "int", scalar: rowsAffected},
-				"LastInsertId": {typ: "int?", optional: optionalId},
+				"LastInsertId": {typ: "int?", optional: sqliteLastInsertID(res)},
 			},
 		}
 		return runtimeResultValue(resultType, true, execVal), nil, true
@@ -487,6 +495,9 @@ func (p *program) callNativeStdSQLite(function *functionDecl, frame *runtimeFram
 		if self.database.closed {
 			return runtimeSQLiteFailureResult(resultType, sqliteFailure("Query", nil, "database is closed")), nil, true
 		}
+		if self.database.activeTx != nil && !self.database.activeTx.closed && self.database.activeTx.state == 0 {
+			return runtimeSQLiteFailureResult(resultType, sqliteFailure("Query", nil, "a transaction is already active")), nil, true
+		}
 
 		rows, err := self.database.db.Query(sqlText, params...)
 		if err != nil {
@@ -511,17 +522,20 @@ func (p *program) callNativeStdSQLite(function *functionDecl, frame *runtimeFram
 		if self.database.closed {
 			return runtimeSQLiteFailureResult(resultType, sqliteFailure("Begin", nil, "database is closed")), nil, true
 		}
+		if self.database.activeTx != nil && !self.database.activeTx.closed && self.database.activeTx.state == 0 {
+			return runtimeSQLiteFailureResult(resultType, sqliteFailure("Begin", nil, "a transaction is already active")), nil, true
+		}
 
 		tx, err := self.database.db.Begin()
 		if err != nil {
 			return runtimeSQLiteFailureResult(resultType, sqliteFailureFromError("Begin", err)), nil, true
 		}
-
 		nativeTx := &nativeSQLiteTransaction{
 			tx:    tx,
 			db:    self.database,
 			state: 0,
 		}
+		self.database.activeTx = nativeTx
 		resVal := runtimeValue{
 			typ:    stdSQLiteTransactionName,
 			sqlite: &nativeSQLiteResource{transaction: nativeTx},
@@ -540,16 +554,25 @@ func (p *program) callNativeStdSQLite(function *functionDecl, frame *runtimeFram
 			return nullRuntimeValue(), nil, true
 		}
 		self.database.closed = true
+		if active := self.database.activeTx; active != nil && !active.closed && active.state == 0 {
+			active.closed = true
+			active.state = 2
+			_ = active.tx.Rollback()
+		}
+		self.database.activeTx = nil
 		if err := self.database.db.Close(); err != nil {
 			failure := sqliteFailureFromError("Close", err)
-			msg := failure.message
-			return runtimeValue{}, &slickThrow{typ: stdSQLiteFailureName, message: msg, value: runtimeSQLiteFailureValue(failure)}, true
+			return runtimeValue{}, &slickThrow{typ: stdSQLiteFailureName, message: failure.message, value: runtimeSQLiteFailureValue(failure)}, true
 		}
 		return nullRuntimeValue(), nil, true
-
 	case nativeStdSQLiteTransactionExecute:
 		self := frame.locals["self"].sqlite
-		if self == nil || self.transaction == nil || self.transaction.closed || self.transaction.state != 0 {
+		if sqliteTxInactive(func() *nativeSQLiteTransaction {
+			if self == nil {
+				return nil
+			}
+			return self.transaction
+		}()) {
 			return runtimeSQLiteFailureResult(resultType, sqliteFailure("Execute", nil, "transaction is no longer active")), nil, true
 		}
 		stmtVal := frame.locals["Statement"]
@@ -557,7 +580,6 @@ func (p *program) callNativeStdSQLite(function *functionDecl, frame *runtimeFram
 		if f := validateSingleSQL(sqlText, "Execute"); f != nil {
 			return runtimeSQLiteFailureResult(resultType, f), nil, true
 		}
-
 		paramElements := stmtVal.fields["Parameters"].elements
 		params := make([]any, len(paramElements))
 		for i, el := range paramElements {
@@ -567,54 +589,45 @@ func (p *program) callNativeStdSQLite(function *functionDecl, frame *runtimeFram
 			}
 			params[i] = sqlVal
 		}
-
 		self.transaction.mu.Lock()
 		defer self.transaction.mu.Unlock()
-		if self.transaction.closed || self.transaction.state != 0 {
+		if sqliteTxInactive(self.transaction) {
 			return runtimeSQLiteFailureResult(resultType, sqliteFailure("Execute", nil, "transaction is no longer active")), nil, true
 		}
-
 		res, err := self.transaction.tx.Exec(sqlText, params...)
 		if err != nil {
 			return runtimeSQLiteFailureResult(resultType, sqliteFailureFromError("Execute", err)), nil, true
 		}
-
 		rowsAffected, _ := res.RowsAffected()
-		lastInsertId, _ := res.LastInsertId()
-
-		optionalId := &runtimeOptional{}
-		if lastInsertId != 0 {
-			optionalId.present = true
-			optionalId.value = runtimeValue{typ: "int", scalar: lastInsertId}
-		}
-
 		execVal := runtimeValue{
 			typ: stdSQLiteExecutionName,
 			fields: map[string]runtimeValue{
 				"RowsAffected": {typ: "int", scalar: rowsAffected},
-				"LastInsertId": {typ: "int?", optional: optionalId},
+				"LastInsertId": {typ: "int?", optional: sqliteLastInsertID(res)},
 			},
 		}
 		return runtimeResultValue(resultType, true, execVal), nil, true
 
 	case nativeStdSQLiteTransactionQuery:
 		self := frame.locals["self"].sqlite
-		if self == nil || self.transaction == nil || self.transaction.closed || self.transaction.state != 0 {
+		if sqliteTxInactive(func() *nativeSQLiteTransaction {
+			if self == nil {
+				return nil
+			}
+			return self.transaction
+		}()) {
 			return runtimeSQLiteFailureResult(resultType, sqliteFailure("Query", nil, "transaction is no longer active")), nil, true
 		}
 		queryVal := frame.locals["Query"]
 		sqlText := queryVal.fields["SQL"].scalar.(string)
 		maxRows := queryVal.fields["MaxRows"].scalar.(int64)
 		maxBytes := queryVal.fields["MaxBytes"].scalar.(int64)
-
 		if maxRows <= 0 || maxBytes <= 0 {
 			return runtimeSQLiteFailureResult(resultType, sqliteFailure("Query", nil, "MaxRows and MaxBytes must be greater than zero")), nil, true
 		}
-
 		if f := validateSingleSQL(sqlText, "Query"); f != nil {
 			return runtimeSQLiteFailureResult(resultType, f), nil, true
 		}
-
 		paramElements := queryVal.fields["Parameters"].elements
 		params := make([]any, len(paramElements))
 		for i, el := range paramElements {
@@ -624,19 +637,16 @@ func (p *program) callNativeStdSQLite(function *functionDecl, frame *runtimeFram
 			}
 			params[i] = sqlVal
 		}
-
 		self.transaction.mu.Lock()
 		defer self.transaction.mu.Unlock()
-		if self.transaction.closed || self.transaction.state != 0 {
+		if sqliteTxInactive(self.transaction) {
 			return runtimeSQLiteFailureResult(resultType, sqliteFailure("Query", nil, "transaction is no longer active")), nil, true
 		}
-
 		rows, err := self.transaction.tx.Query(sqlText, params...)
 		if err != nil {
 			return runtimeSQLiteFailureResult(resultType, sqliteFailureFromError("Query", err)), nil, true
 		}
 		defer rows.Close()
-
 		rowList, failure := p.scanSQLiteRows(rows, maxRows, maxBytes)
 		if failure != nil {
 			return runtimeSQLiteFailureResult(resultType, failure), nil, true
@@ -645,36 +655,46 @@ func (p *program) callNativeStdSQLite(function *functionDecl, frame *runtimeFram
 
 	case nativeStdSQLiteTransactionCommit:
 		self := frame.locals["self"].sqlite
-		if self == nil || self.transaction == nil || self.transaction.closed || self.transaction.state != 0 {
+		if sqliteTxInactive(func() *nativeSQLiteTransaction {
+			if self == nil {
+				return nil
+			}
+			return self.transaction
+		}()) {
 			return runtimeSQLiteFailureResult(resultType, sqliteFailure("Commit", nil, "transaction is no longer active")), nil, true
 		}
-
 		self.transaction.mu.Lock()
 		defer self.transaction.mu.Unlock()
-		if self.transaction.closed || self.transaction.state != 0 {
+		if sqliteTxInactive(self.transaction) {
 			return runtimeSQLiteFailureResult(resultType, sqliteFailure("Commit", nil, "transaction is no longer active")), nil, true
 		}
-
-		self.transaction.state = 1 // committed
-		if err := self.transaction.tx.Commit(); err != nil {
+		self.transaction.state = 1
+		err := self.transaction.tx.Commit()
+		sqliteClearActiveTx(self.transaction.db, self.transaction)
+		if err != nil {
 			return runtimeSQLiteFailureResult(resultType, sqliteFailureFromError("Commit", err)), nil, true
 		}
 		return runtimeResultValue(resultType, true, nullRuntimeValue()), nil, true
 
 	case nativeStdSQLiteTransactionRollback:
 		self := frame.locals["self"].sqlite
-		if self == nil || self.transaction == nil || self.transaction.closed || self.transaction.state != 0 {
+		if sqliteTxInactive(func() *nativeSQLiteTransaction {
+			if self == nil {
+				return nil
+			}
+			return self.transaction
+		}()) {
 			return runtimeSQLiteFailureResult(resultType, sqliteFailure("Rollback", nil, "transaction is no longer active")), nil, true
 		}
-
 		self.transaction.mu.Lock()
 		defer self.transaction.mu.Unlock()
-		if self.transaction.closed || self.transaction.state != 0 {
+		if sqliteTxInactive(self.transaction) {
 			return runtimeSQLiteFailureResult(resultType, sqliteFailure("Rollback", nil, "transaction is no longer active")), nil, true
 		}
-
-		self.transaction.state = 2 // rolled back
-		if err := self.transaction.tx.Rollback(); err != nil {
+		self.transaction.state = 2
+		err := self.transaction.tx.Rollback()
+		sqliteClearActiveTx(self.transaction.db, self.transaction)
+		if err != nil {
 			return runtimeSQLiteFailureResult(resultType, sqliteFailureFromError("Rollback", err)), nil, true
 		}
 		return runtimeResultValue(resultType, true, nullRuntimeValue()), nil, true
@@ -684,7 +704,6 @@ func (p *program) callNativeStdSQLite(function *functionDecl, frame *runtimeFram
 		if self == nil || self.transaction == nil || self.transaction.closed {
 			return nullRuntimeValue(), nil, true
 		}
-
 		self.transaction.mu.Lock()
 		defer self.transaction.mu.Unlock()
 		if self.transaction.closed {
@@ -692,8 +711,10 @@ func (p *program) callNativeStdSQLite(function *functionDecl, frame *runtimeFram
 		}
 		self.transaction.closed = true
 		if self.transaction.state == 0 {
-			self.transaction.state = 2 // rollback on uncommitted close
-			if err := self.transaction.tx.Rollback(); err != nil {
+			self.transaction.state = 2
+			err := self.transaction.tx.Rollback()
+			sqliteClearActiveTx(self.transaction.db, self.transaction)
+			if err != nil {
 				failure := sqliteFailureFromError("Close", err)
 				return runtimeValue{}, &slickThrow{typ: stdSQLiteFailureName, message: failure.message, value: runtimeSQLiteFailureValue(failure)}, true
 			}
@@ -741,16 +762,18 @@ func (p *program) scanSQLiteRows(rows *sql.Rows, maxRows, maxBytes int64) ([]run
 
 		entries := make([]runtimeMapEntry, len(cols))
 		for i, col := range cols {
-			slickVal := convertSQLValueToSlick(p, dest[i])
+			slickVal, convertFail := convertSQLValueToSlick(p, dest[i])
+			if convertFail != nil {
+				return nil, convertFail
+			}
 			switch slickVal.variant.name {
 			case "Text":
 				cumulativeBytes += int64(len(slickVal.variant.fields[0].scalar.(string)))
 			case "Blob":
 				cumulativeBytes += int64(len(slickVal.variant.fields[0].scalar.([]byte)))
 			default:
-				cumulativeBytes += 8 // primitive/null fixed estimate
+				cumulativeBytes += 8
 			}
-
 			if cumulativeBytes > maxBytes {
 				return nil, sqliteFailure("Query", nil, fmt.Sprintf("query exceeded maximum byte limit of %d", maxBytes))
 			}
@@ -798,11 +821,13 @@ func (g *goGenerator) emitSQLiteRuntimeSupport() {
 	beginResult := g.goType("Result<" + stdSQLiteTransactionName + "," + stdSQLiteFailureName + ">")
 	voidResult := g.goType("Result<null," + stdSQLiteFailureName + ">")
 
+	g.line(`var slickSQLiteMemorySeq atomic.Uint64`)
 	g.line(`type slickSQLiteDatabase struct {`)
-	g.line(`	mu     sync.Mutex`)
-	g.line(`	db     *sql.DB`)
-	g.line(`	path   string`)
-	g.line(`	closed bool`)
+	g.line(`	mu       sync.Mutex`)
+	g.line(`	db       *sql.DB`)
+	g.line(`	path     string`)
+	g.line(`	closed   bool`)
+	g.line(`	activeTx *slickSQLiteTransaction`)
 	g.line(`}`)
 	g.line(``)
 	g.line(`type slickSQLiteTransaction struct {`)
@@ -811,6 +836,16 @@ func (g *goGenerator) emitSQLiteRuntimeSupport() {
 	g.line(`	db     *slickSQLiteDatabase`)
 	g.line(`	state  int`)
 	g.line(`	closed bool`)
+	g.line(`}`)
+	g.line(`func slickSQLiteOpenDSN(path string) string {`)
+	g.line(`	if path != ":memory:" { return path }`)
+	g.line(`	return fmt.Sprintf("file:slick-memory-%%d?mode=memory&cache=shared", slickSQLiteMemorySeq.Add(1))`)
+	g.line(`}`)
+	g.line(`func slickSQLiteTxInactive(tx *slickSQLiteTransaction) bool {`)
+	g.line(`	return tx == nil || tx.closed || tx.state != 0 || tx.db == nil || tx.db.closed`)
+	g.line(`}`)
+	g.line(`func slickSQLiteClearActive(db *slickSQLiteDatabase, tx *slickSQLiteTransaction) {`)
+	g.line(`	if db != nil && db.activeTx == tx { db.activeTx = nil }`)
 	g.line(`}`)
 	g.line(``)
 	g.line(`func slickSQLiteFailure(op string, code *int64, msg string) *%s {`, failureClass)
@@ -877,18 +912,22 @@ func (g *goGenerator) emitSQLiteRuntimeSupport() {
 	g.line(`	}`)
 	g.line(`}`)
 	g.line(``)
-	g.line(`func slickSQLiteConvertSQLToValue(val any) *%s {`, valueUnion)
-	g.line(`	if val == nil { return &%s{slickTag: 1} }`, valueUnion)
+	g.line(`func slickSQLiteConvertSQLToValue(val any) (*%s, *%s) {`, valueUnion, failureClass)
+	g.line(`	if val == nil { return &%s{slickTag: 1}, nil }`, valueUnion)
 	g.line(`	switch v := val.(type) {`)
-	g.line(`	case int64: return &%s{slickTag: 2, %s: v}`, valueUnion, goVariantFieldName("Integer", "Value"))
-	g.line(`	case float64: return &%s{slickTag: 3, %s: v}`, valueUnion, goVariantFieldName("Float", "Value"))
-	g.line(`	case string: return &%s{slickTag: 4, %s: v}`, valueUnion, goVariantFieldName("Text", "Value"))
-	g.line(`	case []byte: return &%s{slickTag: 5, %s: append(slickBytes(nil), v...)}`, valueUnion, goVariantFieldName("Blob", "Value"))
+	g.line(`	case int64: return &%s{slickTag: 2, %s: v}, nil`, valueUnion, goVariantFieldName("Integer", "Value"))
+	g.line(`	case float64:`)
+	g.line(`		if math.IsNaN(v) || math.IsInf(v, 0) { return nil, slickSQLiteFailure("Query", nil, "query returned a non-finite floating-point value") }`)
+	g.line(`		return &%s{slickTag: 3, %s: v}, nil`, valueUnion, goVariantFieldName("Float", "Value"))
+	g.line(`	case string:`)
+	g.line(`		if !utf8.ValidString(v) { return nil, slickSQLiteFailure("Query", nil, "query returned invalid UTF-8 text") }`)
+	g.line(`		return &%s{slickTag: 4, %s: v}, nil`, valueUnion, goVariantFieldName("Text", "Value"))
+	g.line(`	case []byte: return &%s{slickTag: 5, %s: append(slickBytes(nil), v...)}, nil`, valueUnion, goVariantFieldName("Blob", "Value"))
 	g.line(`	case bool:`)
 	g.line(`		var intVal int64`)
 	g.line(`		if v { intVal = 1 }`)
-	g.line(`		return &%s{slickTag: 2, %s: intVal}`, valueUnion, goVariantFieldName("Integer", "Value"))
-	g.line(`	default: return &%s{slickTag: 4, %s: fmt.Sprint(v)}`, valueUnion, goVariantFieldName("Text", "Value"))
+	g.line(`		return &%s{slickTag: 2, %s: intVal}, nil`, valueUnion, goVariantFieldName("Integer", "Value"))
+	g.line(`	default: return nil, slickSQLiteFailure("Query", nil, "query returned an unsupported SQLite value")`)
 	g.line(`	}`)
 	g.line(`}`)
 	g.line(``)
@@ -912,7 +951,8 @@ func (g *goGenerator) emitSQLiteRuntimeSupport() {
 	g.line(`		if err := rows.Scan(destPointers...); err != nil { return nil, slickSQLiteFailureFromError("Query", err) }`)
 	g.line(`		entries := make([]slickMapEntry[string, *%s], len(cols))`, valueUnion)
 	g.line(`		for i, col := range cols {`)
-	g.line(`			slickVal := slickSQLiteConvertSQLToValue(dest[i])`)
+	g.line(`			slickVal, convertFail := slickSQLiteConvertSQLToValue(dest[i])`)
+	g.line(`			if convertFail != nil { return nil, convertFail }`)
 	g.line(`			switch slickVal.slickTag {`)
 	g.line(`			case 4: cumulativeBytes += int64(len(slickVal.%s))`, goVariantFieldName("Text", "Value"))
 	g.line(`			case 5: cumulativeBytes += int64(len(slickVal.%s))`, goVariantFieldName("Blob", "Value"))
@@ -938,10 +978,8 @@ func (g *goGenerator) emitSQLiteRuntimeSupport() {
 	g.line(`			}`)
 	g.line(`		}`)
 	g.line(`	}`)
-	g.line(`	dsn := path`)
-	g.line(`	db, err := sql.Open("sqlite", dsn)`)
+	g.line(`	db, err := sql.Open("sqlite", slickSQLiteOpenDSN(path))`)
 	g.line(`	if err != nil { return %s{failure: slickSQLiteFailureFromError("Open", err)}, nil }`, openResult)
-	g.line(`	if path == ":memory:" { db.SetMaxOpenConns(1) }`)
 	g.line(`	if err := db.Ping(); err != nil { _ = db.Close(); return %s{failure: slickSQLiteFailureFromError("Open", err)}, nil }`, openResult)
 	g.line(`	return %s{ok: true, value: %s{slickResource: &slickSQLiteDatabase{db: db, path: path}}}, nil`, openResult, databaseClass)
 	g.line(`}`)
@@ -957,12 +995,13 @@ func (g *goGenerator) emitSQLiteRuntimeSupport() {
 	g.line(`	}`)
 	g.line(`	res.mu.Lock(); defer res.mu.Unlock()`)
 	g.line(`	if res.closed { return %s{failure: slickSQLiteFailure("Execute", nil, "database is closed")} }`, execResult)
+	g.line(`	if res.activeTx != nil && !res.activeTx.closed && res.activeTx.state == 0 { return %s{failure: slickSQLiteFailure("Execute", nil, "a transaction is already active")} }`, execResult)
 	g.line(`	execRes, err := res.db.Exec(stmt.%s, params...)`, goFieldName("SQL"))
 	g.line(`	if err != nil { return %s{failure: slickSQLiteFailureFromError("Execute", err)} }`, execResult)
 	g.line(`	rowsAffected, _ := execRes.RowsAffected()`)
-	g.line(`	lastInsertId, _ := execRes.LastInsertId()`)
+	g.line(`	lastInsertId, lastErr := execRes.LastInsertId()`)
 	g.line(`	optId := slickNone[int64]()`)
-	g.line(`	if lastInsertId != 0 { optId = slickSome(lastInsertId) }`)
+	g.line(`	if lastErr == nil { optId = slickSome(lastInsertId) }`)
 	g.line(`	return %s{ok: true, value: %s{%s: rowsAffected, %s: optId}}`, execResult, executionClass, goFieldName("RowsAffected"), goFieldName("LastInsertId"))
 	g.line(`}`)
 	g.line(``)
@@ -978,6 +1017,7 @@ func (g *goGenerator) emitSQLiteRuntimeSupport() {
 	g.line(`	}`)
 	g.line(`	res.mu.Lock(); defer res.mu.Unlock()`)
 	g.line(`	if res.closed { return %s{failure: slickSQLiteFailure("Query", nil, "database is closed")} }`, queryResult)
+	g.line(`	if res.activeTx != nil && !res.activeTx.closed && res.activeTx.state == 0 { return %s{failure: slickSQLiteFailure("Query", nil, "a transaction is already active")} }`, queryResult)
 	g.line(`	rows, err := res.db.Query(q.%s, params...)`, goFieldName("SQL"))
 	g.line(`	if err != nil { return %s{failure: slickSQLiteFailureFromError("Query", err)} }`, queryResult)
 	g.line(`	defer rows.Close()`)
@@ -990,9 +1030,12 @@ func (g *goGenerator) emitSQLiteRuntimeSupport() {
 	g.line(`	if res == nil || res.db == nil || res.closed { return %s{failure: slickSQLiteFailure("Begin", nil, "database is closed")} }`, beginResult)
 	g.line(`	res.mu.Lock(); defer res.mu.Unlock()`)
 	g.line(`	if res.closed { return %s{failure: slickSQLiteFailure("Begin", nil, "database is closed")} }`, beginResult)
+	g.line(`	if res.activeTx != nil && !res.activeTx.closed && res.activeTx.state == 0 { return %s{failure: slickSQLiteFailure("Begin", nil, "a transaction is already active")} }`, beginResult)
 	g.line(`	tx, err := res.db.Begin()`)
 	g.line(`	if err != nil { return %s{failure: slickSQLiteFailureFromError("Begin", err)} }`, beginResult)
-	g.line(`	return %s{ok: true, value: %s{slickResource: &slickSQLiteTransaction{tx: tx, db: res, state: 0}}}`, beginResult, transactionClass)
+	g.line(`	nativeTx := &slickSQLiteTransaction{tx: tx, db: res, state: 0}`)
+	g.line(`	res.activeTx = nativeTx`)
+	g.line(`	return %s{ok: true, value: %s{slickResource: nativeTx}}`, beginResult, transactionClass)
 	g.line(`}`)
 	g.line(``)
 	g.line(`func slickSQLiteDBClose(res *slickSQLiteDatabase) error {`)
@@ -1000,12 +1043,14 @@ func (g *goGenerator) emitSQLiteRuntimeSupport() {
 	g.line(`	res.mu.Lock(); defer res.mu.Unlock()`)
 	g.line(`	if res.closed { return nil }`)
 	g.line(`	res.closed = true`)
+	g.line(`	if active := res.activeTx; active != nil && !active.closed && active.state == 0 { active.closed = true; active.state = 2; _ = active.tx.Rollback() }`)
+	g.line(`	res.activeTx = nil`)
 	g.line(`	if err := res.db.Close(); err != nil { return slickSQLiteFailureFromError("Close", err) }`)
 	g.line(`	return nil`)
 	g.line(`}`)
 	g.line(``)
 	g.line(`func slickSQLiteTxExecute(res *slickSQLiteTransaction, stmt %s) %s {`, statementClass, execResult)
-	g.line(`	if res == nil || res.tx == nil || res.closed || res.state != 0 { return %s{failure: slickSQLiteFailure("Execute", nil, "transaction is no longer active")} }`, execResult)
+	g.line(`	if slickSQLiteTxInactive(res) { return %s{failure: slickSQLiteFailure("Execute", nil, "transaction is no longer active")} }`, execResult)
 	g.line(`	if f := slickSQLiteValidateSingleSQL(stmt.%s, "Execute"); f != nil { return %s{failure: f} }`, goFieldName("SQL"), execResult)
 	g.line(`	params := make([]any, len(stmt.%s))`, goFieldName("Parameters"))
 	g.line(`	for i, el := range stmt.%s {`, goFieldName("Parameters"))
@@ -1014,18 +1059,18 @@ func (g *goGenerator) emitSQLiteRuntimeSupport() {
 	g.line(`		params[i] = sqlVal`)
 	g.line(`	}`)
 	g.line(`	res.mu.Lock(); defer res.mu.Unlock()`)
-	g.line(`	if res.closed || res.state != 0 { return %s{failure: slickSQLiteFailure("Execute", nil, "transaction is no longer active")} }`, execResult)
+	g.line(`	if slickSQLiteTxInactive(res) { return %s{failure: slickSQLiteFailure("Execute", nil, "transaction is no longer active")} }`, execResult)
 	g.line(`	execRes, err := res.tx.Exec(stmt.%s, params...)`, goFieldName("SQL"))
 	g.line(`	if err != nil { return %s{failure: slickSQLiteFailureFromError("Execute", err)} }`, execResult)
 	g.line(`	rowsAffected, _ := execRes.RowsAffected()`)
-	g.line(`	lastInsertId, _ := execRes.LastInsertId()`)
+	g.line(`	lastInsertId, lastErr := execRes.LastInsertId()`)
 	g.line(`	optId := slickNone[int64]()`)
-	g.line(`	if lastInsertId != 0 { optId = slickSome(lastInsertId) }`)
+	g.line(`	if lastErr == nil { optId = slickSome(lastInsertId) }`)
 	g.line(`	return %s{ok: true, value: %s{%s: rowsAffected, %s: optId}}`, execResult, executionClass, goFieldName("RowsAffected"), goFieldName("LastInsertId"))
 	g.line(`}`)
 	g.line(``)
 	g.line(`func slickSQLiteTxQuery(res *slickSQLiteTransaction, q %s) %s {`, queryClass, queryResult)
-	g.line(`	if res == nil || res.tx == nil || res.closed || res.state != 0 { return %s{failure: slickSQLiteFailure("Query", nil, "transaction is no longer active")} }`, queryResult)
+	g.line(`	if slickSQLiteTxInactive(res) { return %s{failure: slickSQLiteFailure("Query", nil, "transaction is no longer active")} }`, queryResult)
 	g.line(`	if q.%s <= 0 || q.%s <= 0 { return %s{failure: slickSQLiteFailure("Query", nil, "MaxRows and MaxBytes must be greater than zero")} }`, goFieldName("MaxRows"), goFieldName("MaxBytes"), queryResult)
 	g.line(`	if f := slickSQLiteValidateSingleSQL(q.%s, "Query"); f != nil { return %s{failure: f} }`, goFieldName("SQL"), queryResult)
 	g.line(`	params := make([]any, len(q.%s))`, goFieldName("Parameters"))
@@ -1035,7 +1080,7 @@ func (g *goGenerator) emitSQLiteRuntimeSupport() {
 	g.line(`		params[i] = sqlVal`)
 	g.line(`	}`)
 	g.line(`	res.mu.Lock(); defer res.mu.Unlock()`)
-	g.line(`	if res.closed || res.state != 0 { return %s{failure: slickSQLiteFailure("Query", nil, "transaction is no longer active")} }`, queryResult)
+	g.line(`	if slickSQLiteTxInactive(res) { return %s{failure: slickSQLiteFailure("Query", nil, "transaction is no longer active")} }`, queryResult)
 	g.line(`	rows, err := res.tx.Query(q.%s, params...)`, goFieldName("SQL"))
 	g.line(`	if err != nil { return %s{failure: slickSQLiteFailureFromError("Query", err)} }`, queryResult)
 	g.line(`	defer rows.Close()`)
@@ -1045,20 +1090,24 @@ func (g *goGenerator) emitSQLiteRuntimeSupport() {
 	g.line(`}`)
 	g.line(``)
 	g.line(`func slickSQLiteTxCommit(res *slickSQLiteTransaction) %s {`, voidResult)
-	g.line(`	if res == nil || res.tx == nil || res.closed || res.state != 0 { return %s{failure: slickSQLiteFailure("Commit", nil, "transaction is no longer active")} }`, voidResult)
+	g.line(`	if slickSQLiteTxInactive(res) { return %s{failure: slickSQLiteFailure("Commit", nil, "transaction is no longer active")} }`, voidResult)
 	g.line(`	res.mu.Lock(); defer res.mu.Unlock()`)
-	g.line(`	if res.closed || res.state != 0 { return %s{failure: slickSQLiteFailure("Commit", nil, "transaction is no longer active")} }`, voidResult)
+	g.line(`	if slickSQLiteTxInactive(res) { return %s{failure: slickSQLiteFailure("Commit", nil, "transaction is no longer active")} }`, voidResult)
 	g.line(`	res.state = 1`)
-	g.line(`	if err := res.tx.Commit(); err != nil { return %s{failure: slickSQLiteFailureFromError("Commit", err)} }`, voidResult)
+	g.line(`	err := res.tx.Commit()`)
+	g.line(`	slickSQLiteClearActive(res.db, res)`)
+	g.line(`	if err != nil { return %s{failure: slickSQLiteFailureFromError("Commit", err)} }`, voidResult)
 	g.line(`	return %s{ok: true, value: struct{}{}}`, voidResult)
 	g.line(`}`)
 	g.line(``)
 	g.line(`func slickSQLiteTxRollback(res *slickSQLiteTransaction) %s {`, voidResult)
-	g.line(`	if res == nil || res.tx == nil || res.closed || res.state != 0 { return %s{failure: slickSQLiteFailure("Rollback", nil, "transaction is no longer active")} }`, voidResult)
+	g.line(`	if slickSQLiteTxInactive(res) { return %s{failure: slickSQLiteFailure("Rollback", nil, "transaction is no longer active")} }`, voidResult)
 	g.line(`	res.mu.Lock(); defer res.mu.Unlock()`)
-	g.line(`	if res.closed || res.state != 0 { return %s{failure: slickSQLiteFailure("Rollback", nil, "transaction is no longer active")} }`, voidResult)
+	g.line(`	if slickSQLiteTxInactive(res) { return %s{failure: slickSQLiteFailure("Rollback", nil, "transaction is no longer active")} }`, voidResult)
 	g.line(`	res.state = 2`)
-	g.line(`	if err := res.tx.Rollback(); err != nil { return %s{failure: slickSQLiteFailureFromError("Rollback", err)} }`, voidResult)
+	g.line(`	err := res.tx.Rollback()`)
+	g.line(`	slickSQLiteClearActive(res.db, res)`)
+	g.line(`	if err != nil { return %s{failure: slickSQLiteFailureFromError("Rollback", err)} }`, voidResult)
 	g.line(`	return %s{ok: true, value: struct{}{}}`, voidResult)
 	g.line(`}`)
 	g.line(``)
@@ -1069,7 +1118,9 @@ func (g *goGenerator) emitSQLiteRuntimeSupport() {
 	g.line(`	res.closed = true`)
 	g.line(`	if res.state == 0 {`)
 	g.line(`		res.state = 2`)
-	g.line(`		if err := res.tx.Rollback(); err != nil { return slickSQLiteFailureFromError("Close", err) }`)
+	g.line(`		err := res.tx.Rollback()`)
+	g.line(`		slickSQLiteClearActive(res.db, res)`)
+	g.line(`		if err != nil { return slickSQLiteFailureFromError("Close", err) }`)
 	g.line(`	}`)
 	g.line(`	return nil`)
 	g.line(`}`)
