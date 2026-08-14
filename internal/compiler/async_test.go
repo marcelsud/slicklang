@@ -451,13 +451,13 @@ class Resource {
     }
 }
 function Open(URL: string) -> Resource { Resource { URL: URL } }
-function Consume(Resource: Resource) -> null {
-    let Response = std.http.Fetch(std.http.Request { Method: "POST" URL: Resource.URL + "/consume" })
+function Consume(URL: string) -> null {
+    let Response = std.http.Fetch(std.http.Request { Method: "POST" URL: URL + "/consume" })
     null
 }
 function Run(URL: string) -> null {
     using Resource = Open(URL) {
-        async let Work = Consume(Resource)
+        async let Work = Consume(URL)
         let Ready = std.http.Fetch(std.http.Request { Method: "GET" URL: URL + "/wait" })
         return null
     }

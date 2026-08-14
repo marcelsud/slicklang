@@ -1,0 +1,37 @@
+class EchoHandler implements std.http.server.Handler {
+    function Handle(Request: std.http.server.Request) -> std.http.server.Response {
+        let BodyText = match std.bytes.ToUtf8(Request.Body) {
+            Ok(Text) => Text
+            Err(_) => ""
+        }
+        let Greeting = `Hello from Slick HTTP server! Method=${Request.Method} Path=${Request.Path} Body=${BodyText}`
+        std.http.server.Response {
+            Status: 200
+            Headers: map {
+                "Content-Type": ["text/plain; charset=utf-8"]
+            }
+            Body: std.bytes.FromUtf8(Greeting)
+        }
+    }
+}
+
+function Run(Address: string) -> Result<null, std.http.server.Failure> {
+    std.http.server.Serve(std.http.server.Config {
+        Address: Address
+        MaxHeaderBytes: 1048576
+        MaxBodyBytes: 8388608
+    }, EchoHandler {})
+}
+
+function main() -> string {
+    let Address = std.env.Get("SLICK_HTTP_SERVER_ADDR")
+
+    if (Address == null) {
+        "set SLICK_HTTP_SERVER_ADDR"
+    } else {
+        match Run(Address) {
+            Ok(_) => "server stopped cleanly"
+            Err(Failure) => `${Failure.Operation}: ${Failure.Message}`
+        }
+    }
+}

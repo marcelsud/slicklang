@@ -14,6 +14,7 @@ const (
 	annotationTargetMethod    annotationTarget = "method"
 	annotationTargetParameter annotationTarget = "parameter"
 	annotationTargetFunction  annotationTarget = "function"
+	annotationTargetField     annotationTarget = "field"
 )
 
 // annotationUse is one authored @Name application. resolved records the
@@ -76,6 +77,7 @@ type annotationTargetRef struct {
 	annotations    []*annotationUse
 	instance       bool
 	class          *classDecl
+	fieldName      string
 	method         *methodSignature
 	function       *functionDecl
 	parameter      *paramDecl
@@ -599,6 +601,13 @@ func (p *program) annotationTargets() []annotationTargetRef {
 			class := classes[name]
 			instance := class.instanceOf != ""
 			targets = append(targets, annotationTargetRef{kind: annotationTargetClass, name: class.qualified, pos: class.pos, namespace: class.namespace, aliases: class.aliases, annotations: class.annotations, instance: instance, class: class})
+			for _, fieldName := range sortedKeys(class.fields) {
+				field := class.fields[fieldName]
+				if len(field.annotations) == 0 {
+					continue
+				}
+				targets = append(targets, annotationTargetRef{kind: annotationTargetField, name: class.qualified + "." + field.name, pos: field.pos, namespace: class.namespace, aliases: class.aliases, annotations: field.annotations, instance: instance, class: class, fieldName: field.name})
+			}
 			for _, methodName := range sortedKeys(class.methods) {
 				method := class.methods[methodName]
 				function := class.implementations[method.name]

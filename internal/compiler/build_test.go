@@ -39,6 +39,7 @@ var exampleOutputs = map[string]string{
 	"using":              "value;ABC",
 	"visibility":         "Ada:[private]; Ada: 1500 cents",
 	"std-sqlite":         "todo: ship sqlite",
+	"std-http-server":    "set SLICK_HTTP_SERVER_ADDR",
 }
 
 func examplePath(project string) string {

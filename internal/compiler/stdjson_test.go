@@ -675,3 +675,262 @@ function main() -> string? {
 `)
 	assertNoDiagnostics(t, diagnostics)
 }
+
+func TestStdJsonNameWireContract(t *testing.T) {
+	source := `
+class User {
+    @std.json.Name("display_name")
+    DisplayName: string
+
+    @std.json.Name("avatarURL")
+    AvatarURL: string?
+
+    Id: int
+}
+
+function main() -> string {
+    match std.json.Decode<User>("{\"display_name\":\"Ada\",\"avatarURL\":\"x\",\"Id\":7}") {
+        Ok(Value) => match std.json.Encode<User>(Value) {
+            Ok(Text) => Text
+            Err(Failure) => Failure.Message
+        }
+        Err(Failure) => Failure.Path + ":" + Failure.Message
+    }
+}
+`
+	output := runResultEverywhere(t, source)
+	if output != `{"Id":7,"avatarURL":"x","display_name":"Ada"}` {
+		t.Fatalf("unexpected named JSON %q", output)
+	}
+}
+
+func TestStdJsonNameRejectsSourceSpelling(t *testing.T) {
+	output := runResultEverywhere(t, `
+class User {
+    @std.json.Name("title")
+    Title: string
+}
+
+function main() -> string {
+    match std.json.Decode<User>("{\"Title\":\"nope\"}") {
+        Ok(_) => "ok"
+        Err(Failure) => Failure.Path + ":" + Failure.Message
+    }
+}
+`)
+	if output != "$.Title:unknown field" {
+		t.Fatalf("source spelling should be unknown, found %q", output)
+	}
+}
+
+func TestStdJsonNameMissingRequiredUsesWirePath(t *testing.T) {
+	output := runResultEverywhere(t, `
+class User {
+    @std.json.Name("title")
+    Title: string
+}
+
+function main() -> string {
+    match std.json.Decode<User>("{}") {
+        Ok(_) => "ok"
+        Err(Failure) => Failure.Path + ":" + Failure.Message
+    }
+}
+`)
+	if output != "$.title:missing required field" {
+		t.Fatalf("missing field path %q", output)
+	}
+}
+
+func TestStdJsonNameOnGenericField(t *testing.T) {
+	output := runResultEverywhere(t, `
+class Box<T> {
+    Value: T
+}
+
+class Payload {
+    @std.json.Name("box")
+    Box: Box<int>
+}
+
+function main() -> string {
+    match std.json.Decode<Payload>("{\"box\":{\"Value\":3}}") {
+        Ok(Value) => match std.json.Encode<Payload>(Value) {
+            Ok(Text) => Text
+            Err(Failure) => Failure.Message
+        }
+        Err(Failure) => Failure.Path + ":" + Failure.Message
+    }
+}
+`)
+	if output != `{"box":{"Value":3}}` {
+		t.Fatalf("generic field JSON %q", output)
+	}
+}
+
+func TestStdJsonNameOnGenericClass(t *testing.T) {
+	output := runResultEverywhere(t, `
+class Box<T> {
+    @std.json.Name("v")
+    Value: T
+}
+
+function main() -> string {
+    match std.json.Decode<Box<int>>("{\"v\":9}") {
+        Ok(Value) => match std.json.Encode<Box<int>>(Value) {
+            Ok(Text) => Text
+            Err(Failure) => Failure.Message
+        }
+        Err(Failure) => Failure.Path + ":" + Failure.Message
+    }
+}
+`)
+	if output != `{"v":9}` {
+		t.Fatalf("generic class JSON %q", output)
+	}
+}
+
+func TestStdJsonNameSwap(t *testing.T) {
+	output := runResultEverywhere(t, `
+class Pair {
+    @std.json.Name("B")
+    A: int
+    @std.json.Name("A")
+    B: int
+}
+
+function main() -> string {
+    match std.json.Decode<Pair>("{\"A\":2,\"B\":1}") {
+        Ok(Value) => match std.json.Encode<Pair>(Value) {
+            Ok(Text) => Text
+            Err(Failure) => Failure.Message
+        }
+        Err(Failure) => Failure.Path + ":" + Failure.Message
+    }
+}
+`)
+	if output != `{"A":2,"B":1}` {
+		t.Fatalf("swapped JSON %q", output)
+	}
+}
+
+func TestStdJsonNameDiagnostics(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		code    string
+		message string
+	}{
+		{
+			name: "empty name",
+			source: `
+class User {
+    @std.json.Name("")
+    Title: string
+}
+function main() -> null { null }
+`,
+			code:    "SLK417",
+			message: "requires a non-empty string",
+		},
+		{
+			name: "wrong target",
+			source: `
+@std.json.Name("title")
+class User {
+    Title: string
+}
+function main() -> null { null }
+`,
+			code:    "SLK416",
+			message: "cannot target a class",
+		},
+		{
+			name: "duplicate annotation",
+			source: `
+class User {
+    @std.json.Name("a")
+    @std.json.Name("b")
+    Title: string
+}
+function main() -> null { null }
+`,
+			code:    "SLK416",
+			message: "cannot repeat",
+		},
+		{
+			name: "wire collision",
+			source: `
+class User {
+    @std.json.Name("Title")
+    Name: string
+    Title: string
+}
+function main() -> null { null }
+`,
+			code:    "SLK415",
+			message: "already used by field Title",
+		},
+		{
+			name: "private field",
+			source: `
+class User {
+    @std.json.Name("hidden")
+    secret: string
+}
+function main() -> null { null }
+`,
+			code:    "SLK416",
+			message: "can only target a public field",
+		},
+		{
+			name: "never-json generic",
+			source: `
+class Bag<T> {
+    @std.json.Name("raw")
+    Data: bytes
+    Extra: T
+}
+function main() -> null { null }
+`,
+			code:    "SLK416",
+			message: "requires a class accepted by std.json",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assertDiagnostic(t, checkResult(t, test.source), test.code, test.message)
+		})
+	}
+}
+
+func TestStdJsonNameFormatting(t *testing.T) {
+	source := compiler.Source{Name: "main.slk", Namespace: "root", Text: `class User { /// Title docs.
+@std.json.Name( "title" ) Title : string }
+function main() -> null { null }`}
+	formatted, diagnostics, err := compiler.Format(source)
+	if err != nil {
+		t.Fatalf("format: %v", err)
+	}
+	assertNoDiagnostics(t, diagnostics)
+	want := `class User { /// Title docs.
+    @std.json.Name("title")
+    Title: string
+}
+
+function main() -> null {
+    null
+}
+`
+	if formatted != want {
+		t.Fatalf("formatted:\n%s\nwant:\n%s", formatted, want)
+	}
+	again, diagnostics, err := compiler.Format(compiler.Source{Name: source.Name, Namespace: source.Namespace, Text: formatted})
+	if err != nil {
+		t.Fatalf("reformat: %v", err)
+	}
+	assertNoDiagnostics(t, diagnostics)
+	if again != formatted {
+		t.Fatalf("format is not a fixed point:\n%s", again)
+	}
+}
