@@ -203,7 +203,11 @@ func (p *program) generateGo() (string, error) {
 		callArguments = append(callArguments, "os.Args[1:]")
 	}
 	generator.line("func main() {")
-	generator.line("value, err := %s(%s)", goFunctionName(main.qualified), strings.Join(callArguments, ", "))
+	if resultType == "null" {
+		generator.line("_, err := %s(%s)", goFunctionName(main.qualified), strings.Join(callArguments, ", "))
+	} else {
+		generator.line("value, err := %s(%s)", goFunctionName(main.qualified), strings.Join(callArguments, ", "))
+	}
 	generator.line("if err != nil {")
 	generator.line("fmt.Fprintln(os.Stderr, err)")
 	generator.line("os.Exit(1)")

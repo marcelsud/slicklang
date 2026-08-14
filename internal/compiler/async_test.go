@@ -416,7 +416,7 @@ func TestAsyncReturnJoinsChildBeforeParentUsingCleanup(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			started := make(chan struct{}, 1)
-			childDone := make(chan struct{}, 1)
+			childDone := make(chan struct{})
 			var closes atomic.Int32
 			var cleanupEarly atomic.Bool
 			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -424,14 +424,14 @@ func TestAsyncReturnJoinsChildBeforeParentUsingCleanup(t *testing.T) {
 				case "/consume":
 					started <- struct{}{}
 					<-request.Context().Done()
-					childDone <- struct{}{}
+					close(childDone)
 				case "/wait":
 					<-started
 					_, _ = response.Write([]byte("ready"))
 				case "/close":
 					select {
 					case <-childDone:
-					default:
+					case <-time.After(100 * time.Millisecond):
 						cleanupEarly.Store(true)
 					}
 					closes.Add(1)
