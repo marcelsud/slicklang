@@ -1,0 +1,245 @@
+function JsonResponse(Status: int, BodyText: string) -> std.http.server.Response {
+    std.http.server.Response {
+        Status: Status
+        Headers: map {
+            "Content-Type": ["application/json"]
+        }
+        Body: std.bytes.FromUtf8(BodyText)
+    }
+}
+
+function ErrorResponseJson(Status: int, Message: string) -> std.http.server.Response {
+    let ErrorDto = ErrorResponse {
+        Error: Message
+    }
+    let Encoded = std.json.Encode<ErrorResponse>(ErrorDto)
+    let BodyText = match Encoded {
+        Ok(Text) => Text
+        Err(_) => "{\"error\":\"" + Message + "\"}"
+    }
+    JsonResponse(Status, BodyText)
+}
+
+function MethodNotAllowed(Allow: string) -> std.http.server.Response {
+    let ErrorDto = ErrorResponse {
+        Error: "method not allowed"
+    }
+    let Encoded = std.json.Encode<ErrorResponse>(ErrorDto)
+    let BodyText = match Encoded {
+        Ok(Text) => Text
+        Err(_) => "{\"error\":\"method not allowed\"}"
+    }
+    std.http.server.Response {
+        Status: 405
+        Headers: map {
+            "Content-Type": ["application/json"]
+            "Allow": [Allow]
+        }
+        Body: std.bytes.FromUtf8(BodyText)
+    }
+}
+
+function NoContentResponse() -> std.http.server.Response {
+    std.http.server.Response {
+        Status: 204
+        Headers: null
+        Body: std.bytes.FromUtf8("")
+    }
+}
+
+function EncodeHealth() -> std.http.server.Response {
+    let Health = HealthResponse {
+        Status: "ok"
+    }
+    let Encoded = std.json.Encode<HealthResponse>(Health)
+    match Encoded {
+        Ok(BodyText) => JsonResponse(200, BodyText)
+        Err(_) => ErrorResponseJson(500, "internal error")
+    }
+}
+
+function HandleHealth(Database: std.sqlite.Database) -> std.http.server.Response {
+    match CheckHealth(Database) {
+        Ok(_) => EncodeHealth()
+        Err(_) => ErrorResponseJson(500, "storage unavailable")
+    }
+}
+
+function EncodeTodoList(Todos: Todo[]) -> std.http.server.Response {
+    match std.json.Encode<Todo[]>(Todos) {
+        Ok(BodyText) => JsonResponse(200, BodyText)
+        Err(_) => ErrorResponseJson(500, "failed to encode response")
+    }
+}
+
+function HandleListTodos(Database: std.sqlite.Database) -> std.http.server.Response {
+    match ListTodos(Database, 100) {
+        Ok(Todos) => EncodeTodoList(Todos)
+        Err(_) => ErrorResponseJson(500, "storage error")
+    }
+}
+
+function EncodeCreatedTodo(Created: Todo) -> std.http.server.Response {
+    match std.json.Encode<Todo>(Created) {
+        Ok(BodyText) => JsonResponse(201, BodyText)
+        Err(_) => ErrorResponseJson(500, "failed to encode response")
+    }
+}
+
+function ProcessCreateTodo(Database: std.sqlite.Database, Payload: CreateTodo) -> std.http.server.Response {
+    let TrimmedTitle = std.text.Trim(Payload.Title)
+    if (TrimmedTitle == "") {
+        ErrorResponseJson(422, "title must not be empty")
+    } else {
+        match InsertTodo(Database, TrimmedTitle) {
+            Ok(Created) => EncodeCreatedTodo(Created)
+            Err(_) => ErrorResponseJson(500, "storage error")
+        }
+    }
+}
+
+function DecodeAndCreateTodo(Database: std.sqlite.Database, BodyString: string) -> std.http.server.Response {
+    match std.json.Decode<CreateTodo>(BodyString) {
+        Ok(Payload) => ProcessCreateTodo(Database, Payload)
+        Err(_) => ErrorResponseJson(400, "invalid json payload")
+    }
+}
+
+function HandleCreateTodo(Database: std.sqlite.Database, Body: bytes) -> std.http.server.Response {
+    match std.bytes.ToUtf8(Body) {
+        Ok(BodyString) => DecodeAndCreateTodo(Database, BodyString)
+        Err(_) => ErrorResponseJson(400, "invalid utf-8 body")
+    }
+}
+
+function EncodeTodo(Item: Todo) -> std.http.server.Response {
+    match std.json.Encode<Todo>(Item) {
+        Ok(BodyText) => JsonResponse(200, BodyText)
+        Err(_) => ErrorResponseJson(500, "failed to encode response")
+    }
+}
+
+function RespondWithFoundTodo(Found: Todo?) -> std.http.server.Response {
+    if (Found == null) {
+        ErrorResponseJson(404, "todo not found")
+    } else {
+        EncodeTodo(Found)
+    }
+}
+
+function HandleGetTodo(Database: std.sqlite.Database, Id: int) -> std.http.server.Response {
+    match GetTodo(Database, Id) {
+        Ok(Found) => RespondWithFoundTodo(Found)
+        Err(_) => ErrorResponseJson(500, "storage error")
+    }
+}
+
+function RunUpdateTodo(Database: std.sqlite.Database, Id: int, Title: string, Completed: bool) -> std.http.server.Response throws std.sqlite.Failure {
+    match UpdateTodoInTx(Database, Id, Title, Completed) {
+        Ok(Found) => RespondWithFoundTodo(Found)
+        Err(_) => ErrorResponseJson(500, "storage error")
+    }
+}
+
+function ProcessUpdateTodo(Database: std.sqlite.Database, Id: int, Payload: UpdateTodo) -> std.http.server.Response {
+    let TrimmedTitle = std.text.Trim(Payload.Title)
+    if (TrimmedTitle == "") {
+        ErrorResponseJson(422, "title must not be empty")
+    } else {
+        RunUpdateTodo(Database, Id, TrimmedTitle, Payload.Completed)
+        catch (error) {
+            std.sqlite.Failure => ErrorResponseJson(500, "storage error")
+        }
+    }
+}
+
+function DecodeAndUpdateTodo(Database: std.sqlite.Database, Id: int, BodyString: string) -> std.http.server.Response {
+    match std.json.Decode<UpdateTodo>(BodyString) {
+        Ok(Payload) => ProcessUpdateTodo(Database, Id, Payload)
+        Err(_) => ErrorResponseJson(400, "invalid json payload")
+    }
+}
+
+function HandleUpdateTodo(Database: std.sqlite.Database, Id: int, Body: bytes) -> std.http.server.Response {
+    match std.bytes.ToUtf8(Body) {
+        Ok(BodyString) => DecodeAndUpdateTodo(Database, Id, BodyString)
+        Err(_) => ErrorResponseJson(400, "invalid utf-8 body")
+    }
+}
+
+function RespondWithDeleteResult(Deleted: bool) -> std.http.server.Response {
+    if (Deleted) {
+        NoContentResponse()
+    } else {
+        ErrorResponseJson(404, "todo not found")
+    }
+}
+
+function HandleDeleteTodo(Database: std.sqlite.Database, Id: int) -> std.http.server.Response {
+    match DeleteTodo(Database, Id) {
+        Ok(Deleted) => RespondWithDeleteResult(Deleted)
+        Err(_) => ErrorResponseJson(500, "storage error")
+    }
+}
+
+function DispatchTodoItem(Database: std.sqlite.Database, Method: string, IdText: string, Body: bytes) -> std.http.server.Response {
+    let ParsedIdResult = std.convert.ParseInt(IdText)
+    let Id = match ParsedIdResult {
+        Ok(N) => N
+        Err(_) => -1
+    }
+    if (Id <= 0) {
+        ErrorResponseJson(400, "invalid todo id")
+    } else {
+        if (Method == "GET") {
+            HandleGetTodo(Database, Id)
+        } else {
+            if (Method == "PUT") {
+                HandleUpdateTodo(Database, Id, Body)
+            } else {
+                if (Method == "DELETE") {
+                    HandleDeleteTodo(Database, Id)
+                } else {
+                    MethodNotAllowed("GET, PUT, DELETE")
+                }
+            }
+        }
+    }
+}
+
+class TodoAPI implements std.http.server.Handler {
+    Database: std.sqlite.Database
+    function Handle(Request: std.http.server.Request) -> std.http.server.Response {
+        if (Request.Path == "/health") {
+            if (Request.Method == "GET") {
+                HandleHealth(self.Database)
+            } else {
+                MethodNotAllowed("GET")
+            }
+        } else {
+            if (Request.Path == "/todos") {
+                if (Request.Method == "GET") {
+                    HandleListTodos(self.Database)
+                } else {
+                    if (Request.Method == "POST") {
+                        HandleCreateTodo(self.Database, Request.Body)
+                    } else {
+                        MethodNotAllowed("GET, POST")
+                    }
+                }
+            } else {
+                let CutResult = std.text.Cut(Request.Path, "/todos/")
+                if (CutResult != null) {
+                    let (Prefix, IdText) = CutResult
+                    if (Prefix == "" && !std.text.Contains(IdText, "/")) {
+                        DispatchTodoItem(self.Database, Request.Method, IdText, Request.Body)
+                    } else {
+                        ErrorResponseJson(404, "not found")
+                    }
+                } else {
+                    ErrorResponseJson(404, "not found")
+                }
+            }
+        }
+    }
+}

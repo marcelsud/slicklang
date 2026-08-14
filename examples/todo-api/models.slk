@@ -1,0 +1,30 @@
+class Todo {
+    @std.json.Name("id")
+    Id: int
+    @std.json.Name("title")
+    Title: string
+    @std.json.Name("completed")
+    Completed: bool
+}
+
+class CreateTodo {
+    @std.json.Name("title")
+    Title: string
+}
+
+class UpdateTodo {
+    @std.json.Name("title")
+    Title: string
+    @std.json.Name("completed")
+    Completed: bool
+}
+
+class HealthResponse {
+    @std.json.Name("status")
+    Status: string
+}
+
+class ErrorResponse {
+    @std.json.Name("error")
+    Error: string
+}
