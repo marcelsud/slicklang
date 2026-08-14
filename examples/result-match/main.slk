@@ -1,9 +1,8 @@
 // Reading a Result with `match`
 // =============================
 //
-// `match` is the only way to open a Result, and it is exhaustive: the compiler
-// rejects a match that cannot handle both outcomes. There is no `unwrap`, so a
-// Result can never fail at runtime for want of a case.
+// `match` is the exhaustive way to open a Result. `unwrap` is the other:
+// it returns the Ok payload or throws the Err. There is no silent crash.
 //
 // The available patterns are:
 //

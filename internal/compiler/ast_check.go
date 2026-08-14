@@ -172,6 +172,9 @@ func (p *program) checkASTFunction(function *functionDecl) {
 		if usesStdFSDirectoryName(scope.locals[param.name]) {
 			p.usesStdFSDirectory = true
 		}
+		if strings.Contains(scope.locals[param.name], "std.sqlite.") {
+			p.usesStdSQLite = true
+		}
 	}
 	if function.receiverCanonical != "" {
 		scope.locals["self"] = function.receiverCanonical
@@ -190,6 +193,9 @@ func (p *program) checkCallableBody(function *functionDecl, scope *astScope) {
 	markUsesStdHTTP(p, expected)
 	if usesStdFSDirectoryName(expected) {
 		p.usesStdFSDirectory = true
+	}
+	if strings.Contains(expected, "std.sqlite.") {
+		p.usesStdSQLite = true
 	}
 	info := p.checkASTBlock(function.ast, scope, expected)
 	if !p.assignable(info.typ, expected) {
@@ -815,6 +821,9 @@ func (p *program) checkObjectExpression(node *objectExpression, scope *astScope)
 	if strings.HasPrefix(canonical, "std.process.") {
 		p.usesStdProcess = true
 	}
+	if strings.HasPrefix(canonical, "std.sqlite.") {
+		p.usesStdSQLite = true
+	}
 	// A construction names its type arguments directly, so an argument that
 	// names nothing is reported here rather than becoming a field mismatch.
 	if parsed := parseTypeName(canonical); parsed.kind == typeKindGeneric {
@@ -979,6 +988,9 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 		}
 		return info
 	}
+	if info, builtin := p.checkUnwrapCall(node, scope, name); builtin {
+		return info
+	}
 	if _, shadowed := scope.lookup(parts[0]); !shadowed {
 		if union, variant, named := p.resolveVariant(scope.function.namespace, scope.function.aliases, name.name); named {
 			return p.checkVariantConstruction(node, name, union, variant, scope)
@@ -1132,6 +1144,8 @@ func (p *program) markStandardLibraryUse(namespace string, native nativeFunction
 		p.usesStdIO = true
 	case "std.process":
 		p.usesStdProcess = true
+	case "std.sqlite":
+		p.usesStdSQLite = true
 	}
 	if native == nativeStdFSReadDirectory || native == nativeStdFSCreateTemporaryDirectory {
 		p.usesStdFSDirectory = true
@@ -2152,6 +2166,9 @@ func (p *program) taskSafeType(name string, visiting map[string]bool) bool {
 }
 
 func (p *program) taskSafeClass(name string, visiting map[string]bool) bool {
+	if name == stdSQLiteDatabaseName {
+		return true
+	}
 	class := p.classes[name]
 	if class == nil || class.nativeResource != "" {
 		return false
@@ -2197,6 +2214,42 @@ func literalType(value any) string {
 	default:
 		return typeUnknown
 	}
+}
+
+func (p *program) checkUnwrapCall(node *callExpression, scope *astScope, name *nameExpression) (expressionInfo, bool) {
+	if name.name != "unwrap" {
+		return expressionInfo{}, false
+	}
+	info := expressionInfo{typ: typeUnknown, effects: make(effectSet)}
+	if len(node.typeArgs) > 0 {
+		p.add(node.pos, diagnosticCodeTypeArguments, "unwrap does not take type arguments")
+	}
+	if len(node.args) != 1 {
+		p.add(node.pos, diagnosticCodeCallArgument, "unwrap expects 1 argument, found %d", len(node.args))
+		for _, argument := range node.args {
+			mergeEffects(info.effects, p.checkASTExpression(argument, scope).effects)
+		}
+		return info, true
+	}
+	argument := p.checkASTExpression(node.args[0], scope)
+	mergeEffects(info.effects, argument.effects)
+	info.using = argument.using
+	success, failure, isResult := resultTypeArgs(argument.typ)
+	if !isResult {
+		if argument.typ != typeUnknown {
+			p.add(node.pos, diagnosticCodeUnwrapValue, "unwrap requires a Result value, found %s", displayName(argument.typ))
+		}
+		return info, true
+	}
+	if class := p.classes[failure]; class == nil || !class.isError {
+		p.add(node.pos, diagnosticCodeErrorValue, "unwrap cannot throw %s; it does not implement Error", displayName(failure))
+		info.typ = success
+		return info, true
+	}
+	info.typ = success
+	info.effects[failure] = effectOrigin{pos: node.pos, origin: "unwrap"}
+	info.using = p.usingForType(success, info.using)
+	return info, true
 }
 
 func isIterableBuiltin(name string) bool {

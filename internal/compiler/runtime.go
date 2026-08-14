@@ -23,6 +23,7 @@ type runtimeValue struct {
 	callable  *runtimeCallable
 	native    *nativeIOResource
 	directory *nativeTemporaryDirectory
+	sqlite    *nativeSQLiteResource
 }
 
 // runtimeOptional is the tagged representation of a T? value. The complete
@@ -319,6 +320,18 @@ func (e *slickThrow) Error() string {
 	return e.typ + ": " + e.message
 }
 
+func throwFromValue(value runtimeValue) *slickThrow {
+	message := ""
+	if text, ok := value.scalar.(string); ok {
+		message = text
+	} else if field, ok := value.fields["Message"]; ok {
+		message = formatRuntimeValue(field)
+	} else if field, ok := value.fields["message"]; ok {
+		message = formatRuntimeValue(field)
+	}
+	return &slickThrow{typ: value.typ, message: message, value: value}
+}
+
 type returnSignal struct {
 	value runtimeValue
 }
@@ -592,15 +605,7 @@ func (p *program) evalStatement(statement statementNode, frame *runtimeFrame) (r
 		if err != nil {
 			return runtimeValue{}, err
 		}
-		message := ""
-		if text, ok := value.scalar.(string); ok {
-			message = text
-		} else if field, ok := value.fields["Message"]; ok {
-			message = formatRuntimeValue(field)
-		} else if field, ok := value.fields["message"]; ok {
-			message = formatRuntimeValue(field)
-		}
-		return runtimeValue{}, &slickThrow{typ: value.typ, message: message, value: value}
+		return runtimeValue{}, throwFromValue(value)
 	case *returnStatement:
 		value, err := p.evalExpression(node.value, frame)
 		if err != nil {
@@ -935,6 +940,12 @@ func (p *program) evalCall(node *callExpression, frame *runtimeFrame) (runtimeVa
 		}
 		args = append(args, value)
 	}
+	if name.name == "unwrap" {
+		if len(args) != 1 {
+			return runtimeValue{}, runtimeError(node.pos, "unwrap expects 1 argument, found %d", len(args))
+		}
+		return evalRuntimeUnwrap(node, args[0])
+	}
 	if name.name == "enumerate" {
 		elementType, _ := iterableElementType(args[0].typ)
 		return runtimeValue{
@@ -999,6 +1010,16 @@ func (p *program) evalCall(node *callExpression, frame *runtimeFrame) (runtimeVa
 		return runtimeValue{}, runtimeError(node.pos, "unknown function %s", name.name)
 	}
 	return p.callFunctionContext(frame.ctx, function, args, nil, append([]string(nil), node.resolvedTypeArgs...))
+}
+
+func evalRuntimeUnwrap(node *callExpression, value runtimeValue) (runtimeValue, error) {
+	if value.result == nil {
+		return runtimeValue{}, runtimeError(node.pos, "unwrap requires a Result value, found %s", displayName(value.typ))
+	}
+	if value.result.ok {
+		return value.result.payload, nil
+	}
+	return runtimeValue{}, throwFromValue(value.result.payload)
 }
 
 func evalRuntimeArrayCall(node *callExpression, method string, receiver runtimeValue, args []runtimeValue) (runtimeValue, error) {
@@ -1501,10 +1522,17 @@ func runtimeEqual(left, right runtimeValue) bool {
 		}
 		return !leftPresent || runtimeEqual(leftValue, rightValue)
 	}
-	// Callables are neither comparable nor orderable; the checker rejects the
-	// comparison, and identity never leaks in as a fallback.
 	if left.callable != nil || right.callable != nil {
 		return false
+	}
+	if left.sqlite != nil || right.sqlite != nil {
+		return left.sqlite != nil && right.sqlite != nil && left.sqlite == right.sqlite
+	}
+	if left.native != nil || right.native != nil {
+		return left.native != nil && right.native != nil && left.native == right.native
+	}
+	if left.directory != nil || right.directory != nil {
+		return left.directory != nil && right.directory != nil && left.directory == right.directory
 	}
 	if left.typ == "bytes" && right.typ == "bytes" {
 		return bytes.Equal(left.scalar.([]byte), right.scalar.([]byte))

@@ -174,6 +174,7 @@ type program struct {
 	usesStdHTTPServer  bool
 	usesStdFSDirectory bool
 	usesStdProcess     bool
+	usesStdSQLite      bool
 	usesUsing          bool
 	usesAsync          bool
 }
