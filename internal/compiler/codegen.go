@@ -390,7 +390,16 @@ func (g *goGenerator) emitRuntime() {
 	g.line(`for slot := range values { values[slot] = sequence.At(index, slot) }`)
 	g.line(`return values`)
 	g.line(`}`)
-	g.line(`func slickEqual(left, right any) bool { return reflect.DeepEqual(left, right) }`)
+	g.line(`func slickEqual(left, right any) bool {`)
+	g.line(`	lv, rv := reflect.ValueOf(left), reflect.ValueOf(right)`)
+	g.line(`	if lv.IsValid() && rv.IsValid() && lv.Kind() == reflect.Struct && rv.Kind() == reflect.Struct {`)
+	g.line(`		lf, rf := lv.FieldByName("slickResource"), rv.FieldByName("slickResource")`)
+	g.line(`		if lf.IsValid() && rf.IsValid() && lf.Kind() == reflect.Pointer && rf.Kind() == reflect.Pointer {`)
+	g.line(`			return !lf.IsNil() && !rf.IsNil() && lf.Pointer() == rf.Pointer()`)
+	g.line(`		}`)
+	g.line(`	}`)
+	g.line(`	return reflect.DeepEqual(left, right)`)
+	g.line(`}`)
 	// slickNamed lets slickFormat render a class value as its canonical Slick
 	// type name, matching the interpreter instead of dumping the Go struct or
 	// calling the generated Error method.
