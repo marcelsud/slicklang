@@ -1,0 +1,84 @@
+// Persistent Todo API
+// ===================
+//
+// A real persistent JSON CRUD API demonstrating an end-to-end Slick application
+// stack using std.http.server, std.sqlite, and explicit JSON field naming with
+// @std.json.Name.
+//
+// Configuration comes from environment variables:
+//   TODO_API_DATABASE  Path to SQLite database file (required)
+//   TODO_API_ADDRESS   HTTP listener address (default: 127.0.0.1:8080)
+//
+// Endpoints:
+//   GET    /health      Health check with database connectivity verification
+//   GET    /todos       List todos ordered by ascending ID
+//   POST   /todos       Create a new todo with JSON body {"title":"..."}
+//   GET    /todos/{id}  Get todo by ID
+//   PUT    /todos/{id}  Update todo in transaction {"title":"...","completed":true}
+//   DELETE /todos/{id}  Delete todo by ID (returns 204 No Content)
+
+function StartServer(Database: std.sqlite.Database, Address: string) -> Result<null, std.sqlite.Failure> {
+    let Application = TodoAPI {
+        Database: Database
+    }
+    let Config = std.http.server.Config {
+        Address: Address
+        MaxHeaderBytes: 8192
+        MaxBodyBytes: 65536
+        ReadHeaderTimeoutMilliseconds: 5000
+        ReadTimeoutMilliseconds: 10000
+        WriteTimeoutMilliseconds: 10000
+        IdleTimeoutMilliseconds: 30000
+        ShutdownTimeoutMilliseconds: 5000
+    }
+    match std.http.server.Serve(Config, Application) {
+        Ok(_) => Ok(null)
+        Err(ServerFailure) => Err(std.sqlite.Failure {
+            Operation: "Serve"
+            Code: null
+            Message: ServerFailure.Message
+        })
+    }
+}
+
+function RunWithDatabase(DatabasePath: string, Address: string) -> Result<null, std.sqlite.Failure> throws std.sqlite.Failure {
+    using Database = std.sqlite.Open(DatabasePath)? {
+        let SchemaResult = InitializeSchema(Database)?
+        StartServer(Database, Address)
+    }
+}
+
+function RunServer() -> Result<null, std.sqlite.Failure> throws std.sqlite.Failure {
+    let DatabasePath = std.env.Get("TODO_API_DATABASE")
+    if (DatabasePath == null) {
+        Err(std.sqlite.Failure {
+            Operation: "Config"
+            Code: null
+            Message: "TODO_API_DATABASE environment variable is required"
+        })
+    } else {
+        if (DatabasePath == "") {
+            Err(std.sqlite.Failure {
+                Operation: "Config"
+                Code: null
+                Message: "TODO_API_DATABASE environment variable is required"
+            })
+        } else {
+            let EnvAddress = std.env.Get("TODO_API_ADDRESS")
+            let Address = if (EnvAddress == null) {
+                "127.0.0.1:8080"
+            } else {
+                if (EnvAddress == "") {
+                    "127.0.0.1:8080"
+                } else {
+                    EnvAddress
+                }
+            }
+            RunWithDatabase(DatabasePath, Address)
+        }
+    }
+}
+
+function main() -> null throws std.sqlite.Failure {
+    unwrap(RunServer())
+}

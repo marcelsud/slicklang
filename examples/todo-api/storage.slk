@@ -1,0 +1,162 @@
+function InitializeSchema(Database: std.sqlite.Database) -> Result<null, std.sqlite.Failure> {
+    let Stmt = std.sqlite.Statement {
+        SQL: "CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)))"
+        Parameters: []
+    }
+    let Exec = Database.Execute(Stmt)?
+    Ok(null)
+}
+
+function ExtractTodo(Row: std.sqlite.Row) -> Todo? {
+    let Values = Row.Values
+    let IdVal = Values.Get("id")
+    let TitleVal = Values.Get("title")
+    let CompletedVal = Values.Get("completed")
+    if (IdVal == null) {
+        null
+    } else {
+        if (TitleVal == null) {
+            null
+        } else {
+            if (CompletedVal == null) {
+                null
+            } else {
+                let Id = match IdVal {
+                    std.sqlite.Value.Integer(N) => N
+                    _ => 0
+                }
+                let Title = match TitleVal {
+                    std.sqlite.Value.Text(T) => T
+                    _ => ""
+                }
+                let Completed = match CompletedVal {
+                    std.sqlite.Value.Integer(C) => C == 1
+                    _ => false
+                }
+                if (Id <= 0 || Title == "") {
+                    null
+                } else {
+                    Todo {
+                        Id: Id
+                        Title: Title
+                        Completed: Completed
+                    }
+                }
+            }
+        }
+    }
+}
+
+function CheckHealth(Database: std.sqlite.Database) -> Result<bool, std.sqlite.Failure> {
+    let Query = std.sqlite.Query {
+        SQL: "SELECT 1"
+        Parameters: []
+        MaxRows: 1
+        MaxBytes: 1024
+    }
+    let Rows = Database.Query(Query)?
+    Ok(true)
+}
+
+function InsertTodo(Database: std.sqlite.Database, Title: string) -> Result<Todo, std.sqlite.Failure> {
+    let Stmt = std.sqlite.Statement {
+        SQL: "INSERT INTO todos (title, completed) VALUES (?, 0)"
+        Parameters: [std.sqlite.Value.Text(Title)]
+    }
+    let Execution = Database.Execute(Stmt)?
+    let LastId = Execution.LastInsertId
+    let Id = if (LastId == null) {
+        0
+    } else {
+        LastId
+    }
+    Ok(Todo {
+        Id: Id
+        Title: Title
+        Completed: false
+    })
+}
+
+function ListTodos(Database: std.sqlite.Database, Limit: int) -> Result<Todo[], std.sqlite.Failure> {
+    let Query = std.sqlite.Query {
+        SQL: "SELECT id, title, completed FROM todos ORDER BY id ASC LIMIT ?"
+        Parameters: [std.sqlite.Value.Integer(Limit)]
+        MaxRows: 100
+        MaxBytes: 65536
+    }
+    let Rows = Database.Query(Query)?
+    let Items = std.buffer.New<Todo>()
+    for Row in Rows {
+        let Item = ExtractTodo(Row)
+        if (Item != null) {
+            std.buffer.Push<Todo>(Items, Item)
+        }
+    }
+    Ok(std.buffer.Freeze<Todo>(Items))
+}
+
+function GetTodo(Database: std.sqlite.Database, Id: int) -> Result<Todo?, std.sqlite.Failure> {
+    let Query = std.sqlite.Query {
+        SQL: "SELECT id, title, completed FROM todos WHERE id = ?"
+        Parameters: [std.sqlite.Value.Integer(Id)]
+        MaxRows: 1
+        MaxBytes: 4096
+    }
+    let Rows = Database.Query(Query)?
+    let First = Rows.Get(0)
+    if (First == null) {
+        Ok(null)
+    } else {
+        let Item = ExtractTodo(First)
+        Ok(Item)
+    }
+}
+
+function UpdateTodoInTx(Database: std.sqlite.Database, Id: int, Title: string, Completed: bool) -> Result<Todo?, std.sqlite.Failure> throws std.sqlite.Failure {
+    using Tx = Database.Begin()? {
+        let CompletedInt = if (Completed) {
+            1
+        } else {
+            0
+        }
+        let UpdateStmt = std.sqlite.Statement {
+            SQL: "UPDATE todos SET title = ?, completed = ? WHERE id = ?"
+            Parameters: [std.sqlite.Value.Text(Title), std.sqlite.Value.Integer(CompletedInt), std.sqlite.Value.Integer(Id)]
+        }
+        let Exec = Tx.Execute(UpdateStmt)?
+        if (Exec.RowsAffected == 0) {
+            let RolledBack = Tx.Rollback()?
+            Ok(null)
+        } else {
+            let ReadQuery = std.sqlite.Query {
+                SQL: "SELECT id, title, completed FROM todos WHERE id = ?"
+                Parameters: [std.sqlite.Value.Integer(Id)]
+                MaxRows: 1
+                MaxBytes: 4096
+            }
+            let Rows = Tx.Query(ReadQuery)?
+            let First = Rows.Get(0)
+            if (First == null) {
+                let RolledBack = Tx.Rollback()?
+                Ok(null)
+            } else {
+                let Item = ExtractTodo(First)
+                let Committed = Tx.Commit()?
+                Ok(Item)
+            }
+        }
+    }
+}
+
+function DeleteTodo(Database: std.sqlite.Database, Id: int) -> Result<bool, std.sqlite.Failure> {
+    let Stmt = std.sqlite.Statement {
+        SQL: "DELETE FROM todos WHERE id = ?"
+        Parameters: [std.sqlite.Value.Integer(Id)]
+    }
+    let Execution = Database.Execute(Stmt)?
+    if (Execution.RowsAffected > 0) {
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
