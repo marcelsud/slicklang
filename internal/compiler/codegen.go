@@ -46,7 +46,16 @@ func BuildPath(path, output string) ([]Diagnostic, error) {
 	if err := os.WriteFile(sourcePath, formatted, 0o644); err != nil {
 		return nil, err
 	}
+	if program.usesStdSQLite {
+		if err := os.WriteFile(filepath.Join(temporary, "go.mod"), []byte(sqlitePinnedGoMod), 0o644); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(temporary, "go.sum"), []byte(sqlitePinnedGoSum), 0o644); err != nil {
+			return nil, err
+		}
+	}
 	command := exec.Command("go", "build", "-buildvcs=false", "-trimpath", "-o", output, sourcePath)
+	command.Dir = temporary
 	buildOutput, err := command.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("go build: %w: %s", err, strings.TrimSpace(string(buildOutput)))
@@ -154,6 +163,11 @@ func (p *program) generateGo() (string, error) {
 		generator.imports["os/exec"] = true
 		generator.imports["sync"] = true
 	}
+	if p.usesStdSQLite {
+		for _, name := range []string{"database/sql", "errors", "fmt", "math", "modernc.org/sqlite", "os", "path/filepath", "strings", "sync", "unicode/utf8"} {
+			generator.imports[name] = true
+		}
+	}
 	if p.usesAsync {
 		generator.imports["context"] = true
 	}
@@ -250,6 +264,9 @@ func (g *goGenerator) emitRuntime() {
 	}
 	if g.program.usesStdProcess {
 		g.emitProcessRuntimeSupport()
+	}
+	if g.program.usesStdSQLite {
+		g.emitSQLiteRuntimeSupport()
 	}
 	g.line("")
 	g.line(`type slickResult[T, E any] struct { ok bool; value T; failure E }`)
@@ -483,6 +500,9 @@ func (g *goGenerator) emitDeclarations() error {
 		if g.skipStdHTTP(name) {
 			continue
 		}
+		if g.skipStdSQLite(name) {
+			continue
+		}
 		iface := g.program.interfaces[name]
 		g.line("type %s interface {", goInterfaceName(name))
 		methodNames := sortedKeys(iface.methods)
@@ -516,6 +536,9 @@ func (g *goGenerator) emitDeclarations() error {
 			continue
 		}
 		if !g.program.usesStdProcess && strings.HasPrefix(name, "std.process.") {
+			continue
+		}
+		if g.skipStdSQLite(name) {
 			continue
 		}
 		class := g.program.classes[name]
@@ -587,6 +610,9 @@ func (g *goGenerator) emitFunctions() error {
 		if !g.program.usesStdProcess && strings.HasPrefix(name, "std.process.") {
 			continue
 		}
+		if g.skipStdSQLite(name) {
+			continue
+		}
 		if function.native != "" {
 			if err := g.emitNativeFunction(function); err != nil {
 				return err
@@ -610,6 +636,9 @@ func (g *goGenerator) emitFunctions() error {
 			continue
 		}
 		if !g.program.usesStdProcess && strings.HasPrefix(className, "std.process.") {
+			continue
+		}
+		if g.skipStdSQLite(className) {
 			continue
 		}
 		methodNames := sortedKeys(class.implementations)

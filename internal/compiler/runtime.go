@@ -23,6 +23,7 @@ type runtimeValue struct {
 	callable  *runtimeCallable
 	native    *nativeIOResource
 	directory *nativeTemporaryDirectory
+	sqlite    *nativeSQLiteResource
 }
 
 // runtimeOptional is the tagged representation of a T? value. The complete

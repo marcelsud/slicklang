@@ -172,6 +172,9 @@ func (p *program) checkASTFunction(function *functionDecl) {
 		if usesStdFSDirectoryName(scope.locals[param.name]) {
 			p.usesStdFSDirectory = true
 		}
+		if strings.Contains(scope.locals[param.name], "std.sqlite.") {
+			p.usesStdSQLite = true
+		}
 	}
 	if function.receiverCanonical != "" {
 		scope.locals["self"] = function.receiverCanonical
@@ -190,6 +193,9 @@ func (p *program) checkCallableBody(function *functionDecl, scope *astScope) {
 	markUsesStdHTTP(p, expected)
 	if usesStdFSDirectoryName(expected) {
 		p.usesStdFSDirectory = true
+	}
+	if strings.Contains(expected, "std.sqlite.") {
+		p.usesStdSQLite = true
 	}
 	info := p.checkASTBlock(function.ast, scope, expected)
 	if !p.assignable(info.typ, expected) {
@@ -815,6 +821,9 @@ func (p *program) checkObjectExpression(node *objectExpression, scope *astScope)
 	if strings.HasPrefix(canonical, "std.process.") {
 		p.usesStdProcess = true
 	}
+	if strings.HasPrefix(canonical, "std.sqlite.") {
+		p.usesStdSQLite = true
+	}
 	// A construction names its type arguments directly, so an argument that
 	// names nothing is reported here rather than becoming a field mismatch.
 	if parsed := parseTypeName(canonical); parsed.kind == typeKindGeneric {
@@ -1132,6 +1141,8 @@ func (p *program) markStandardLibraryUse(namespace string, native nativeFunction
 		p.usesStdIO = true
 	case "std.process":
 		p.usesStdProcess = true
+	case "std.sqlite":
+		p.usesStdSQLite = true
 	}
 	if native == nativeStdFSReadDirectory || native == nativeStdFSCreateTemporaryDirectory {
 		p.usesStdFSDirectory = true

@@ -111,6 +111,9 @@ func (p *program) checkTypeNameScoped(pos position, namespace string, scope *typ
 	if pos.file != "" && strings.Contains(name, "std.process.") {
 		p.usesStdProcess = true
 	}
+	if pos.file != "" && strings.Contains(name, "std.sqlite.") {
+		p.usesStdSQLite = true
+	}
 	parsed := parseTypeName(name)
 	switch parsed.kind {
 	case typeKindOptional, typeKindArray:

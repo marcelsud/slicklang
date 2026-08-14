@@ -38,6 +38,7 @@ var exampleOutputs = map[string]string{
 	"std-io":             "hello:5;closed",
 	"using":              "value;ABC",
 	"visibility":         "Ada:[private]; Ada: 1500 cents",
+	"std-sqlite":         "todo: ship sqlite",
 }
 
 func examplePath(project string) string {

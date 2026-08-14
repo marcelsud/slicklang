@@ -191,6 +191,7 @@ var standardLibraryRegistry = struct {
 		{canonical: "std.io", documentation: "Provides bounded resource-safe byte readers, writers, and transfer helpers."},
 		{canonical: "std.utf8", documentation: "Decodes Unicode scalar values from immutable UTF-8 bytes."},
 		{canonical: "std.unicode", documentation: "Classifies Unicode scalar values using the toolchain's pinned tables."},
+		{canonical: "std.sqlite", documentation: "Provides resource-safe access to persistent and in-memory SQLite databases."},
 	},
 	functions: []standardFunctionDecl{
 		{
@@ -811,6 +812,15 @@ var standardLibraryRegistry = struct {
 			result: typeRef{name: "Result<int," + stdIOFailureName + ">"},
 			native: nativeStdIOCopy,
 		},
+		{
+			canonical:     string(nativeStdSQLiteOpen),
+			namespace:     "std.sqlite",
+			name:          "Open",
+			documentation: "Opens a file-backed or :memory: SQLite database handle.",
+			params:        []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
+			result:        typeRef{name: "Result<" + stdSQLiteDatabaseName + "," + stdSQLiteFailureName + ">"},
+			native:        nativeStdSQLiteOpen,
+		},
 	},
 	classes: []standardClassDecl{
 		{
@@ -1154,6 +1164,137 @@ var standardLibraryRegistry = struct {
 				},
 			},
 		},
+		{
+			canonical:     stdSQLiteStatementName,
+			namespace:     "std.sqlite",
+			name:          "Statement",
+			documentation: "Describes one parameter-bound SQL statement for execution.",
+			fields: []standardFieldDecl{
+				{name: "SQL", typ: typeRef{name: "string"}, documentation: "Provides the single SQL statement text."},
+				{name: "Parameters", typ: typeRef{name: stdSQLiteValueName + "[]"}, documentation: "Provides positional parameters to bind."},
+			},
+		},
+		{
+			canonical:     stdSQLiteQueryName,
+			namespace:     "std.sqlite",
+			name:          "Query",
+			documentation: "Describes one bounded parameter-bound SQL query.",
+			fields: []standardFieldDecl{
+				{name: "SQL", typ: typeRef{name: "string"}, documentation: "Provides the single SQL query text."},
+				{name: "Parameters", typ: typeRef{name: stdSQLiteValueName + "[]"}, documentation: "Provides positional parameters to bind."},
+				{name: "MaxRows", typ: typeRef{name: "int"}, documentation: "Limits the maximum number of rows returned."},
+				{name: "MaxBytes", typ: typeRef{name: "int"}, documentation: "Limits cumulative byte size of returned data."},
+			},
+		},
+		{
+			canonical:     stdSQLiteRowName,
+			namespace:     "std.sqlite",
+			name:          "Row",
+			documentation: "Contains one returned database row mapped by column name.",
+			fields: []standardFieldDecl{
+				{name: "Values", typ: typeRef{name: "Map<string," + stdSQLiteValueName + ">"}, documentation: "Maps column names to their typed values."},
+			},
+		},
+		{
+			canonical:     stdSQLiteExecutionName,
+			namespace:     "std.sqlite",
+			name:          "Execution",
+			documentation: "Describes the outcome of an executed SQL statement.",
+			fields: []standardFieldDecl{
+				{name: "RowsAffected", typ: typeRef{name: "int"}, documentation: "Reports the number of rows inserted, updated, or deleted."},
+				{name: "LastInsertId", typ: typeRef{name: "int?"}, documentation: "Provides the optional rowid of the most recently inserted row."},
+			},
+		},
+		{
+			canonical:     stdSQLiteFailureName,
+			namespace:     "std.sqlite",
+			name:          "Failure",
+			documentation: "Describes a failed SQLite operation.",
+			isError:       true,
+			fields: []standardFieldDecl{
+				{name: "Operation", typ: typeRef{name: "string"}, documentation: "Names the database operation that failed."},
+				{name: "Code", typ: typeRef{name: "int?"}, documentation: "Provides the optional SQLite numeric error code."},
+				{name: "Message", typ: typeRef{name: "string"}, documentation: "Explains the failure without exposing parameter or row data."},
+			},
+		},
+		{
+			canonical:      stdSQLiteDatabaseName,
+			namespace:      "std.sqlite",
+			name:           "Database",
+			documentation:  "Represents an open SQLite database connection handle safe for concurrent use.",
+			nativeResource: "*slickSQLiteDatabase",
+			methods: []standardMethodDecl{
+				{
+					name:          "Execute",
+					documentation: "Executes one parameter-bound statement and returns execution metadata.",
+					params:        []paramDecl{{name: "Statement", typ: typeRef{name: stdSQLiteStatementName}}},
+					result:        typeRef{name: "Result<" + stdSQLiteExecutionName + "," + stdSQLiteFailureName + ">"},
+					native:        nativeStdSQLiteDatabaseExecute,
+				},
+				{
+					name:          "Query",
+					documentation: "Executes one query and returns bounded rows mapped by column name.",
+					params:        []paramDecl{{name: "Query", typ: typeRef{name: stdSQLiteQueryName}}},
+					result:        typeRef{name: "Result<" + stdSQLiteRowName + "[]," + stdSQLiteFailureName + ">"},
+					native:        nativeStdSQLiteDatabaseQuery,
+				},
+				{
+					name:          "Begin",
+					documentation: "Begins a new explicit transaction.",
+					result:        typeRef{name: "Result<" + stdSQLiteTransactionName + "," + stdSQLiteFailureName + ">"},
+					native:        nativeStdSQLiteDatabaseBegin,
+				},
+				{
+					name:          "Close",
+					documentation: "Closes the database handle and releases all connections.",
+					result:        typeRef{name: "null"},
+					throws:        []typeRef{{name: stdSQLiteFailureName}},
+					native:        nativeStdSQLiteDatabaseClose,
+				},
+			},
+		},
+		{
+			canonical:      stdSQLiteTransactionName,
+			namespace:      "std.sqlite",
+			name:           "Transaction",
+			documentation:  "Represents an active SQLite transaction.",
+			nativeResource: "*slickSQLiteTransaction",
+			methods: []standardMethodDecl{
+				{
+					name:          "Execute",
+					documentation: "Executes one parameter-bound statement inside this transaction.",
+					params:        []paramDecl{{name: "Statement", typ: typeRef{name: stdSQLiteStatementName}}},
+					result:        typeRef{name: "Result<" + stdSQLiteExecutionName + "," + stdSQLiteFailureName + ">"},
+					native:        nativeStdSQLiteTransactionExecute,
+				},
+				{
+					name:          "Query",
+					documentation: "Executes one query inside this transaction.",
+					params:        []paramDecl{{name: "Query", typ: typeRef{name: stdSQLiteQueryName}}},
+					result:        typeRef{name: "Result<" + stdSQLiteRowName + "[]," + stdSQLiteFailureName + ">"},
+					native:        nativeStdSQLiteTransactionQuery,
+				},
+				{
+					name:          "Commit",
+					documentation: "Commits this transaction.",
+					result:        typeRef{name: "Result<null," + stdSQLiteFailureName + ">"},
+					native:        nativeStdSQLiteTransactionCommit,
+				},
+				{
+					name:          "Rollback",
+					documentation: "Rolls back this transaction.",
+					result:        typeRef{name: "Result<null," + stdSQLiteFailureName + ">"},
+					native:        nativeStdSQLiteTransactionRollback,
+				},
+				{
+					name:          "Close",
+					documentation: "Closes the transaction, rolling it back if still active.",
+					result:        typeRef{name: "null"},
+					throws:        []typeRef{{name: stdSQLiteFailureName}},
+					native:        nativeStdSQLiteTransactionClose,
+				},
+			},
+		},
 	},
 	interfaces: []standardInterfaceDecl{
 		{
@@ -1288,6 +1429,41 @@ func registerStandardLibrary(p *program) {
 			documentation: &documentation,
 		}
 	}
+	valDoc := "Represents one SQLite value alternative: Null, Integer, Float, Text, or Blob."
+	nullDoc := "Represents a SQL NULL value."
+	intDoc := "Represents a 64-bit signed integer value."
+	floatDoc := "Represents a 64-bit IEEE-754 floating-point value."
+	textDoc := "Represents a UTF-8 text value."
+	blobDoc := "Represents an arbitrary immutable binary byte sequence."
+	valFieldDoc := "Provides the payload value."
+
+	valueUnion := &unionDecl{
+		name:          "Value",
+		qualified:     stdSQLiteValueName,
+		namespace:     "std.sqlite",
+		aliases:       make(map[string]aliasDecl),
+		variants:      make(map[string]*unionVariantDecl),
+		order:         []string{"Null", "Integer", "Float", "Text", "Blob"},
+		documentation: &valDoc,
+	}
+	valueUnion.variants["Null"] = &unionVariantDecl{name: "Null", tag: 1, documentation: &nullDoc}
+	valueUnion.variants["Integer"] = &unionVariantDecl{
+		name: "Integer", tag: 2, documentation: &intDoc,
+		fields: []fieldDecl{{name: "Value", typ: typeRef{name: "int"}, documentation: &valFieldDoc}},
+	}
+	valueUnion.variants["Float"] = &unionVariantDecl{
+		name: "Float", tag: 3, documentation: &floatDoc,
+		fields: []fieldDecl{{name: "Value", typ: typeRef{name: "float"}, documentation: &valFieldDoc}},
+	}
+	valueUnion.variants["Text"] = &unionVariantDecl{
+		name: "Text", tag: 4, documentation: &textDoc,
+		fields: []fieldDecl{{name: "Value", typ: typeRef{name: "string"}, documentation: &valFieldDoc}},
+	}
+	valueUnion.variants["Blob"] = &unionVariantDecl{
+		name: "Blob", tag: 5, documentation: &blobDoc,
+		fields: []fieldDecl{{name: "Value", typ: typeRef{name: "bytes"}, documentation: &valFieldDoc}},
+	}
+	p.unions[stdSQLiteValueName] = valueUnion
 }
 
 func standardMethodSignature(namespace string, declaration standardMethodDecl) *methodSignature {
@@ -1377,6 +1553,9 @@ func (p *program) callNativeFunction(function *functionDecl, frame *runtimeFrame
 		return value, err
 	}
 	if value, err, ok := p.callNativeStdProcess(function, frame); ok {
+		return value, err
+	}
+	if value, err, ok := p.callNativeStdSQLite(function, frame); ok {
 		return value, err
 	}
 	resultType := p.resolveType(function.namespace, function.aliases, function.result)
@@ -2105,6 +2284,8 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 		g.line("return slickHTTPHeaderValues(%s, %s), nil", arguments[0], arguments[1])
 	case nativeStdHTTPStatusText:
 		g.line("return slickHTTPStatusText(%s), nil", arguments[0])
+	case nativeStdSQLiteOpen:
+		g.line("return slickSQLiteOpen(%s)", arguments[0])
 	default:
 		return fmt.Errorf("unknown native Slick function %s", function.native)
 	}

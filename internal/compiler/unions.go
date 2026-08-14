@@ -438,6 +438,9 @@ func goVariantFieldName(variant, field string) string {
 // construction, so no checked Slick program can produce an invalid one.
 func (g *goGenerator) emitUnionDeclarations() error {
 	for _, name := range sortedKeys(g.program.unions) {
+		if !g.program.usesStdSQLite && strings.HasPrefix(name, "std.sqlite.") {
+			continue
+		}
 		union := g.program.unions[name]
 		g.line("type %s struct {", goUnionName(name))
 		g.line("slickTag int")

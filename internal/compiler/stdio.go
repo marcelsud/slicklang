@@ -372,6 +372,24 @@ func (g *goGenerator) emitNativeMethod(function *functionDecl, receiverType stri
 		g.line("return struct{}{}, slickIOClose(%s.slickResource, %q)", receiver, "writer")
 	case nativeStdFSTemporaryDirectoryClose:
 		g.line("return struct{}{}, slickFSClose(%s.slickResource, %s.%s)", receiver, receiver, goFieldName("Path"))
+	case nativeStdSQLiteDatabaseExecute:
+		g.line("return slickSQLiteDBExecute(%s.slickResource, %s), nil", receiver, arguments[0])
+	case nativeStdSQLiteDatabaseQuery:
+		g.line("return slickSQLiteDBQuery(%s.slickResource, %s), nil", receiver, arguments[0])
+	case nativeStdSQLiteDatabaseBegin:
+		g.line("return slickSQLiteDBBegin(%s.slickResource), nil", receiver)
+	case nativeStdSQLiteDatabaseClose:
+		g.line("return struct{}{}, slickSQLiteDBClose(%s.slickResource)", receiver)
+	case nativeStdSQLiteTransactionExecute:
+		g.line("return slickSQLiteTxExecute(%s.slickResource, %s), nil", receiver, arguments[0])
+	case nativeStdSQLiteTransactionQuery:
+		g.line("return slickSQLiteTxQuery(%s.slickResource, %s), nil", receiver, arguments[0])
+	case nativeStdSQLiteTransactionCommit:
+		g.line("return slickSQLiteTxCommit(%s.slickResource), nil", receiver)
+	case nativeStdSQLiteTransactionRollback:
+		g.line("return slickSQLiteTxRollback(%s.slickResource), nil", receiver)
+	case nativeStdSQLiteTransactionClose:
+		g.line("return struct{}{}, slickSQLiteTxClose(%s.slickResource)", receiver)
 	default:
 		return fmt.Errorf("unknown native Slick method %s", function.native)
 	}
