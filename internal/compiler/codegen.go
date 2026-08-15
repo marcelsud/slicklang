@@ -1933,7 +1933,7 @@ func (g *goGenerator) resolveDeclaredType(namespace string, aliases map[string]a
 	// Parentheses that only group a callable are not part of the type, so they
 	// are dropped before anything reads the spelling.
 	name = ungroupType(name)
-	if params, result, throws, callable := callableTypeParts(name); callable {
+	if params, result, throws, operations, callable := callableTypeParts(name); callable {
 		resolved := make([]string, len(params))
 		for index, param := range params {
 			declared, err := g.resolveDeclaredType(namespace, aliases, param)
@@ -1946,11 +1946,11 @@ func (g *goGenerator) resolveDeclaredType(namespace string, aliases map[string]a
 		if err != nil {
 			return "", err
 		}
-		effects := make([]string, len(throws))
+		resolvedThrows := make([]string, len(throws))
 		for index, thrown := range throws {
-			effects[index], _ = g.program.resolveErrorIn(namespace, aliases, thrown)
+			resolvedThrows[index], _ = g.program.resolveErrorIn(namespace, aliases, thrown)
 		}
-		return callableType(resolved, declaredResult, effects), nil
+		return callableType(resolved, declaredResult, resolvedThrows, operations), nil
 	}
 	if base, optional := optionalBase(name); optional {
 		element, err := g.resolveDeclaredType(namespace, aliases, base)
@@ -2042,7 +2042,7 @@ func (g *goGenerator) goType(typ string) string {
 	}
 	// A callable is an ordinary Go function value with the same shape every
 	// generated function has, so a named function is already one.
-	if params, result, _, callable := callableTypeParts(typ); callable {
+	if params, result, _, _, callable := callableTypeParts(typ); callable {
 		types := make([]string, 0, len(params)+1)
 		if g.program.usesAsync {
 			types = append(types, "context.Context")

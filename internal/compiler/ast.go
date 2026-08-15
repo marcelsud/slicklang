@@ -166,14 +166,15 @@ func (n *nameExpression) expressionPos() position { return n.pos }
 // names the surrounding bindings the body reads, copied by value when the
 // callable is created.
 type lambdaExpression struct {
-	params   []paramDecl
-	result   typeRef
-	throws   []typeRef
-	body     *blockNode
-	fn       *functionDecl
-	captures []string
-	resolved string
-	pos      position
+	params     []paramDecl
+	result     typeRef
+	throws     []typeRef
+	operations []operationEffectRef
+	body       *blockNode
+	fn         *functionDecl
+	captures   []string
+	resolved   string
+	pos        position
 }
 
 func (n *lambdaExpression) expressionPos() position { return n.pos }
@@ -903,19 +904,20 @@ func (p *bodyParser) parseLambda(pos position) expressionNode {
 		p.error(p.current().pos, "expected '->' and a lambda result type")
 		return &invalidExpression{pos: pos}
 	}
-	// The lambda owns the throws clause that follows its result, so a returned
-	// callable declaring effects of its own is parenthesized.
+	// The lambda owns the throws and effects clauses that follow its result, so
+	// a returned callable declaring either is parenthesized.
 	result, ok := p.parseTypeAllowing(false)
 	if !ok {
 		return &invalidExpression{pos: pos}
 	}
 	throws := p.parseLambdaThrows()
+	operations := p.parseLambdaEffects()
 	if !p.accept("{") {
 		p.error(p.current().pos, "expected lambda body")
 		return &invalidExpression{pos: pos}
 	}
 	body := p.parseBlock(true, pos)
-	return &lambdaExpression{params: params, result: result, throws: throws, body: body, pos: pos}
+	return &lambdaExpression{params: params, result: result, throws: throws, operations: operations, body: body, pos: pos}
 }
 
 func (p *bodyParser) parseLambdaParams() ([]paramDecl, bool) {
@@ -1514,7 +1516,7 @@ func (p *bodyParser) expectIdent(label string) (token, bool) {
 		return token{}, false
 	}
 	tok := p.current()
-	if isAsyncKeyword(tok.text) {
+	if isReservedKeyword(tok.text) {
 		p.error(tok.pos, "%s is a reserved language keyword", tok.text)
 		p.index++
 		return token{}, false

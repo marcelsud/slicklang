@@ -523,14 +523,14 @@ function main() -> int {
 		{
 			name: "callee and arguments evaluate exactly once in source order",
 			source: `
-function Note(Log: Buffer<string>, Text: string, Value: int) -> int {
+function Note(Log: Buffer<string>, Text: string, Value: int) -> int effects { state } {
     std.buffer.Push<string>(Log, Text)
     Value
 }
 
-function main() -> string {
+function main() -> string effects { state } {
     let Log = std.buffer.New<string>()
-    let Choose = (Left: int, Right: int) -> ((int, int) -> int) {
+    let Choose = (Left: int, Right: int) -> ((int, int) -> int) effects { state } {
         std.buffer.Push<string>(Log, "callee")
         (A: int, B: int) -> int {
             A + B

@@ -1,6 +1,6 @@
-use std.math.Divide as Divide
-use std.math.Remainder as Remainder
-use std.math.ArithmeticFailure as ArithmeticFailure
+use std.math.Divide
+use std.math.Remainder
+use std.math.ArithmeticFailure
 
 function Format(Value: int) -> string {
     std.convert.IntToString(Value)

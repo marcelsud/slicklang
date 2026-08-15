@@ -7,26 +7,26 @@
 
 class Resource {
     Marker: string
-    function Close() -> null {
+    function Close() -> null effects { environment } {
         Append(self.Marker)
     }
 }
 
-function Reset() -> null {
+function Reset() -> null effects { environment } {
     match std.env.Unset("SLICK_USING_EXAMPLE") {
         Ok(_) => null
         Err(_) => null
     }
 }
 
-function Store(Value: string) -> null {
+function Store(Value: string) -> null effects { environment } {
     match std.env.Set("SLICK_USING_EXAMPLE", Value) {
         Ok(_) => null
         Err(_) => null
     }
 }
 
-function Append(Value: string) -> null {
+function Append(Value: string) -> null effects { environment } {
     let Current = std.env.Get("SLICK_USING_EXAMPLE")
     if (Current == null) {
         Store(Value)
@@ -35,17 +35,23 @@ function Append(Value: string) -> null {
     }
 }
 
-function Trace() -> string {
+function Trace() -> string effects { environment } {
     let Current = std.env.Get("SLICK_USING_EXAMPLE")
-    if (Current == null) { "" } else { Current }
+    if (Current == null) {
+        ""
+    } else {
+        Current
+    }
 }
 
-function Acquire() -> Resource {
+function Acquire() -> Resource effects { environment } {
     Append("A")
-    Resource { Marker: "C" }
+    Resource {
+        Marker: "C"
+    }
 }
 
-function main() -> string {
+function main() -> string effects { environment } {
     Reset()
     let Value = using Handle = Acquire() {
         Append("B")

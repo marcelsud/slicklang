@@ -104,7 +104,7 @@ use std.buffer.Freeze as Freeze
 function SetStatus(Value: Result<null, std.collections.BoundsFailure>) -> string {
     match Value { Ok(_) => "ok" Err(_) => "bounds" }
 }
-function main() -> string {
+function main() -> string effects { state } {
     let Values = NewBuffer<string>()
     Push<string>(Values, "A")
     let FirstSnapshot = Freeze<string>(Values)
@@ -146,7 +146,7 @@ class User implements Named {
     function Label() -> string { self.Name }
 }
 class Failure implements Error {}
-function main() -> string {
+function main() -> string effects { state } {
     let Ints = std.buffer.New<int>()
     std.buffer.Push<int>(Ints, 1)
     let Bools = std.buffer.New<bool>()
@@ -185,7 +185,7 @@ function main() -> string {
 
 func TestBufferGetFlattensOptionalElements(t *testing.T) {
 	output := runResultEverywhere(t, `
-function main() -> string {
+function main() -> string effects { state } {
     let Values = std.buffer.New<string?>()
     std.buffer.Push<string?>(Values, null)
     std.buffer.Push<string?>(Values, "present")
@@ -231,12 +231,12 @@ func TestCollectionCallsReportFocusedDiagnostics(t *testing.T) {
 			message: "std.buffer.New expects 1 type arguments, found 2",
 		},
 		"push arity": {
-			source:  `function main() -> null { let Values = std.buffer.New<int>() std.buffer.Push<int>(Values) null }`,
+			source:  `function main() -> null effects { state } { let Values = std.buffer.New<int>() std.buffer.Push<int>(Values) null }`,
 			code:    "SLK320",
 			message: "expects 2 arguments, found 1",
 		},
 		"push value type": {
-			source:  `function main() -> null { let Values = std.buffer.New<int>() std.buffer.Push<int>(Values, "x") null }`,
+			source:  `function main() -> null effects { state } { let Values = std.buffer.New<int>() std.buffer.Push<int>(Values, "x") null }`,
 			code:    "SLK320",
 			message: "argument 2 to std.buffer.Push must be int, found string",
 		},
@@ -263,13 +263,13 @@ func TestFormatCollectionSyntax(t *testing.T) {
 	source := compiler.Source{
 		Name:      "main.slk",
 		Namespace: "root",
-		Text:      `function main()->null{let Values=std.buffer.New<int>();std.buffer.Push<int>(Values,1);let Frozen=std.buffer.Freeze<int>(Values);Frozen.Slice(0,Frozen.Length());null}`,
+		Text:      `function main()->null effects { state } {let Values=std.buffer.New<int>();std.buffer.Push<int>(Values,1);let Frozen=std.buffer.Freeze<int>(Values);Frozen.Slice(0,Frozen.Length());null}`,
 	}
 	formatted, diagnostics, err := compiler.Format(source)
 	if err != nil || len(diagnostics) != 0 {
 		t.Fatalf("format collections: diagnostics=%+v err=%v", diagnostics, err)
 	}
-	const want = `function main() -> null {
+	const want = `function main() -> null effects { state } {
     let Values = std.buffer.New<int>()
     std.buffer.Push<int>(Values, 1)
     let Frozen = std.buffer.Freeze<int>(Values)
@@ -284,7 +284,7 @@ func TestFormatCollectionSyntax(t *testing.T) {
 
 func TestBufferRemainsOpaque(t *testing.T) {
 	output := runResultEverywhere(t, `
-function main() -> Buffer<int> {
+function main() -> Buffer<int> effects { state } {
     let Values = std.buffer.New<int>()
     std.buffer.Push<int>(Values, 1)
     Values

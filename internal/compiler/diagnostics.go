@@ -34,6 +34,8 @@ const (
 	diagnosticCodeUnknownCallable          diagnosticCode = "SLK203"
 	diagnosticCodeAlias                    diagnosticCode = "SLK204"
 	diagnosticCodeUnknownClass             diagnosticCode = "SLK205"
+	diagnosticCodeEffectDeclaration        diagnosticCode = "SLK206"
+	diagnosticCodeUndeclaredEffect         diagnosticCode = "SLK207"
 	diagnosticCodeMissingMethod            diagnosticCode = "SLK310"
 	diagnosticCodeDuplicateMethod          diagnosticCode = "SLK311"
 	diagnosticCodeMethodSignature          diagnosticCode = "SLK312"
@@ -205,6 +207,18 @@ var diagnosticDefinitions = []diagnosticDefinition{
 		"Object construction requires a class declaration that is visible from the current namespace.",
 		"An object expression names no known class.",
 		"Correct the class name or import the namespace that declares it."),
+	defineDiagnostic(diagnosticCodeEffectDeclaration, DiagnosticPhaseEffectCheck,
+		"Effect declaration is invalid",
+		"An effects clause contains a non-empty set of known compiler-owned effect names, with each name appearing once.",
+		"An effects clause names an unknown effect or repeats one effect.",
+		"Use one or more of database, environment, filesystem, io, network, process, random, state, and time.",
+		"Remove duplicate effect names."),
+	defineDiagnostic(diagnosticCodeUndeclaredEffect, DiagnosticPhaseEffectCheck,
+		"Effect is not declared",
+		"A callable must declare every observable authority effect that can occur through its body, callees, callbacks, or automatic resource cleanup.",
+		"An operation requires an effect absent from the enclosing callable's effects set.",
+		"Add the named effect to the callable's effects clause.",
+		"Move the operation behind a callable whose explicit contract owns that effect."),
 	defineDiagnostic(diagnosticCodeMissingMethod, DiagnosticPhaseMethodCheck,
 		"Method implementation is missing",
 		"Every method declared by a concrete class must have exactly one implementation.",

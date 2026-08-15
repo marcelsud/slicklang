@@ -89,12 +89,12 @@ function main() -> string {
 // would show up as an extra entry.
 func TestUnionMatchEvaluatesScrutineeOnceAndOnlySelectedArm(t *testing.T) {
 	output := runResultEverywhere(t, unionShapes+`
-function Tap(Log: Buffer<string>, Name: string, Value: Shape) -> Shape {
+function Tap(Log: Buffer<string>, Name: string, Value: Shape) -> Shape effects { state } {
     std.buffer.Push<string>(Log, Name)
     Value
 }
 
-function main() -> string {
+function main() -> string effects { state } {
     let Log = std.buffer.New<string>()
     let Selected = match Tap(Log, "scrutinee", Shape.Circle(1.0)) {
         Shape.Empty => Tap(Log, "empty", Shape.Empty)

@@ -832,7 +832,7 @@ function main() -> Result<string, std.json.Failure> {
 // not disturb Map, Result, Buffer, or the native JSON generics.
 func TestCompilerOwnedGenericsAreUnchanged(t *testing.T) {
 	source := genericBox + `
-function collect() -> Result<int, std.json.Failure> {
+function collect() -> Result<int, std.json.Failure> effects { state } {
     let Numbers = std.buffer.New<int>()
     let Pushed = std.buffer.Push<int>(Numbers, 4)
     let Length = std.buffer.Length<int>(Numbers)
@@ -841,7 +841,7 @@ function collect() -> Result<int, std.json.Failure> {
     if (Found == null) { Ok(0) } else { Ok(Found) }
 }
 
-function main() -> string {
+function main() -> string effects { state } {
     let Held = Box<int> { Value: 1 }
     let Value = Held.Get()
     let Total = match collect() {

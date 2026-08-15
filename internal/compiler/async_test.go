@@ -182,7 +182,7 @@ function main() -> int {
 func TestAsyncRejectsTaskUnsafeValues(t *testing.T) {
 	source := `
 function Read(Reader: std.io.Reader) -> int { 1 }
-function main() -> int {
+function main() -> int effects { io } {
     using Reader = std.io.ReaderFromBytes(std.bytes.FromUtf8("x")) {
         async let Work = Read(Reader)
         await Work
@@ -219,11 +219,11 @@ func TestAsyncPreparationFailureLaunchesNoChild(t *testing.T) {
 			source := fmt.Sprintf(`
 class PrepFailure implements Error { Message: string }
 function Prepare() -> Result<int, PrepFailure> { Err(PrepFailure { Message: "stop" }) }
-function Child(Value: int, URL: string) -> int {
+function Child(Value: int, URL: string) -> int effects { network } {
     let Response = std.http.Fetch(std.http.Request { Method: "GET" URL: URL })
     Value
 }
-function main() -> Result<int, PrepFailure> {
+function main() -> Result<int, PrepFailure> effects { network } {
     async let Work = Child(Prepare()?, %q)
     let Value = await Work
     Ok(Value)
@@ -260,12 +260,12 @@ func TestAsyncArgumentsEvaluateOnceInSourceOrder(t *testing.T) {
 			}))
 			defer server.Close()
 			source := fmt.Sprintf(`
-function Prepare(Value: int, URL: string) -> Result<int, std.http.Failure> {
+function Prepare(Value: int, URL: string) -> Result<int, std.http.Failure> effects { network } {
     let Response = std.http.Fetch(std.http.Request { Method: "GET" URL: URL })?
     Ok(Value)
 }
 function Add(Left: int, Right: int) -> int { Left + Right }
-function main() -> Result<int, std.http.Failure> {
+function main() -> Result<int, std.http.Failure> effects { network } {
     async let Work = Add(Prepare(1, %q)?, Prepare(2, %q)?)
     Ok(await Work)
 }
@@ -304,11 +304,11 @@ func TestAsyncHTTPChildrenOverlap(t *testing.T) {
 			defer server.Close()
 
 			source := fmt.Sprintf(`
-function Fetch(URL: string) -> Result<int, std.http.Failure> {
+function Fetch(URL: string) -> Result<int, std.http.Failure> effects { network } {
     let Response = std.http.Fetch(std.http.Request { Method: "GET" URL: URL })?
     Ok(Response.Status)
 }
-function main() -> Result<int, std.http.Failure> {
+function main() -> Result<int, std.http.Failure> effects { network } {
     async let Left = Fetch(%q)
     async let Right = Fetch(%q)
     let LeftStatus = await Left?
@@ -370,14 +370,14 @@ func TestAsyncResultPropagationCancelsAndJoinsHTTPChild(t *testing.T) {
 			defer server.Close()
 
 			source := fmt.Sprintf(`
-function Pair() -> Result<null, std.http.Failure> {
+function Pair() -> Result<null, std.http.Failure> effects { network } {
     async let FailureJob = std.http.Fetch(std.http.Request { Method: "POST" URL: %q })
     async let BlockedJob = std.http.Fetch(std.http.Request { Method: "POST" URL: %q })
     let Failure = await FailureJob?
     let Blocked = await BlockedJob?
     Ok(null)
 }
-function main() -> string {
+function main() -> string effects { network } {
     match Pair() {
         Ok(_) => "unexpected"
         Err(Failure) => Failure.Kind
@@ -445,24 +445,24 @@ func TestAsyncReturnJoinsChildBeforeParentUsingCleanup(t *testing.T) {
 			source := fmt.Sprintf(`
 class Resource {
     URL: string
-    function Close() -> null {
+    function Close() -> null effects { network } {
         let Closed = std.http.Fetch(std.http.Request { Method: "POST" URL: self.URL + "/close" })
         null
     }
 }
 function Open(URL: string) -> Resource { Resource { URL: URL } }
-function Consume(URL: string) -> null {
+function Consume(URL: string) -> null effects { network } {
     let Response = std.http.Fetch(std.http.Request { Method: "POST" URL: URL + "/consume" })
     null
 }
-function Run(URL: string) -> null {
+function Run(URL: string) -> null effects { network } {
     using Resource = Open(URL) {
         async let Work = Consume(URL)
         let Ready = std.http.Fetch(std.http.Request { Method: "GET" URL: URL + "/wait" })
         return null
     }
 }
-function main() -> string {
+function main() -> string effects { network } {
     let Done = Run(%q)
     "ok"
 }

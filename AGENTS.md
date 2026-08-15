@@ -11,7 +11,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 `internal/compiler/stdlib.go` holds `standardLibraryRegistry`, the single authoritative public Slick surface. A new declaration must be wired through every backend or one of them fails at runtime:
 
-1. registry entry (namespace, function, class, or interface) plus `documentation` on every symbol and field — `undocumentedStandardLibrarySymbols` fails the build otherwise;
+1. registry entry (namespace, function, class, or interface) plus `documentation` on every symbol and field and the narrowest `effects` set on every authority-using or mutating function/method — undocumented symbols and undeclared transitive effects fail the build;
 2. interpreter case in the matching `callNativeStd*` dispatcher (`stdlib.go`, `stdio.go`, `stdhttp.go`, `stdhttpserver.go`, `stdfs.go`, `stdprocess.go`, `stdsqlite.go`), reached from `callNativeFunction`;
 3. generated-Go case in `emitNativeFunction` (functions) or `emitNativeMethod` in `stdio.go` (methods) — both `default` branches are hard errors;
 4. conditional runtime support: a `uses*` flag on `program`, set in `ast_check.go` (parameter and result types, object expressions, call targets) and `visibility.go` (`checkTypeName`), then honoured in `codegen.go` by `emitRuntime`, `emitDeclarations`, and `emitFunctions`.
@@ -56,7 +56,7 @@ A Slick type is its canonical spelling; `types.go` owns the decomposition and `p
 
 - `->` collides with the `<`/`>` scan, so every depth-tracking helper skips it through `isTypeArrow`, and tokens use `matchingAngle` rather than `matching(..., "<", ">")`.
 - `->` binds more weakly than postfix `?` and `[]`, so build those types with `optionalOf` and `arrayOf`, never by appending the suffix. Parentheses that only group a callable are normalized away by `ungroupType`, and `goType`/`resolveDeclaredType` ungroup before reading a spelling.
-- A callable's throw set is sorted by `callableType`, because `throwSet` is a map and generation must be deterministic.
+- A callable's throw and operation-effect sets are sorted by `callableType`, because both originate as maps and generation must be deterministic. Callable contracts spell checked errors before authority effects: `throws Failure effects { filesystem }`.
 
 ## Slick language sharp edges when writing tests and examples
 

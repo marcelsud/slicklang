@@ -69,9 +69,9 @@ func splitTypeList(list string) []string {
 			continue
 		}
 		switch list[index] {
-		case '(', '[', '<':
+		case '(', '[', '<', '{':
 			depth++
-		case ')', ']', '>':
+		case ')', ']', '>', '}':
 			depth--
 		case ',':
 			if depth == 0 {
@@ -123,9 +123,9 @@ func balancedType(name string) bool {
 			continue
 		}
 		switch name[index] {
-		case '(', '[', '<':
+		case '(', '[', '<', '{':
 			open = append(open, name[index])
-		case ')', ']', '>':
+		case ')', ']', '>', '}':
 			if len(open) == 0 || open[len(open)-1] != openingDelimiter(name[index]) {
 				return false
 			}
@@ -141,6 +141,8 @@ func openingDelimiter(closer byte) byte {
 		return '('
 	case ']':
 		return '['
+	case '}':
+		return '{'
 	default:
 		return '<'
 	}
@@ -243,6 +245,8 @@ type parsedType struct {
 	args []string
 	// throws holds the checked effects of a callable type.
 	throws []string
+	// operations holds the observable authority effects of a callable type.
+	operations []string
 }
 
 // parseTypeName decomposes the outermost layer of name. An unbalanced type is
@@ -255,8 +259,8 @@ func parseTypeName(name string) parsedType {
 	if !balancedType(name) {
 		return parsedType{kind: typeKindName, base: name}
 	}
-	if params, result, throws, callable := callableTypeParts(name); callable {
-		return parsedType{kind: typeKindCallable, base: result, args: params, throws: throws}
+	if params, result, throws, operations, callable := callableTypeParts(name); callable {
+		return parsedType{kind: typeKindCallable, base: result, args: params, throws: throws, operations: operations}
 	}
 	if suffix := strings.TrimSuffix(name, "?"); suffix != name {
 		return parsedType{kind: typeKindOptional, base: ungroupType(suffix)}
@@ -277,52 +281,71 @@ func parseTypeName(name string) parsedType {
 	return parsedType{kind: typeKindName, base: name}
 }
 
-// throwsSeparator joins a callable type to its checked effects. The space keeps
-// the keyword readable and the pipe matches a declaration's throws list, which
-// a comma could not because a comma already separates parameter types.
-const throwsSeparator = " throws "
+// throwsSeparator and effectsSeparator join a callable type to its two
+// compile-time effect contracts. Checked errors remain distinct from observable
+// authority effects, and declaration order is always throws then effects.
+const (
+	throwsSeparator  = " throws "
+	effectsSeparator = " effects {"
+)
 
 // callableTypeParts decomposes a callable type such as "(int,int)->int" or
-// "(string)->root.User throws root.Invalid". It reports false unless the
-// outermost shape of name is a well-formed callable.
-func callableTypeParts(name string) (params []string, result string, throws []string, ok bool) {
+// "(string)->root.User throws root.Invalid effects {network}". It reports false
+// unless the outermost shape of name is a well-formed callable.
+func callableTypeParts(name string) (params []string, result string, throws, operations []string, ok bool) {
 	if !strings.HasPrefix(name, "(") {
-		return nil, "", nil, false
+		return nil, "", nil, nil, false
 	}
 	close := matchingParen(name, 0)
 	if close < 0 || !strings.HasPrefix(name[close+1:], "->") {
-		return nil, "", nil, false
+		return nil, "", nil, nil, false
 	}
 	params = splitTypeList(name[1:close])
 	for _, param := range params {
 		if param == "" || !balancedType(param) {
-			return nil, "", nil, false
+			return nil, "", nil, nil, false
 		}
 	}
 	result = name[close+3:]
-	// throws always binds to the outermost callable, so a nested callable that
-	// declares its own effects has to be parenthesized.
-	if index := topLevelThrows(result); index >= 0 {
+	// Both suffixes bind to the outermost callable. A nested callable declaring
+	// either contract must therefore be parenthesized.
+	if index := topLevelSeparator(result, effectsSeparator); index >= 0 {
+		if !strings.HasSuffix(result, "}") {
+			return nil, "", nil, nil, false
+		}
+		list := result[index+len(effectsSeparator) : len(result)-1]
+		if list == "" {
+			return nil, "", nil, nil, false
+		}
+		operations = strings.Split(list, ",")
+		for _, operation := range operations {
+			if operation == "" {
+				return nil, "", nil, nil, false
+			}
+		}
+		result = result[:index]
+	}
+	if index := topLevelSeparator(result, throwsSeparator); index >= 0 {
 		throws = strings.Split(result[index+len(throwsSeparator):], "|")
 		result = result[:index]
 		for _, thrown := range throws {
 			if thrown == "" {
-				return nil, "", nil, false
+				return nil, "", nil, nil, false
 			}
 		}
 	}
 	// A result is one type: a comma at depth zero means these parentheses open a
 	// tuple whose first element is a callable, not a callable of its own.
 	if result == "" || !balancedType(result) || len(splitTypeList(result)) != 1 {
-		return nil, "", nil, false
+		return nil, "", nil, nil, false
 	}
-	return params, result, throws, true
+	return params, result, throws, operations, true
 }
 
-// callableType builds the canonical spelling of a callable type. The throw set
-// is sorted so one callable has exactly one spelling and generated output stays
+// callableType builds the canonical spelling of a callable type. Both sets are
+// sorted so one callable has exactly one spelling and generated output remains
 // deterministic across runs.
-func callableType(params []string, result string, throws []string) string {
+func callableType(params []string, result string, throws, operations []string) string {
 	var builder strings.Builder
 	builder.WriteByte('(')
 	builder.WriteString(strings.Join(params, ","))
@@ -333,6 +356,13 @@ func callableType(params []string, result string, throws []string) string {
 		sort.Strings(sorted)
 		builder.WriteString(throwsSeparator)
 		builder.WriteString(strings.Join(dedupeSorted(sorted), "|"))
+	}
+	if len(operations) > 0 {
+		sorted := append([]string(nil), operations...)
+		sort.Strings(sorted)
+		builder.WriteString(effectsSeparator)
+		builder.WriteString(strings.Join(sorted, ","))
+		builder.WriteByte('}')
 	}
 	return builder.String()
 }
@@ -348,7 +378,7 @@ func dedupeSorted(values []string) []string {
 }
 
 func isCallableType(name string) bool {
-	_, _, _, callable := callableTypeParts(name)
+	_, _, _, _, callable := callableTypeParts(name)
 	return callable
 }
 
@@ -373,9 +403,10 @@ func matchingParen(name string, start int) int {
 	return -1
 }
 
-// topLevelThrows returns the index of the throws clause that belongs to the
-// callable owning name, skipping any that sits inside a nested type.
-func topLevelThrows(name string) int {
+// topLevelSeparator returns the index of separator when it belongs to the
+// callable owning name, skipping occurrences inside nested types and effect
+// sets.
+func topLevelSeparator(name, separator string) int {
 	depth := 0
 	for index := 0; index < len(name); index++ {
 		if isTypeArrow(name, index) {
@@ -383,12 +414,12 @@ func topLevelThrows(name string) int {
 			continue
 		}
 		switch name[index] {
-		case '(', '[', '<':
+		case '(', '[', '<', '{':
 			depth++
-		case ')', ']', '>':
+		case ')', ']', '>', '}':
 			depth--
 		default:
-			if depth == 0 && strings.HasPrefix(name[index:], throwsSeparator) {
+			if depth == 0 && strings.HasPrefix(name[index:], separator) {
 				return index
 			}
 		}

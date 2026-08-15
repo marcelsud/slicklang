@@ -24,6 +24,7 @@ Parameters:
   Name: string
 Returns: string?
 Throws: none
+Effects: environment
 Native: true
 `
 	if stdout.String() != want {
@@ -38,7 +39,7 @@ func TestDescribeJSONOutputContract(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q", status, stderr.String())
 	}
 	want := `{
-  "schema_version": 7,
+  "schema_version": 8,
   "symbol": {
     "canonical_name": "std.env.Get",
     "kind": "function",
@@ -59,6 +60,9 @@ func TestDescribeJSONOutputContract(t *testing.T) {
     "return_type": "string?",
     "return_callable": null,
     "throws": [],
+    "effects": [
+      "environment"
+    ],
     "native": true,
     "fields": [],
     "declared_methods": [],
@@ -84,7 +88,7 @@ func TestDescribeUnknownJSONErrorContract(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q", status, stderr.String())
 	}
 	want := `{
-  "schema_version": 7,
+  "schema_version": 8,
   "error": {
     "code": "unknown_symbol",
     "message": "unknown symbol \"std.env.Missing\"",
@@ -138,8 +142,8 @@ Documentation:
 Reads bounded immutable byte chunks and supports deterministic cleanup.
 
 Declared methods:
-  public std.io.Reader.Close() -> null throws std.io.Failure — Closes the reader or throws Failure when cleanup fails.
-  public std.io.Reader.Read(MaxBytes: int) -> Result<bytes?,std.io.Failure> — Reads at most MaxBytes and returns null only at end-of-stream.
+  public std.io.Reader.Close() -> null throws std.io.Failure effects { io } — Closes the reader or throws Failure when cleanup fails.
+  public std.io.Reader.Read(MaxBytes: int) -> Result<bytes?,std.io.Failure> effects { io } — Reads at most MaxBytes and returns null only at end-of-stream.
 `
 	if stdout.String() != want {
 		t.Fatalf("std.io.Reader output:\n%s\nwant:\n%s", stdout.String(), want)
@@ -173,11 +177,11 @@ func TestDescribeJSONBudgetContract(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q", status, stderr.String())
 	}
 	want := `{
-  "schema_version": 7,
+  "schema_version": 8,
   "budget": {
     "unit": "lines",
     "limit": 39,
-    "required": 121,
+    "required": 122,
     "truncated": true,
     "omitted": [
       {
@@ -199,6 +203,7 @@ func TestDescribeJSONBudgetContract(t *testing.T) {
     "return_type": "",
     "return_callable": null,
     "throws": [],
+    "effects": [],
     "native": false,
     "fields": [],
     "declared_methods": [],

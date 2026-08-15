@@ -1,11 +1,11 @@
-function Exercise(Path: string) -> Result<string, std.fs.Failure> {
+function Exercise(Path: string) -> Result<string, std.fs.Failure> effects { filesystem } {
     std.fs.WriteText(Path, "hello from Slick")?
     let Contents = std.fs.ReadText(Path)?
     std.fs.Remove(Path)?
     Ok(Contents)
 }
 
-function main() -> string {
+function main() -> string effects { environment, filesystem } {
     let Path = std.env.Get("SLICK_STD_FS_EXAMPLE_PATH")
     if (Path == null) {
         "set SLICK_STD_FS_EXAMPLE_PATH to an isolated file path"

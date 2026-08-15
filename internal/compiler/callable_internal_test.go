@@ -83,7 +83,7 @@ func TestCallableTypeSpelling(t *testing.T) {
 			if len(parsed.throws) != len(test.throws) {
 				t.Errorf("throws of %s are %v, expected %v", test.typ, parsed.throws, test.throws)
 			}
-			if rebuilt := callableType(parsed.args, parsed.base, parsed.throws); rebuilt != test.typ {
+			if rebuilt := callableType(parsed.args, parsed.base, parsed.throws, parsed.operations); rebuilt != test.typ {
 				t.Errorf("rebuilt %s as %q", test.typ, rebuilt)
 			}
 			if display := displayName(test.typ); display != test.display {

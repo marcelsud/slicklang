@@ -174,6 +174,27 @@ func canonicalFormatTokens(tokens []formatToken) []formatToken {
 			tokens[alias].text = ""
 		}
 	}
+	for index := range tokens {
+		if tokens[index].text != "effects" {
+			continue
+		}
+		open := nextFormatCodeToken(tokens, index+1)
+		if open >= len(tokens) || tokens[open].text != "{" {
+			continue
+		}
+		var names []string
+		var nameIndexes []int
+		for current := nextFormatCodeToken(tokens, open+1); current < len(tokens) && tokens[current].text != "}"; current = nextFormatCodeToken(tokens, current+1) {
+			if tokens[current].kind == scanner.Ident {
+				names = append(names, tokens[current].text)
+				nameIndexes = append(nameIndexes, current)
+			}
+		}
+		sort.Strings(names)
+		for offset, name := range names {
+			tokens[nameIndexes[offset]].text = name
+		}
+	}
 	canonical := tokens[:0]
 	for _, token := range tokens {
 		if token.text != "" {
@@ -452,6 +473,10 @@ func (f *sourceFormatter) writeCode(token formatToken) {
 	switch token.text {
 	case "{":
 		f.writeOpeningBrace()
+		if f.previous != nil && f.previous.text == "effects" {
+			f.delimiters = append(f.delimiters, "effects")
+			break
+		}
 		f.braceDepth++
 		f.delimiters = append(f.delimiters, "{")
 		f.indent++
@@ -459,6 +484,12 @@ func (f *sourceFormatter) writeCode(token formatToken) {
 			f.newline()
 		}
 	case "}":
+		if f.inEffectSet() {
+			f.space()
+			f.writeText("}")
+			f.popDelimiter("effects")
+			break
+		}
 		if f.indent > 0 {
 			f.indent--
 		}
@@ -639,6 +670,9 @@ func isTopDeclaration(text string) bool {
 
 func (f *sourceFormatter) inBrace() bool {
 	return len(f.delimiters) > 0 && f.delimiters[len(f.delimiters)-1] == "{"
+}
+func (f *sourceFormatter) inEffectSet() bool {
+	return len(f.delimiters) > 0 && f.delimiters[len(f.delimiters)-1] == "effects"
 }
 
 func (f *sourceFormatter) popDelimiter(want string) {

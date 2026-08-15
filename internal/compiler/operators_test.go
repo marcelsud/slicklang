@@ -8,21 +8,21 @@ import (
 )
 
 const operatorTraceSupport = `
-function ResetTrace() -> null {
+function ResetTrace() -> null effects { environment } {
     match std.env.Unset("SLICK_OPERATOR_TEST") {
         Ok(_) => null
         Err(_) => null
     }
 }
 
-function StoreTrace(Value: string) -> null {
+function StoreTrace(Value: string) -> null effects { environment } {
     match std.env.Set("SLICK_OPERATOR_TEST", Value) {
         Ok(_) => null
         Err(_) => null
     }
 }
 
-function AppendTrace(Value: string) -> null {
+function AppendTrace(Value: string) -> null effects { environment } {
     let Current = std.env.Get("SLICK_OPERATOR_TEST")
     if (Current == null) {
         StoreTrace(Value)
@@ -31,17 +31,17 @@ function AppendTrace(Value: string) -> null {
     }
 }
 
-function Trace() -> string {
+function Trace() -> string effects { environment } {
     let Current = std.env.Get("SLICK_OPERATOR_TEST")
     if (Current == null) { "" } else { Current }
 }
 
-function MarkInt(Value: int, Mark: string) -> int {
+function MarkInt(Value: int, Mark: string) -> int effects { environment } {
     AppendTrace(Mark)
     Value
 }
 
-function MarkBool(Value: bool, Mark: string) -> bool {
+function MarkBool(Value: bool, Mark: string) -> bool effects { environment } {
     AppendTrace(Mark)
     Value
 }
@@ -49,7 +49,7 @@ function MarkBool(Value: bool, Mark: string) -> bool {
 
 func TestOperatorsMatchAcrossBackendsAndPreserveEvaluationOrder(t *testing.T) {
 	source := operatorTraceSupport + `
-function main() -> string {
+function main() -> string effects { environment } {
     ResetTrace()
     let Arithmetic = MarkInt(20, "A") - MarkInt(3, "B") * MarkInt(4, "C") - MarkInt(1, "D")
     let Grouped = (20 - 3) * 4

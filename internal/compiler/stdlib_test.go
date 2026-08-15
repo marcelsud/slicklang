@@ -16,11 +16,11 @@ func TestStdEnvExactAliasesAndFailureTypeCheck(t *testing.T) {
 use std.env.Get as GetEnv
 use std.env.Failure as EnvFailure
 
-function Read(Name: string) -> string? {
+function Read(Name: string) -> string? effects { environment } {
     GetEnv(Name)
 }
 
-function Write(Name: string, Value: string) -> Result<null, EnvFailure> {
+function Write(Name: string, Value: string) -> Result<null, EnvFailure> effects { environment } {
     std.env.Set(Name, Value)
 }
 
@@ -48,43 +48,43 @@ func TestStdEnvStaticCallContracts(t *testing.T) {
 	}{
 		{
 			name:    "Get argument type",
-			source:  `function main() -> string? { std.env.Get(1) }`,
+			source:  `function main() -> string? effects { environment } { std.env.Get(1) }`,
 			code:    "SLK320",
 			message: "argument 1 to std.env.Get must be string, found int",
 		},
 		{
 			name:    "Set name type",
-			source:  `function main() -> Result<null, std.env.Failure> { std.env.Set(1, "value") }`,
+			source:  `function main() -> Result<null, std.env.Failure> effects { environment } { std.env.Set(1, "value") }`,
 			code:    "SLK320",
 			message: "argument 1 to std.env.Set must be string, found int",
 		},
 		{
 			name:    "Set value type",
-			source:  `function main() -> Result<null, std.env.Failure> { std.env.Set("name", 1) }`,
+			source:  `function main() -> Result<null, std.env.Failure> effects { environment } { std.env.Set("name", 1) }`,
 			code:    "SLK320",
 			message: "argument 2 to std.env.Set must be string, found int",
 		},
 		{
 			name:    "Unset argument type",
-			source:  `function main() -> Result<null, std.env.Failure> { std.env.Unset(1) }`,
+			source:  `function main() -> Result<null, std.env.Failure> effects { environment } { std.env.Unset(1) }`,
 			code:    "SLK320",
 			message: "argument 1 to std.env.Unset must be string, found int",
 		},
 		{
 			name:    "Get arity",
-			source:  `function main() -> string? { std.env.Get() }`,
+			source:  `function main() -> string? effects { environment } { std.env.Get() }`,
 			code:    "SLK320",
 			message: "std.env.Get expects 1 arguments, found 0",
 		},
 		{
 			name:    "Set arity",
-			source:  `function main() -> Result<null, std.env.Failure> { std.env.Set("name") }`,
+			source:  `function main() -> Result<null, std.env.Failure> effects { environment } { std.env.Set("name") }`,
 			code:    "SLK320",
 			message: "std.env.Set expects 2 arguments, found 1",
 		},
 		{
 			name:    "Unset arity",
-			source:  `function main() -> Result<null, std.env.Failure> { std.env.Unset("name", "extra") }`,
+			source:  `function main() -> Result<null, std.env.Failure> effects { environment } { std.env.Unset("name", "extra") }`,
 			code:    "SLK320",
 			message: "std.env.Unset expects 1 arguments, found 2",
 		},
@@ -98,7 +98,7 @@ func TestStdEnvStaticCallContracts(t *testing.T) {
 			name: "optional requires narrowing",
 			source: `
 function Need(Value: string) -> string { Value }
-function main() -> string { Need(std.env.Get("SLICK_OPTIONAL")) }
+function main() -> string effects { environment } { Need(std.env.Get("SLICK_OPTIONAL")) }
 `,
 			code:    "SLK372",
 			message: "string? may be null",
@@ -131,7 +131,7 @@ function main() -> null { null }
 
 func TestStdEnvResultHasNoCheckedThrowEffect(t *testing.T) {
 	diagnostics := checkResult(t, `
-function Relay(Name: string, Value: string) -> Result<null, std.env.Failure> {
+function Relay(Name: string, Value: string) -> Result<null, std.env.Failure> effects { environment } {
     std.env.Set(Name, Value)
 }
 `)
@@ -171,7 +171,7 @@ func TestInterpreterStdEnvGetStates(t *testing.T) {
 			name := stdEnvTestName(t)
 			test.prepare(t, name)
 			output := runResult(t, describeEnvironmentValue+fmt.Sprintf(`
-function main() -> string {
+function main() -> string effects { environment } {
     DescribeEnvironmentValue(std.env.Get(%q))
 }
 `, name))
@@ -187,7 +187,7 @@ func TestInterpreterStdEnvMutationsAreObserved(t *testing.T) {
 		name := stdEnvTestName(t)
 		preserveAndUnsetEnvironment(t, name)
 		output := runResult(t, describeEnvironmentValue+fmt.Sprintf(`
-function main() -> string {
+function main() -> string effects { environment } {
     match std.env.Set(%q, "Ada") {
         Ok(_) => DescribeEnvironmentValue(std.env.Get(%q))
         Err(Failure) => Failure.Message
@@ -203,7 +203,7 @@ function main() -> string {
 		name := stdEnvTestName(t)
 		t.Setenv(name, "Grace")
 		output := runResult(t, describeEnvironmentValue+fmt.Sprintf(`
-function main() -> string {
+function main() -> string effects { environment } {
     match std.env.Set(%q, "Ada") {
         Ok(_) => DescribeEnvironmentValue(std.env.Get(%q))
         Err(Failure) => Failure.Message
@@ -219,7 +219,7 @@ function main() -> string {
 		name := stdEnvTestName(t)
 		t.Setenv(name, "Ada")
 		output := runResult(t, describeEnvironmentValue+fmt.Sprintf(`
-function main() -> string {
+function main() -> string effects { environment } {
     match std.env.Unset(%q) {
         Ok(_) => DescribeEnvironmentValue(std.env.Get(%q))
         Err(Failure) => Failure.Message
@@ -238,7 +238,7 @@ func TestInterpreterStdEnvFailuresAreTypedResults(t *testing.T) {
 
 	t.Run("Set", func(t *testing.T) {
 		output := runResult(t, fmt.Sprintf(`
-function main() -> string {
+function main() -> string effects { environment } {
     match std.env.Set(%q, %q) {
         Ok(_) => "unexpected success"
         Err(Failure) => `+"`"+`${Failure.Operation}|${Failure.Name}|${Failure.Message}`+"`"+`
@@ -251,7 +251,7 @@ function main() -> string {
 	t.Run("Unset", func(t *testing.T) {
 		requireUnsetenvFailure(t, invalidName)
 		output := runResult(t, fmt.Sprintf(`
-function main() -> string {
+function main() -> string effects { environment } {
     match std.env.Unset(%q) {
         Ok(_) => "unexpected success"
         Err(Failure) => `+"`"+`${Failure.Operation}|${Failure.Name}|${Failure.Message}`+"`"+`
@@ -272,11 +272,11 @@ func TestInterpreterStdEnvQuestionPropagatesFailures(t *testing.T) {
 			name:      "Set",
 			operation: "Set",
 			source: `
-function Through(Name: string, Value: string) -> Result<string, std.env.Failure> {
+function Through(Name: string, Value: string) -> Result<string, std.env.Failure> effects { environment } {
     std.env.Set(Name, Value)?
     Ok(Value)
 }
-function main() -> string {
+function main() -> string effects { environment } {
     match Through("SLICK_INVALID=NAME", "secret") {
         Ok(_) => "unexpected success"
         Err(Failure) => Failure.Operation
@@ -288,11 +288,11 @@ function main() -> string {
 			name:      "Unset",
 			operation: "Unset",
 			source: `
-function Through(Name: string) -> Result<string, std.env.Failure> {
+function Through(Name: string) -> Result<string, std.env.Failure> effects { environment } {
     std.env.Unset(Name)?
     Ok(Name)
 }
-function main() -> string {
+function main() -> string effects { environment } {
     match Through("SLICK_INVALID=NAME") {
         Ok(_) => "unexpected success"
         Err(Failure) => Failure.Operation
@@ -319,7 +319,7 @@ function Recovery() -> Result<null, std.env.Failure> {
     Ok(null)
 }
 
-function main() -> string {
+function main() -> string effects { environment } {
     match (std.env.Set("SLICK_INVALID=NAME", "secret") catch (error) {
         std.env.Failure => Recovery()
     }) {
@@ -337,7 +337,7 @@ func TestNativeStdEnvReadsChildEnvironmentAtRuntime(t *testing.T) {
 	name := stdEnvTestName(t)
 	t.Setenv(name, "build-time")
 	binary := buildStdEnvProgram(t, describeEnvironmentValue+fmt.Sprintf(`
-function main() -> string {
+function main() -> string effects { environment } {
     DescribeEnvironmentValue(std.env.Get(%q))
 }
 `, name))
@@ -353,14 +353,14 @@ function main() -> string {
 func TestNativeStdEnvSetAndUnsetAreObserved(t *testing.T) {
 	name := stdEnvTestName(t)
 	program := describeEnvironmentValue + fmt.Sprintf(`
-function Exercise() -> Result<string, std.env.Failure> {
+function Exercise() -> Result<string, std.env.Failure> effects { environment } {
     std.env.Set(%q, "Ada")?
     let During = DescribeEnvironmentValue(std.env.Get(%q))
     std.env.Unset(%q)?
     let After = DescribeEnvironmentValue(std.env.Get(%q))
     Ok(`+"`"+`${During};${After}`+"`"+`)
 }
-function main() -> string {
+function main() -> string effects { environment } {
     match Exercise() {
         Ok(Output) => Output
         Err(Failure) => Failure.Message
@@ -376,7 +376,7 @@ function main() -> string {
 func TestNativeStdEnvSetFailureIsSuccessfulErrProcess(t *testing.T) {
 	const invalidName = "SLICK_NATIVE_INVALID=NAME"
 	program := fmt.Sprintf(`
-function main() -> string {
+function main() -> string effects { environment } {
     match std.env.Set(%q, "secret") {
         Ok(_) => "unexpected success"
         Err(Failure) => `+"`"+`${Failure.Operation}|${Failure.Name}`+"`"+`
@@ -397,7 +397,7 @@ func TestNativeStdEnvBinaryNeedsNoSourceOrSlickRuntime(t *testing.T) {
 	source := filepath.Join(root, "main.slk")
 	name := stdEnvTestName(t)
 	program := describeEnvironmentValue + fmt.Sprintf(`
-function main() -> string {
+function main() -> string effects { environment } {
     DescribeEnvironmentValue(std.env.Get(%q))
 }
 `, name)

@@ -107,25 +107,25 @@ function Raise(Failure: std.io.Failure) -> null throws std.io.Failure {
     throw Failure
 }
 
-function WriteText(Writer: std.io.BytesWriter, Text: string) -> null throws std.io.Failure {
+function WriteText(Writer: std.io.BytesWriter, Text: string) -> null throws std.io.Failure effects { io } {
     match Writer.Write(std.bytes.FromUtf8(Text)) {
         Ok(Count) => null
         Err(Failure) => Raise(Failure)
     }
 }
 
-function Prefix(Writer: std.io.BytesWriter) -> null throws std.io.Failure {
+function Prefix(Writer: std.io.BytesWriter) -> null throws std.io.Failure effects { io } {
     WriteText(Writer, "A")
 }
 
 class Service<T> {
     @Around(Prefix)
-    function Run(Writer: std.io.BytesWriter) -> null throws std.io.Failure {
+    function Run(Writer: std.io.BytesWriter) -> null throws std.io.Failure effects { io } {
         WriteText(Writer, "B")
     }
 }
 
-function main() -> string throws std.io.Failure {
+function main() -> string throws std.io.Failure effects { io, state } {
     using Writer = std.io.WriterToBytes() {
         let App = Service<int> {}
         App.Run(Writer)

@@ -13,20 +13,18 @@ function ExtractTitle(Row: std.sqlite.Row) -> string {
 
 // `?` stays in Result: Ok continues, Err returns Err. It does not throw.
 // using still throws on Close, so this signature has both channels.
-function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure {
+function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     using DB = std.sqlite.Open(":memory:")? {
         let CreateStmt = std.sqlite.Statement {
             SQL: "CREATE TABLE todos (id INTEGER PRIMARY KEY, title TEXT)"
             Parameters: []
         }
         DB.Execute(CreateStmt)?
-
         let InsertStmt = std.sqlite.Statement {
             SQL: "INSERT INTO todos (id, title) VALUES (?, ?)"
             Parameters: [std.sqlite.Value.Integer(1), std.sqlite.Value.Text("ship sqlite")]
         }
         DB.Execute(InsertStmt)?
-
         let Query = std.sqlite.Query {
             SQL: "SELECT title FROM todos WHERE id = 1"
             Parameters: []
@@ -45,6 +43,6 @@ function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Fail
 }
 
 // unwrap crosses the boundary: Ok payload, or throw the Err.
-function main() -> string throws std.sqlite.Failure {
+function main() -> string throws std.sqlite.Failure effects { database } {
     unwrap(Exercise())
 }

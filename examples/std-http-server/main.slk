@@ -15,7 +15,7 @@ class EchoHandler implements std.http.server.Handler {
     }
 }
 
-function Run(Address: string) -> Result<null, std.http.server.Failure> {
+function Run(Address: string) -> Result<null, std.http.server.Failure> effects { database, environment, filesystem, io, network, process, random, state, time } {
     std.http.server.Serve(std.http.server.Config {
         Address: Address
         MaxHeaderBytes: 1048576
@@ -23,9 +23,8 @@ function Run(Address: string) -> Result<null, std.http.server.Failure> {
     }, EchoHandler {})
 }
 
-function main() -> string {
+function main() -> string effects { database, environment, filesystem, io, network, process, random, state, time } {
     let Address = std.env.Get("SLICK_HTTP_SERVER_ADDR")
-
     if (Address == null) {
         "set SLICK_HTTP_SERVER_ADDR"
     } else {

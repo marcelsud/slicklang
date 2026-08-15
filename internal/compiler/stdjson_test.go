@@ -669,7 +669,7 @@ function main() -> string {
 
 func TestStdJsonExistingStdEnvUnchanged(t *testing.T) {
 	diagnostics := checkResult(t, `
-function main() -> string? {
+function main() -> string? effects { environment } {
     std.env.Get("SLICK_STDLIB_JSON_GUARD")
 }
 `)
