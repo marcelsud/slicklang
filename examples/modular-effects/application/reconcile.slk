@@ -1,0 +1,30 @@
+use root.domain.AppFailure
+use root.domain.RunSummary
+
+/// Reconcile coordinates application ports within an explicit authority budget.
+function Reconcile(Source: BatchSource, Risks: RiskScorer, Store: ShipmentStore, Time: Clock, Audit: AuditSink) -> Result<RunSummary, AppFailure> effects { database, filesystem, network } {
+    Store.Initialize()?
+    let Events = Source.Load()?
+    let Accepted = 0
+    let Review = 0
+    let Rejected = 0
+    for Event in Events {
+        let Assessment = Risks.Assess(Event)?
+        Store.Record(Event, Assessment, Time.NowEpoch())?
+        if (Assessment.Decision == "accepted") {
+            Accepted = Accepted + 1
+        } else if (Assessment.Decision == "review") {
+            Review = Review + 1
+        } else {
+            Rejected = Rejected + 1
+        }
+    }
+    let Summary = RunSummary {
+        Processed: Events.Length()
+        Accepted: Accepted
+        Review: Review
+        Rejected: Rejected
+    }
+    Audit.Write(Summary)?
+    Ok(Summary)
+}

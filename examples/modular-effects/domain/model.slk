@@ -1,0 +1,33 @@
+/// ShipmentEvent is one shipment awaiting reconciliation.
+class ShipmentEvent {
+    /// ID identifies the shipment across adapters.
+    ID: string
+    /// Destination is the shipment's destination code.
+    Destination: string
+}
+
+/// RiskAssessment is the policy returned by the risk service.
+class RiskAssessment {
+    /// Decision is accepted, review, or rejected.
+    Decision: string
+}
+
+/// RunSummary counts the decisions made by one reconciliation run.
+class RunSummary {
+    /// Processed is the total number of shipments handled.
+    Processed: int
+    /// Accepted is the number accepted.
+    Accepted: int
+    /// Review is the number requiring review.
+    Review: int
+    /// Rejected is the number rejected.
+    Rejected: int
+}
+
+/// AppFailure reports an adapter failure without exposing host details.
+class AppFailure implements Error {
+    /// Kind identifies the failed application capability.
+    Kind: string
+    /// Message is safe to show to an operator.
+    Message: string
+}

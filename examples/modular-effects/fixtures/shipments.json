@@ -1,0 +1,14 @@
+[
+  {
+    "ID": "shipment-100",
+    "Destination": "NL"
+  },
+  {
+    "ID": "shipment-200",
+    "Destination": "US"
+  },
+  {
+    "ID": "shipment-300",
+    "Destination": "BR"
+  }
+]

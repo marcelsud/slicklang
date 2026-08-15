@@ -1,0 +1,15 @@
+use root.application.Clock
+
+class configuredClock implements Clock {
+    Epoch: int
+    function NowEpoch() -> int {
+        self.Epoch
+    }
+}
+
+/// NewConfiguredClock creates a pure clock from composition-supplied data.
+function NewConfiguredClock(Epoch: int) -> Clock {
+    configuredClock {
+        Epoch: Epoch
+    }
+}

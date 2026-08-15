@@ -1,0 +1,71 @@
+use root.application.RiskScorer
+use root.domain.AppFailure
+use root.domain.RiskAssessment
+use root.domain.ShipmentEvent
+
+class riskResponse {
+    @std.json.Name("decision")
+    Decision: string
+}
+
+class httpRiskScorer implements RiskScorer {
+    URL: string
+    Token: string
+    function Assess(Event: ShipmentEvent) -> Result<RiskAssessment, AppFailure> effects { network } {
+        let Request = std.http.Request {
+            Method: "GET"
+            URL: self.URL + "/" + Event.ID
+            Headers: map {
+                "Authorization": ["Bearer " + self.Token]
+            }
+            MaxResponseBytes: 4096
+        }
+        match std.http.Fetch(Request) {
+            Ok(Response) => decodeRiskResponse(Response)
+            Err(_) => riskFailure()
+        }
+    }
+}
+
+function riskFailure() -> Result<RiskAssessment, AppFailure> {
+    Err(AppFailure {
+        Kind: "risk"
+        Message: "could not assess shipment"
+    })
+}
+
+function decodeRiskResponse(Response: std.http.Response) -> Result<RiskAssessment, AppFailure> {
+    if (Response.Status != 200) {
+        riskFailure()
+    } else {
+        match std.bytes.ToUtf8(Response.Body) {
+            Ok(Text) => decodeRiskText(Text)
+            Err(_) => riskFailure()
+        }
+    }
+}
+
+function decodeRiskText(Text: string) -> Result<RiskAssessment, AppFailure> {
+    match std.json.Decode<riskResponse>(Text) {
+        Ok(Decoded) => validateRiskDecision(Decoded.Decision)
+        Err(_) => riskFailure()
+    }
+}
+
+function validateRiskDecision(Decision: string) -> Result<RiskAssessment, AppFailure> {
+    if (Decision == "accepted" || Decision == "review" || Decision == "rejected") {
+        Ok(RiskAssessment {
+            Decision: Decision
+        })
+    } else {
+        riskFailure()
+    }
+}
+
+/// NewHTTPRiskScorer creates a loopback- or service-backed risk scorer.
+function NewHTTPRiskScorer(URL: string, Token: string) -> RiskScorer {
+    httpRiskScorer {
+        URL: URL
+        Token: Token
+    }
+}

@@ -1,0 +1,44 @@
+use root.application.ShipmentStore
+use root.domain.AppFailure
+use root.domain.RiskAssessment
+use root.domain.ShipmentEvent
+
+class sqliteShipmentStore implements ShipmentStore {
+    Database: std.sqlite.Database
+    function Initialize() -> Result<null, AppFailure> effects { database } {
+        let Statement = std.sqlite.Statement {
+            SQL: "CREATE TABLE IF NOT EXISTS shipments (shipment_id TEXT PRIMARY KEY, destination TEXT NOT NULL, decision TEXT NOT NULL, observed_at_epoch INTEGER NOT NULL)"
+            Parameters: []
+        }
+        let Database = self.Database
+        match Database.Execute(Statement) {
+            Ok(_) => Ok(null)
+            Err(_) => storeFailure()
+        }
+    }
+    function Record(Event: ShipmentEvent, Assessment: RiskAssessment, ObservedAtEpoch: int) -> Result<null, AppFailure> effects { database } {
+        let Statement = std.sqlite.Statement {
+            SQL: "INSERT INTO shipments (shipment_id, destination, decision, observed_at_epoch) VALUES (?, ?, ?, ?)"
+            Parameters: [std.sqlite.Value.Text(Event.ID), std.sqlite.Value.Text(Event.Destination), std.sqlite.Value.Text(Assessment.Decision), std.sqlite.Value.Integer(ObservedAtEpoch)]
+        }
+        let Database = self.Database
+        match Database.Execute(Statement) {
+            Ok(_) => Ok(null)
+            Err(_) => storeFailure()
+        }
+    }
+}
+
+function storeFailure() -> Result<null, AppFailure> {
+    Err(AppFailure {
+        Kind: "store"
+        Message: "could not persist shipment"
+    })
+}
+
+/// NewSQLiteShipmentStore creates a store over a composition-owned database.
+function NewSQLiteShipmentStore(Database: std.sqlite.Database) -> ShipmentStore {
+    sqliteShipmentStore {
+        Database: Database
+    }
+}
