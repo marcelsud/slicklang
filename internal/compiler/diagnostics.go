@@ -211,7 +211,7 @@ var diagnosticDefinitions = []diagnosticDefinition{
 		"Effect declaration is invalid",
 		"An effects clause contains a non-empty set of known compiler-owned effect names, with each name appearing once.",
 		"An effects clause names an unknown effect or repeats one effect.",
-		"Use one or more of database, environment, filesystem, network, process, random, state, and time.",
+		"Use one or more of database, environment, filesystem, io, network, process, random, state, and time.",
 		"Remove duplicate effect names."),
 	defineDiagnostic(diagnosticCodeUndeclaredEffect, DiagnosticPhaseEffectCheck,
 		"Effect is not declared",

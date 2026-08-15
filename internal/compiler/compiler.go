@@ -861,7 +861,7 @@ func (p *parser) parseFunction() {
 	}
 	parts := strings.Split(ref.name, ".")
 	for _, part := range parts {
-		if isAsyncKeyword(part) {
+		if isReservedKeyword(part) {
 			p.error(ref.pos, "%s is a reserved language keyword", part)
 			return
 		}
@@ -1076,6 +1076,11 @@ func parseTypePrimary(tokens []token, index int, allowContracts bool) (string, i
 	if !ok {
 		return "", index, "expected type", tokens[index].pos
 	}
+	for _, part := range strings.Split(ref.name, ".") {
+		if isReservedKeyword(part) {
+			return "", index, part + " is a reserved language keyword", ref.pos
+		}
+	}
 	text := ref.name
 	if next < len(tokens) && tokens[next].text == "<" {
 		close := matchingAngle(tokens, next)
@@ -1232,7 +1237,7 @@ func (p *parser) expectIdent(label string) (token, bool) {
 		p.error(tok.pos, "expected %s", label)
 		return token{}, false
 	}
-	if isAsyncKeyword(tok.text) {
+	if isReservedKeyword(tok.text) {
 		p.error(tok.pos, "%s is a reserved language keyword", tok.text)
 		p.advance()
 		return token{}, false
@@ -1615,7 +1620,7 @@ func validNamespace(namespace string) bool {
 }
 
 func validIdentifier(value string) bool {
-	if isAsyncKeyword(value) {
+	if isReservedKeyword(value) {
 		return false
 	}
 	for index, r := range value {
@@ -1630,6 +1635,6 @@ func validIdentifier(value string) bool {
 	return value != ""
 }
 
-func isAsyncKeyword(value string) bool {
-	return value == "async" || value == "await"
+func isReservedKeyword(value string) bool {
+	return value == "async" || value == "await" || value == "effects"
 }

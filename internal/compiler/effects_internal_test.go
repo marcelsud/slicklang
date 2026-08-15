@@ -112,6 +112,34 @@ function Run(Action: () -> null effects { state, environment }) -> null effects 
 	}
 }
 
+func TestEffectsIsReservedAsAnIdentifier(t *testing.T) {
+	tests := map[string]string{
+		"class":       `class effects {}`,
+		"local":       `function main() -> null { let effects = null effects }`,
+		"return type": `function Build() -> effects { null }`,
+	}
+	for name, text := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, diagnostics, err := Format(Source{Name: "main.slk", Namespace: "root", Text: text})
+			if err != nil {
+				t.Fatal(err)
+			}
+			requireEffectDiagnostic(t, diagnostics, diagnosticCodeSyntax, "effects is a reserved language keyword")
+		})
+	}
+}
+
+func TestEffectDeclarationRemedyListsEveryEffect(t *testing.T) {
+	description, err := DescribeDiagnostic(string(diagnosticCodeEffectDeclaration))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "Use one or more of database, environment, filesystem, io, network, process, random, state, and time."
+	if !slices.Contains(description.Fixes, want) {
+		t.Fatalf("SLK206 fixes = %v", description.Fixes)
+	}
+}
+
 func TestStandardLibraryEffectRegistryMatchesAuthoritySeams(t *testing.T) {
 	program, diagnostics := compile(nil)
 	if len(diagnostics) != 0 {

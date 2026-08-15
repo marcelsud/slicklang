@@ -1516,7 +1516,7 @@ func (p *bodyParser) expectIdent(label string) (token, bool) {
 		return token{}, false
 	}
 	tok := p.current()
-	if isAsyncKeyword(tok.text) {
+	if isReservedKeyword(tok.text) {
 		p.error(tok.pos, "%s is a reserved language keyword", tok.text)
 		p.index++
 		return token{}, false
