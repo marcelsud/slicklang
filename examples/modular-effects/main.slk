@@ -1,0 +1,106 @@
+use root.adapters.NewConfiguredClock
+use root.adapters.NewHTTPRiskScorer
+use root.adapters.NewJSONFileAuditSink
+use root.adapters.NewJSONFileBatchSource
+use root.adapters.NewSQLiteShipmentStore
+use root.application.Reconcile
+use root.domain.AppFailure
+use root.domain.RunSummary
+
+/// Config contains the host values selected by the composition root.
+class Config {
+    /// InputPath identifies the committed or operator-supplied shipment batch.
+    InputPath: string
+    /// RiskURL identifies the risk service.
+    RiskURL: string
+    /// RiskToken authenticates outbound risk requests.
+    RiskToken: string
+    /// DatabasePath identifies the SQLite database.
+    DatabasePath: string
+    /// ReportPath identifies the audit report destination.
+    ReportPath: string
+    /// NowEpoch is the deterministic observation time.
+    NowEpoch: int
+}
+
+function configFailure(Message: string) -> Result<string, AppFailure> {
+    Err(AppFailure {
+        Kind: "config"
+        Message: Message
+    })
+}
+
+function requiredConfig(Name: string) -> Result<string, AppFailure> effects { environment } {
+    let Value = std.env.Get(Name)
+    if (Value == null) {
+        configFailure(Name + " is required")
+    } else {
+        if (Value == "") {
+            configFailure(Name + " is required")
+        } else {
+            Ok(Value)
+        }
+    }
+}
+
+function loadConfig() -> Result<Config, AppFailure> effects { environment } {
+    let InputPath = requiredConfig("MODULAR_EFFECTS_INPUT")?
+    let RiskURL = requiredConfig("MODULAR_EFFECTS_RISK_URL")?
+    let RiskToken = requiredConfig("MODULAR_EFFECTS_RISK_TOKEN")?
+    let DatabasePath = requiredConfig("MODULAR_EFFECTS_DATABASE")?
+    let ReportPath = requiredConfig("MODULAR_EFFECTS_REPORT")?
+    let EpochText = requiredConfig("MODULAR_EFFECTS_NOW_EPOCH")?
+    match std.convert.ParseInt(EpochText) {
+        Ok(Epoch) => Ok(Config {
+            InputPath: InputPath
+            RiskURL: RiskURL
+            RiskToken: RiskToken
+            DatabasePath: DatabasePath
+            ReportPath: ReportPath
+            NowEpoch: Epoch
+        })
+        Err(_) => Err(AppFailure {
+            Kind: "config"
+            Message: "MODULAR_EFFECTS_NOW_EPOCH must be an integer"
+        })
+    }
+}
+
+/// Run owns the database lifetime and composes concrete adapters once.
+function Run(ConfigValue: Config) -> Result<RunSummary, AppFailure> throws std.sqlite.Failure effects { database, filesystem, network } {
+    match std.sqlite.Open(ConfigValue.DatabasePath) {
+        Ok(Database) => reconcileWithDatabase(ConfigValue, Database)
+        Err(_) => Err(AppFailure {
+            Kind: "store"
+            Message: "could not open shipment database"
+        })
+    }
+}
+
+function reconcileWithDatabase(ConfigValue: Config, Database: std.sqlite.Database) -> Result<RunSummary, AppFailure> throws std.sqlite.Failure effects { database, filesystem, network } {
+    using OwnedDatabase = Database {
+        Reconcile(NewJSONFileBatchSource(ConfigValue.InputPath), NewHTTPRiskScorer(ConfigValue.RiskURL, ConfigValue.RiskToken), NewSQLiteShipmentStore(OwnedDatabase), NewConfiguredClock(ConfigValue.NowEpoch), NewJSONFileAuditSink(ConfigValue.ReportPath))
+    }
+}
+
+function summaryText(Summary: RunSummary) -> string {
+    `processed=${Summary.Processed};accepted=${Summary.Accepted};review=${Summary.Review};rejected=${Summary.Rejected}`
+}
+
+function failureText(Failure: AppFailure) -> string {
+    `${Failure.Kind}: ${Failure.Message}`
+}
+
+function runConfigured(ConfigValue: Config) -> string throws std.sqlite.Failure effects { database, filesystem, network } {
+    match Run(ConfigValue) {
+        Ok(Summary) => summaryText(Summary)
+        Err(Failure) => failureText(Failure)
+    }
+}
+
+function main() -> string throws std.sqlite.Failure effects { database, environment, filesystem, network } {
+    match loadConfig() {
+        Ok(ConfigValue) => runConfigured(ConfigValue)
+        Err(Failure) => failureText(Failure)
+    }
+}

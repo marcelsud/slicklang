@@ -1,0 +1,34 @@
+use root.application.AuditSink
+use root.domain.AppFailure
+use root.domain.RunSummary
+
+class jsonFileAuditSink implements AuditSink {
+    Path: string
+    function Write(Summary: RunSummary) -> Result<null, AppFailure> effects { filesystem } {
+        match std.json.Encode<RunSummary>(Summary) {
+            Ok(Text) => writeAuditText(self.Path, Text)
+            Err(_) => auditFailure()
+        }
+    }
+}
+
+function writeAuditText(Path: string, Text: string) -> Result<null, AppFailure> effects { filesystem } {
+    match std.fs.WriteText(Path, Text) {
+        Ok(_) => Ok(null)
+        Err(_) => auditFailure()
+    }
+}
+
+function auditFailure() -> Result<null, AppFailure> {
+    Err(AppFailure {
+        Kind: "audit"
+        Message: "could not write audit report"
+    })
+}
+
+/// NewJSONFileAuditSink creates a filesystem-backed audit sink.
+function NewJSONFileAuditSink(Path: string) -> AuditSink {
+    jsonFileAuditSink {
+        Path: Path
+    }
+}

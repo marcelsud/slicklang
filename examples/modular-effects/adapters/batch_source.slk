@@ -1,0 +1,33 @@
+use root.application.BatchSource
+use root.domain.AppFailure
+use root.domain.ShipmentEvent
+
+class jsonFileBatchSource implements BatchSource {
+    Path: string
+    function Load() -> Result<ShipmentEvent[], AppFailure> effects { filesystem } {
+        match std.fs.ReadText(self.Path) {
+            Ok(Text) => decodeShipmentBatch(Text)
+            Err(_) => Err(AppFailure {
+                Kind: "source"
+                Message: "could not load shipments"
+            })
+        }
+    }
+}
+
+function decodeShipmentBatch(Text: string) -> Result<ShipmentEvent[], AppFailure> {
+    match std.json.Decode<ShipmentEvent[]>(Text) {
+        Ok(Events) => Ok(Events)
+        Err(_) => Err(AppFailure {
+            Kind: "source"
+            Message: "could not decode shipments"
+        })
+    }
+}
+
+/// NewJSONFileBatchSource creates a filesystem-backed batch source.
+function NewJSONFileBatchSource(Path: string) -> BatchSource {
+    jsonFileBatchSource {
+        Path: Path
+    }
+}

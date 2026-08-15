@@ -1,0 +1,36 @@
+use root.domain.AppFailure
+use root.domain.RiskAssessment
+use root.domain.RunSummary
+use root.domain.ShipmentEvent
+
+/// BatchSource loads the shipment batch for one run.
+interface BatchSource {
+    /// Load returns the complete input batch.
+    function Load() -> Result<ShipmentEvent[], AppFailure> effects { filesystem }
+}
+
+/// RiskScorer obtains a risk policy for a shipment.
+interface RiskScorer {
+    /// Assess returns the service's decision for Event.
+    function Assess(Event: ShipmentEvent) -> Result<RiskAssessment, AppFailure> effects { network }
+}
+
+/// ShipmentStore persists reconciled shipments.
+interface ShipmentStore {
+    /// Initialize prepares storage for reconciliation.
+    function Initialize() -> Result<null, AppFailure> effects { database }
+    /// Record persists one event, assessment, and observation time.
+    function Record(Event: ShipmentEvent, Assessment: RiskAssessment, ObservedAtEpoch: int) -> Result<null, AppFailure> effects { database }
+}
+
+/// Clock supplies the observation time used by a run.
+interface Clock {
+    /// NowEpoch returns a configured Unix epoch.
+    function NowEpoch() -> int
+}
+
+/// AuditSink writes the final reconciliation summary.
+interface AuditSink {
+    /// Write persists Summary for operators.
+    function Write(Summary: RunSummary) -> Result<null, AppFailure> effects { filesystem }
+}
