@@ -8,7 +8,7 @@
 // never appears. The workspace is created under the platform temporary root and
 // the using scope removes it on every exit path.
 
-function Prepare(Root: string) -> Result<null, std.fs.Failure> {
+function Prepare(Root: string) -> Result<null, std.fs.Failure> effects { filesystem } {
     std.fs.WriteText(std.path.Join([Root, "b.txt"]), "b")?
     std.fs.WriteText(std.path.Join([Root, "a.txt"]), "a")?
     std.fs.WriteText(std.path.Join([Root, "é.txt"]), "e")?
@@ -17,7 +17,7 @@ function Prepare(Root: string) -> Result<null, std.fs.Failure> {
     Ok(null)
 }
 
-function Describe(Entries: std.fs.Entry[]) -> string {
+function Describe(Entries: std.fs.Entry[]) -> string effects { state } {
     let Names = std.buffer.New<string>()
     for Entry in Entries {
         std.buffer.Push<string>(Names, `${Entry.Name}:${Entry.IsDirectory}`)
@@ -25,7 +25,7 @@ function Describe(Entries: std.fs.Entry[]) -> string {
     std.text.Join(std.buffer.Freeze<string>(Names), ",")
 }
 
-function Listing() -> Result<string, std.fs.Failure> throws std.fs.Failure {
+function Listing() -> Result<string, std.fs.Failure> throws std.fs.Failure effects { filesystem, state } {
     using Workspace = std.fs.CreateTemporaryDirectory("slick-example-")? {
         Prepare(Workspace.Path)?
         let Entries = std.fs.ReadDirectory(Workspace.Path)?
@@ -33,7 +33,7 @@ function Listing() -> Result<string, std.fs.Failure> throws std.fs.Failure {
     }
 }
 
-function Removed() -> Result<bool, std.fs.Failure> throws std.fs.Failure {
+function Removed() -> Result<bool, std.fs.Failure> throws std.fs.Failure effects { filesystem } {
     let Path = using Workspace = std.fs.CreateTemporaryDirectory("slick-example-")? {
         Workspace.Path
     }
@@ -41,7 +41,7 @@ function Removed() -> Result<bool, std.fs.Failure> throws std.fs.Failure {
     Ok(!Present)
 }
 
-function main() -> string throws std.fs.Failure {
+function main() -> string throws std.fs.Failure effects { filesystem, state } {
     let Entries = match Listing() {
         Ok(Value) => Value
         Err(Failure) => `${Failure.Operation}: ${Failure.Message}`

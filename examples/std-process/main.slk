@@ -17,7 +17,7 @@ function Fail(Message: string) -> std.process.Status {
     }
 }
 
-function Forward(Program: string, Arguments: string[]) -> std.process.Status {
+function Forward(Program: string, Arguments: string[]) -> std.process.Status effects { process } {
     match std.process.Run(Program, Arguments, null, 65536) {
         Ok(Done) => std.process.Status {
             ExitCode: Done.ExitCode
@@ -28,7 +28,7 @@ function Forward(Program: string, Arguments: string[]) -> std.process.Status {
     }
 }
 
-function main(Arguments: string[]) -> std.process.Status {
+function main(Arguments: string[]) -> std.process.Status effects { process } {
     let Program = Arguments.Get(0)
     if (Program == null) {
         Fail("usage: std-process <program> [arguments...]")

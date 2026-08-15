@@ -150,6 +150,8 @@ func signatureFromImplementation(implementation *functionDecl, ownerNamespace st
 		result:         implementation.result,
 		throws:         implementation.throws,
 		throwSet:       implementation.throwSet,
+		operations:     implementation.operations,
+		operationSet:   implementation.operationSet,
 		pos:            implementation.pos,
 	}
 }
@@ -175,6 +177,11 @@ func (p *program) signatureMismatch(contract *methodSignature, implementation *f
 			return fmt.Sprintf("undeclared error effect %s", displayName(thrown))
 		}
 	}
+	for effect := range implementation.operationSet {
+		if _, declared := contract.operationSet[effect]; !declared {
+			return fmt.Sprintf("undeclared operation effect %s", effect)
+		}
+	}
 	return ""
 }
 
@@ -197,11 +204,12 @@ func (p *program) classSatisfies(class *classDecl, iface *interfaceDecl) []strin
 			continue
 		}
 		implementation := &functionDecl{
-			params:    provided.params,
-			result:    provided.result,
-			throwSet:  provided.throwSet,
-			namespace: provided.namespace,
-			aliases:   provided.aliases,
+			params:       provided.params,
+			result:       provided.result,
+			throwSet:     provided.throwSet,
+			operationSet: provided.operationSet,
+			namespace:    provided.namespace,
+			aliases:      provided.aliases,
 		}
 		if mismatch := p.signatureMismatch(required, implementation); mismatch != "" {
 			reasons = append(reasons, name+": "+mismatch)
@@ -233,7 +241,7 @@ func (p *program) canonicalTypeName(namespace string, aliases map[string]aliasDe
 		for index, thrown := range parsed.throws {
 			throws[index], _ = p.resolveErrorIn(namespace, aliases, thrown)
 		}
-		return callableType(params, p.canonicalTypeName(namespace, aliases, parsed.base), throws)
+		return callableType(params, p.canonicalTypeName(namespace, aliases, parsed.base), throws, parsed.operations)
 	case typeKindTuple:
 		elements := make([]string, len(parsed.args))
 		for index, element := range parsed.args {

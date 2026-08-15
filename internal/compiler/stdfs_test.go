@@ -18,13 +18,13 @@ use std.fs.CreateDirectoryAll as CreateDirectoryAll
 use std.fs.Remove as Remove
 use std.fs.Failure as FSFailure
 
-function Read(Path: string) -> Result<string, FSFailure> { ReadText(Path) }
-function Write(Path: string, Contents: string) -> Result<null, FSFailure> { WriteText(Path, Contents) }
-function Inspect(Path: string) -> Result<bool, FSFailure> { Exists(Path) }
-function Create(Path: string) -> Result<null, FSFailure> { CreateDirectoryAll(Path) }
-function Delete(Path: string) -> Result<null, FSFailure> { Remove(Path) }
+function Read(Path: string) -> Result<string, FSFailure> effects { filesystem } { ReadText(Path) }
+function Write(Path: string, Contents: string) -> Result<null, FSFailure> effects { filesystem } { WriteText(Path, Contents) }
+function Inspect(Path: string) -> Result<bool, FSFailure> effects { filesystem } { Exists(Path) }
+function Create(Path: string) -> Result<null, FSFailure> effects { filesystem } { CreateDirectoryAll(Path) }
+function Delete(Path: string) -> Result<null, FSFailure> effects { filesystem } { Remove(Path) }
 
-function main() -> string {
+function main() -> string effects { filesystem } {
     match Inspect(".") {
         Ok(Value) => ` + "`" + `${Value}` + "`" + `
         Err(Failure) => Failure.Message
@@ -43,7 +43,7 @@ func TestStdFSWholeFileFlowEverywhere(t *testing.T) {
 	directory := filepath.Join(parent, "deep")
 	path := filepath.Join(directory, "note.txt")
 	source := fmt.Sprintf(`
-function Exercise() -> Result<string, std.fs.Failure> {
+function Exercise() -> Result<string, std.fs.Failure> effects { filesystem } {
     let Before = std.fs.Exists(%s)?
     std.fs.CreateDirectoryAll(%s)?
     std.fs.CreateDirectoryAll(%s)?
@@ -62,7 +62,7 @@ function Exercise() -> Result<string, std.fs.Failure> {
     Ok(`+"`"+`${Before}|${During}|${Multiline}|${Empty}|${Truncated}|${After}`+"`"+`)
 }
 
-function main() -> string {
+function main() -> string effects { filesystem } {
     match Exercise() {
         Ok(Value) => Value
         Err(Failure) => `+"`"+`${Failure.Operation}|${Failure.Path}|${Failure.Message}`+"`"+`
@@ -102,37 +102,37 @@ func TestStdFSFailuresEverywhere(t *testing.T) {
 	invalidPath := root + "\x00invalid"
 
 	source := fmt.Sprintf(`
-function ReadFailure(Path: string) -> string {
+function ReadFailure(Path: string) -> string effects { filesystem } {
     match std.fs.ReadText(Path) {
         Ok(_) => "unexpected success"
         Err(Failure) => `+"`"+`${Failure.Operation}|${Failure.Path}|${Failure.Message}`+"`"+`
     }
 }
-function WriteFailure(Path: string) -> string {
+function WriteFailure(Path: string) -> string effects { filesystem } {
     match std.fs.WriteText(Path, "TOP_SECRET_CONTENTS") {
         Ok(_) => "unexpected success"
         Err(Failure) => `+"`"+`${Failure.Operation}|${Failure.Path}|${Failure.Message}`+"`"+`
     }
 }
-function ExistsFailure(Path: string) -> string {
+function ExistsFailure(Path: string) -> string effects { filesystem } {
     match std.fs.Exists(Path) {
         Ok(_) => "unexpected success"
         Err(Failure) => `+"`"+`${Failure.Operation}|${Failure.Path}|${Failure.Message}`+"`"+`
     }
 }
-function CreateFailure(Path: string) -> string {
+function CreateFailure(Path: string) -> string effects { filesystem } {
     match std.fs.CreateDirectoryAll(Path) {
         Ok(_) => "unexpected success"
         Err(Failure) => `+"`"+`${Failure.Operation}|${Failure.Path}|${Failure.Message}`+"`"+`
     }
 }
-function RemoveFailure(Path: string) -> string {
+function RemoveFailure(Path: string) -> string effects { filesystem } {
     match std.fs.Remove(Path) {
         Ok(_) => "unexpected success"
         Err(Failure) => `+"`"+`${Failure.Operation}|${Failure.Path}|${Failure.Message}`+"`"+`
     }
 }
-function main() -> string {
+function main() -> string effects { filesystem } {
     let InvalidUTF8 = ReadFailure(%s)
     let MissingRead = ReadFailure(%s)
     let Write = WriteFailure(%s)
@@ -164,12 +164,12 @@ function main() -> string {
 func TestStdFSQuestionPropagationAndErrCatchBoundary(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing.txt")
 	source := fmt.Sprintf(`
-function Through(Path: string) -> Result<string, std.fs.Failure> {
+function Through(Path: string) -> Result<string, std.fs.Failure> effects { filesystem } {
     let Contents = std.fs.ReadText(Path)?
     Ok(Contents)
 }
 function Recovery() -> Result<string, std.fs.Failure> { Ok("caught") }
-function main() -> string {
+function main() -> string effects { filesystem } {
     let Propagated = match Through(%s) {
         Ok(_) => "unexpected success"
         Err(Failure) => Failure.Operation
@@ -212,7 +212,7 @@ func TestStdFSCallableDiagnostics(t *testing.T) {
 // stdFSDirectorySupport lists a directory into a deterministic ordered summary
 // so both backends can be compared on a single line of output.
 const stdFSDirectorySupport = `
-function Describe(Entries: std.fs.Entry[]) -> string {
+function Describe(Entries: std.fs.Entry[]) -> string effects { state } {
     let Buffer = std.buffer.New<string>()
     for Entry in Entries {
         std.buffer.Push<string>(Buffer, ` + "`" + `${Entry.Name}|${Entry.IsDirectory}|${Entry.Path}` + "`" + `)
@@ -220,7 +220,7 @@ function Describe(Entries: std.fs.Entry[]) -> string {
     std.text.Join(std.buffer.Freeze<string>(Buffer), ",")
 }
 
-function List(Path: string) -> string {
+function List(Path: string) -> string effects { filesystem, state } {
     match std.fs.ReadDirectory(Path) {
         Ok(Entries) => Describe(Entries)
         Err(Failure) => ` + "`" + `${Failure.Operation}|${Failure.Path}|${Failure.Message}` + "`" + `
@@ -242,7 +242,7 @@ func stdFSListingProgram(paths []string) string {
 		lets = append(lets, fmt.Sprintf("    let %s = List(%s)", name, strconv.Quote(path)))
 		names = append(names, "${"+name+"}")
 	}
-	return stdFSDirectorySupport + "\nfunction main() -> string {\n" +
+	return stdFSDirectorySupport + "\nfunction main() -> string effects { filesystem, state } {\n" +
 		strings.Join(lets, "\n") + "\n    `" + strings.Join(names, "§") + "`\n}\n"
 }
 
@@ -325,14 +325,14 @@ func TestStdFSReadDirectoryFailuresEverywhere(t *testing.T) {
 // so a test can prove the directory is gone once the using scope exits, even
 // when the body never produced a value.
 const stdFSWorkspaceSupport = `
-function Reset() -> null {
+function Reset() -> null effects { environment } {
     match std.env.Unset("SLICK_FS_WORKSPACE") {
         Ok(_) => null
         Err(_) => null
     }
 }
 
-function Remember(Path: string) -> null {
+function Remember(Path: string) -> null effects { environment } {
     match std.env.Set("SLICK_FS_WORKSPACE", Path) {
         Ok(_) => null
         Err(_) => null
@@ -344,14 +344,14 @@ function Absent(Present: bool) -> string {
     ` + "`" + `${Value}` + "`" + `
 }
 
-function Gone(Path: string) -> string {
+function Gone(Path: string) -> string effects { filesystem } {
     match std.fs.Exists(Path) {
         Ok(Present) => Absent(Present)
         Err(Failure) => Failure.Message
     }
 }
 
-function Removed() -> string {
+function Removed() -> string effects { environment, filesystem } {
     let Path = std.env.Get("SLICK_FS_WORKSPACE")
     if (Path == null) { "unrecorded" } else { Gone(Path) }
 }
@@ -359,14 +359,14 @@ function Removed() -> string {
 
 func TestStdFSTemporaryDirectoryIsUniqueAbsoluteAndRemovedEverywhere(t *testing.T) {
 	source := stdFSWorkspaceSupport + `
-function Reserve() -> Result<string, std.fs.Failure> throws std.fs.Failure {
+function Reserve() -> Result<string, std.fs.Failure> throws std.fs.Failure effects { filesystem } {
     using Workspace = std.fs.CreateTemporaryDirectory("slick-unique-")? {
         let Present = std.fs.Exists(Workspace.Path)?
         if (Present) { Ok(Workspace.Path) } else { Ok("missing during block") }
     }
 }
 
-function Compare(First: string, Second: string) -> string {
+function Compare(First: string, Second: string) -> string effects { filesystem } {
     let Unique = First != Second
     let Absolute = std.path.IsAbsolute(First)
     let FirstGone = Gone(First)
@@ -374,7 +374,7 @@ function Compare(First: string, Second: string) -> string {
     ` + "`" + `${Unique}|${Absolute}|${FirstGone}|${SecondGone}` + "`" + `
 }
 
-function main() -> string throws std.fs.Failure {
+function main() -> string throws std.fs.Failure effects { filesystem } {
     match Reserve() {
         Ok(First) => match Reserve() {
             Ok(Second) => Compare(First, Second)
@@ -391,7 +391,7 @@ function main() -> string throws std.fs.Failure {
 
 func TestStdFSTemporaryDirectoryClosesOnEveryExitPathEverywhere(t *testing.T) {
 	const report = `
-function Report(Value: string) -> string {
+function Report(Value: string) -> string effects { environment, filesystem } {
     let Cleaned = Removed()
     ` + "`" + `${Value};${Cleaned}` + "`" + `
 }
@@ -402,13 +402,13 @@ function Report(Value: string) -> string {
 	}{
 		"normal completion": {
 			program: `
-function Exercise() -> Result<string, std.fs.Failure> throws std.fs.Failure {
+function Exercise() -> Result<string, std.fs.Failure> throws std.fs.Failure effects { environment, filesystem } {
     using Workspace = std.fs.CreateTemporaryDirectory("slick-exit-")? {
         Remember(Workspace.Path)
         Ok("normal")
     }
 }
-function main() -> string throws std.fs.Failure {
+function main() -> string throws std.fs.Failure effects { environment, filesystem } {
     Reset()
     let Value = match Exercise() {
         Ok(Text) => Text
@@ -421,13 +421,13 @@ function main() -> string throws std.fs.Failure {
 		},
 		"early return": {
 			program: `
-function Exercise() -> Result<string, std.fs.Failure> throws std.fs.Failure {
+function Exercise() -> Result<string, std.fs.Failure> throws std.fs.Failure effects { environment, filesystem } {
     using Workspace = std.fs.CreateTemporaryDirectory("slick-exit-")? {
         Remember(Workspace.Path)
         return Ok("returned")
     }
 }
-function main() -> string throws std.fs.Failure {
+function main() -> string throws std.fs.Failure effects { environment, filesystem } {
     Reset()
     let Value = match Exercise() {
         Ok(Text) => Text
@@ -440,14 +440,14 @@ function main() -> string throws std.fs.Failure {
 		},
 		"result propagation": {
 			program: `
-function Exercise() -> Result<string, std.fs.Failure> throws std.fs.Failure {
+function Exercise() -> Result<string, std.fs.Failure> throws std.fs.Failure effects { environment, filesystem } {
     using Workspace = std.fs.CreateTemporaryDirectory("slick-exit-")? {
         Remember(Workspace.Path)
         let Text = std.fs.ReadText(std.path.Join([Workspace.Path, "absent.txt"]))?
         Ok(Text)
     }
 }
-function main() -> string throws std.fs.Failure {
+function main() -> string throws std.fs.Failure effects { environment, filesystem } {
     Reset()
     let Value = match Exercise() {
         Ok(Text) => Text
@@ -461,19 +461,19 @@ function main() -> string throws std.fs.Failure {
 		"checked throw": {
 			program: `
 class BodyFailure implements Error {}
-function Exercise(Directory: std.fs.TemporaryDirectory) -> string throws BodyFailure | std.fs.Failure {
+function Exercise(Directory: std.fs.TemporaryDirectory) -> string throws BodyFailure | std.fs.Failure effects { environment, filesystem } {
     using Workspace = Directory {
         Remember(Workspace.Path)
         throw BodyFailure("body")
     }
 }
-function Guarded(Directory: std.fs.TemporaryDirectory) -> string {
+function Guarded(Directory: std.fs.TemporaryDirectory) -> string effects { environment, filesystem } {
     Exercise(Directory) catch (Caught) {
         BodyFailure => "caught"
         std.fs.Failure => "cleanup"
     }
 }
-function main() -> string {
+function main() -> string effects { environment, filesystem } {
     Reset()
     let Value = match std.fs.CreateTemporaryDirectory("slick-exit-") {
         Ok(Directory) => Guarded(Directory)
@@ -498,14 +498,14 @@ func TestStdFSTemporaryDirectoryCloseIsIdempotentEverywhere(t *testing.T) {
 	// Both scopes close the same owned resource, so the second close must be a
 	// silent no-op rather than a failure.
 	source := stdFSWorkspaceSupport + `
-function CloseTwice(Directory: std.fs.TemporaryDirectory) -> string throws std.fs.Failure {
+function CloseTwice(Directory: std.fs.TemporaryDirectory) -> string throws std.fs.Failure effects { filesystem } {
     let First = using Opened = Directory { "first" }
     let Second = using Reopened = Directory { "second" }
     let Cleaned = Gone(Directory.Path)
     ` + "`" + `${First}|${Second}|${Cleaned}` + "`" + `
 }
 
-function main() -> string throws std.fs.Failure {
+function main() -> string throws std.fs.Failure effects { filesystem } {
     match std.fs.CreateTemporaryDirectory("slick-idempotent-") {
         Ok(Directory) => CloseTwice(Directory)
         Err(Failure) => Failure.Message
@@ -519,7 +519,7 @@ function main() -> string throws std.fs.Failure {
 
 func TestStdFSCreateTemporaryDirectoryRejectsParentSelectionEverywhere(t *testing.T) {
 	source := `
-function main() -> string {
+function main() -> string effects { filesystem } {
     match std.fs.CreateTemporaryDirectory("../escape-") {
         Ok(Workspace) => "unexpected success"
         Err(Failure) => ` + "`" + `${Failure.Operation}|${Failure.Path}` + "`" + `
@@ -544,7 +544,7 @@ func TestStdFSTemporaryDirectoryCloseRefusesUnownedTargetsEverywhere(t *testing.
 	// A TemporaryDirectory built from an object literal owns nothing, so Close
 	// reports a deterministic failure instead of removing a host path.
 	source := fmt.Sprintf(`
-function main() -> string {
+function main() -> string effects { filesystem } {
     using Workspace = std.fs.TemporaryDirectory { Path: %s } {
         "body"
     } catch (Caught) {
@@ -564,7 +564,7 @@ function main() -> string {
 func TestStdFSTemporaryDirectoryCleanupFailureFollowsUsingPrecedence(t *testing.T) {
 	source := `
 class BodyFailure implements Error {}
-function main() -> string throws BodyFailure | std.fs.Failure {
+function main() -> string throws BodyFailure | std.fs.Failure effects { filesystem } {
     using Workspace = std.fs.TemporaryDirectory { Path: "/slick-unowned" } {
         throw BodyFailure("body")
     }
@@ -588,29 +588,29 @@ use std.fs.CreateTemporaryDirectory as CreateWorkspace
 use std.fs.TemporaryDirectory as Workspace
 use std.fs.Failure as FSFailure
 
-function List(Path: string) -> Result<Entry[], FSFailure> { ReadDirectory(Path) }
-function Open(Prefix: string) -> Result<Workspace, FSFailure> { CreateWorkspace(Prefix) }
+function List(Path: string) -> Result<Entry[], FSFailure> effects { filesystem } { ReadDirectory(Path) }
+function Open(Prefix: string) -> Result<Workspace, FSFailure> effects { filesystem } { CreateWorkspace(Prefix) }
 
 function Head(Entries: Entry[]) -> string {
     let Value = Entries.Get(0)
     if (Value == null) { "empty" } else { `+"`"+`${Value.Name}|${Value.IsDirectory}`+"`"+` }
 }
 
-function First(Path: string) -> string {
+function First(Path: string) -> string effects { filesystem } {
     match List(Path) {
         Ok(Entries) => Head(Entries)
         Err(Failure) => Failure.Message
     }
 }
 
-function Absolute() -> Result<string, FSFailure> throws FSFailure {
+function Absolute() -> Result<string, FSFailure> throws FSFailure effects { filesystem } {
     using Handle = Open("slick-alias-")? {
         let Value = std.path.IsAbsolute(Handle.Path)
         Ok(`+"`"+`${Value}`+"`"+`)
     }
 }
 
-function main() -> string throws FSFailure {
+function main() -> string throws FSFailure effects { filesystem } {
     let Listed = First(%s)
     let Opened = match Absolute() {
         Ok(Value) => Value

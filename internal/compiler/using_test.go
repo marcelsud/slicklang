@@ -13,26 +13,26 @@ import (
 const usingTraceSupport = `
 class Resource {
     Marker: string
-    function Close() -> null {
+    function Close() -> null effects { environment } {
         Append(self.Marker)
     }
 }
 
-function Reset() -> null {
+function Reset() -> null effects { environment } {
     match std.env.Unset("SLICK_USING_TRACE") {
         Ok(_) => null
         Err(_) => null
     }
 }
 
-function Store(Value: string) -> null {
+function Store(Value: string) -> null effects { environment } {
     match std.env.Set("SLICK_USING_TRACE", Value) {
         Ok(_) => null
         Err(_) => null
     }
 }
 
-function Append(Value: string) -> null {
+function Append(Value: string) -> null effects { environment } {
     let Current = std.env.Get("SLICK_USING_TRACE")
     if (Current == null) {
         Store(Value)
@@ -41,12 +41,12 @@ function Append(Value: string) -> null {
     }
 }
 
-function Trace() -> string {
+function Trace() -> string effects { environment } {
     let Current = std.env.Get("SLICK_USING_TRACE")
     if (Current == null) { "" } else { Current }
 }
 
-function Acquire(Marker: string) -> Resource {
+function Acquire(Marker: string) -> Resource effects { environment } {
     Append("A")
     Resource { Marker: Marker }
 }
@@ -59,7 +59,7 @@ func TestUsingRunsCleanupExactlyOnceOnEveryControlExit(t *testing.T) {
 	}{
 		"normal block value": {
 			program: `
-function main() -> string {
+function main() -> string effects { environment } {
     Reset()
     let Value = using Handle = Acquire("C") {
         Append("B")
@@ -72,13 +72,13 @@ function main() -> string {
 		},
 		"return": {
 			program: `
-function Finish() -> string {
+function Finish() -> string effects { environment } {
     using Handle = Acquire("C") {
         Append("B")
         return "returned"
     }
 }
-function main() -> string {
+function main() -> string effects { environment } {
     Reset()
     let Value = Finish()
     Value + ";" + Trace()
@@ -90,14 +90,14 @@ function main() -> string {
 			program: `
 class LookupFailure implements Error {}
 function Fail() -> Result<string, LookupFailure> { Err(LookupFailure("missing")) }
-function Relay() -> Result<string, LookupFailure> {
+function Relay() -> Result<string, LookupFailure> effects { environment } {
     using Handle = Acquire("C") {
         Append("B")
         let Value = Fail()?
         Ok(Value)
     }
 }
-function main() -> string {
+function main() -> string effects { environment } {
     Reset()
     let Value = match Relay() {
         Ok(Text) => Text
@@ -111,13 +111,13 @@ function main() -> string {
 		"checked throw": {
 			program: `
 class BodyFailure implements Error {}
-function Fail() -> string throws BodyFailure {
+function Fail() -> string throws BodyFailure effects { environment } {
     using Handle = Acquire("C") {
         Append("B")
         throw BodyFailure("body")
     }
 }
-function main() -> string {
+function main() -> string effects { environment } {
     Reset()
     let Value = Fail() catch (Failure) {
         BodyFailure => "caught"
@@ -129,7 +129,7 @@ function main() -> string {
 		},
 		"break and continue": {
 			program: `
-function main() -> string {
+function main() -> string effects { environment } {
     Reset()
     for Index in 0..3 {
         using Handle = Acquire("C") {
@@ -144,7 +144,7 @@ function main() -> string {
 		},
 		"nested reverse order": {
 			program: `
-function main() -> string {
+function main() -> string effects { environment } {
     Reset()
     using Outer = Acquire("O") {
         using Inner = Acquire("I") {
@@ -268,17 +268,17 @@ function main() -> string throws BodyFailure | InnerFailure | OuterFailure {
 func TestUsingDoesNotCloseWhenAcquisitionFails(t *testing.T) {
 	source := usingTraceSupport + `
 class AcquireFailure implements Error {}
-function BrokenAcquire() -> Result<Resource, AcquireFailure> {
+function BrokenAcquire() -> Result<Resource, AcquireFailure> effects { environment } {
     Append("A")
     Err(AcquireFailure("acquire"))
 }
-function Broken() -> Result<null, AcquireFailure> {
+function Broken() -> Result<null, AcquireFailure> effects { environment } {
     using Handle = BrokenAcquire()? {
         Append("B")
         Ok(null)
     }
 }
-function main() -> string {
+function main() -> string effects { environment } {
     Reset()
     match Broken() { Ok(_) => null Err(_) => null }
     Trace()
@@ -349,7 +349,7 @@ func TestUsingDiagnostics(t *testing.T) {
 			message: "NotError does not name an Error type",
 		},
 		"direct Close": {
-			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function main() -> null { using Handle = Open() { Handle.Close() } }`,
+			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function main() -> null effects { environment } { using Handle = Open() { Handle.Close() } }`,
 			code:    "SLK388",
 			message: "cannot call Close directly on active using binding Handle",
 		},
@@ -364,17 +364,17 @@ func TestUsingDiagnostics(t *testing.T) {
 			message: "cannot be assigned outside its scope",
 		},
 		"buffer push retention escape": {
-			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function main() -> null { let Saved = std.buffer.New<Resource>() using Handle = Open() { std.buffer.Push<Resource>(Saved, Handle) } }`,
+			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function main() -> null effects { state } { let Saved = std.buffer.New<Resource>() using Handle = Open() { std.buffer.Push<Resource>(Saved, Handle) } }`,
 			code:    "SLK389",
 			message: "cannot be retained outside its scope",
 		},
 		"buffer set retention escape": {
-			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function main() -> null { let Saved = std.buffer.New<Resource>() std.buffer.Push<Resource>(Saved, Open()) using Handle = Open() { let Updated = std.buffer.Set<Resource>(Saved, 0, Handle) null } }`,
+			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function main() -> null effects { state } { let Saved = std.buffer.New<Resource>() std.buffer.Push<Resource>(Saved, Open()) using Handle = Open() { let Updated = std.buffer.Set<Resource>(Saved, 0, Handle) null } }`,
 			code:    "SLK389",
 			message: "cannot be retained outside its scope",
 		},
 		"buffer wrapper retention escape": {
-			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function Save(Target: Buffer<Resource>, Value: Resource) -> null { std.buffer.Push<Resource>(Target, Value) } function main() -> null { let Saved = std.buffer.New<Resource>() using Handle = Open() { Save(Saved, Handle) } }`,
+			source:  `class Resource { function Close() -> null { null } } function Open() -> Resource { Resource {} } function Save(Target: Buffer<Resource>, Value: Resource) -> null effects { state } { std.buffer.Push<Resource>(Target, Value) } function main() -> null effects { state } { let Saved = std.buffer.New<Resource>() using Handle = Open() { Save(Saved, Handle) } }`,
 			code:    "SLK389",
 			message: "cannot be retained outside its scope",
 		},

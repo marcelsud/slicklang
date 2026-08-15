@@ -127,6 +127,7 @@ type standardFunctionDecl struct {
 	typeParams    []string
 	params        []paramDecl
 	result        typeRef
+	effects       []string
 	native        nativeFunction
 }
 
@@ -136,6 +137,7 @@ type standardMethodDecl struct {
 	params        []paramDecl
 	result        typeRef
 	throws        []typeRef
+	effects       []string
 	native        nativeFunction
 }
 
@@ -261,8 +263,9 @@ var standardLibraryRegistry = struct {
 				{name: "Buffer", typ: typeRef{name: "Buffer<T>"}},
 				{name: "Value", typ: typeRef{name: "T"}},
 			},
-			result: typeRef{name: "null"},
-			native: nativeStdBufferPush,
+			result:  typeRef{name: "null"},
+			effects: []string{effectState},
+			native:  nativeStdBufferPush,
 		},
 		{
 			canonical:     string(nativeStdBufferGet),
@@ -274,8 +277,9 @@ var standardLibraryRegistry = struct {
 				{name: "Buffer", typ: typeRef{name: "Buffer<T>"}},
 				{name: "Index", typ: typeRef{name: "int"}},
 			},
-			result: typeRef{name: "T?"},
-			native: nativeStdBufferGet,
+			result:  typeRef{name: "T?"},
+			effects: []string{effectState},
+			native:  nativeStdBufferGet,
 		},
 		{
 			canonical:     string(nativeStdBufferSet),
@@ -288,8 +292,9 @@ var standardLibraryRegistry = struct {
 				{name: "Index", typ: typeRef{name: "int"}},
 				{name: "Value", typ: typeRef{name: "T"}},
 			},
-			result: typeRef{name: "Result<null," + stdCollectionsBoundsFailureName + ">"},
-			native: nativeStdBufferSet,
+			result:  typeRef{name: "Result<null," + stdCollectionsBoundsFailureName + ">"},
+			effects: []string{effectState},
+			native:  nativeStdBufferSet,
 		},
 		{
 			canonical:     string(nativeStdBufferLength),
@@ -299,6 +304,7 @@ var standardLibraryRegistry = struct {
 			typeParams:    []string{"T"},
 			params:        []paramDecl{{name: "Buffer", typ: typeRef{name: "Buffer<T>"}}},
 			result:        typeRef{name: "int"},
+			effects:       []string{effectState},
 			native:        nativeStdBufferLength,
 		},
 		{
@@ -309,6 +315,7 @@ var standardLibraryRegistry = struct {
 			typeParams:    []string{"T"},
 			params:        []paramDecl{{name: "Buffer", typ: typeRef{name: "Buffer<T>"}}},
 			result:        typeRef{name: "T[]"},
+			effects:       []string{effectState},
 			native:        nativeStdBufferFreeze,
 		},
 		{
@@ -452,8 +459,9 @@ var standardLibraryRegistry = struct {
 				{name: "WorkingDirectory", typ: typeRef{name: "string?"}},
 				{name: "MaxOutputBytes", typ: typeRef{name: "int"}},
 			},
-			result: typeRef{name: "Result<std.process.Completed,std.process.Failure>"},
-			native: nativeStdProcessRun,
+			result:  typeRef{name: "Result<std.process.Completed,std.process.Failure>"},
+			effects: []string{effectProcess},
+			native:  nativeStdProcessRun,
 		},
 		{
 			canonical:     string(nativeStdEnvGet),
@@ -462,6 +470,7 @@ var standardLibraryRegistry = struct {
 			documentation: "Returns the environment value for Name, or null when Name is unset.",
 			params:        []paramDecl{{name: "Name", typ: typeRef{name: "string"}}},
 			result:        typeRef{name: "string?"},
+			effects:       []string{effectEnvironment},
 			native:        nativeStdEnvGet,
 		},
 		{
@@ -473,8 +482,9 @@ var standardLibraryRegistry = struct {
 				{name: "Name", typ: typeRef{name: "string"}},
 				{name: "Value", typ: typeRef{name: "string"}},
 			},
-			result: typeRef{name: "Result<null,std.env.Failure>"},
-			native: nativeStdEnvSet,
+			result:  typeRef{name: "Result<null,std.env.Failure>"},
+			effects: []string{effectEnvironment},
+			native:  nativeStdEnvSet,
 		},
 		{
 			canonical:     string(nativeStdEnvUnset),
@@ -483,6 +493,7 @@ var standardLibraryRegistry = struct {
 			documentation: "Removes Name from the environment or returns Failure.",
 			params:        []paramDecl{{name: "Name", typ: typeRef{name: "string"}}},
 			result:        typeRef{name: "Result<null,std.env.Failure>"},
+			effects:       []string{effectEnvironment},
 			native:        nativeStdEnvUnset,
 		},
 		{
@@ -492,6 +503,7 @@ var standardLibraryRegistry = struct {
 			documentation: "Reads Path completely as UTF-8 text or returns Failure for I/O or invalid UTF-8.",
 			params:        []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
 			result:        typeRef{name: "Result<string,std.fs.Failure>"},
+			effects:       []string{effectFilesystem},
 			native:        nativeStdFSReadText,
 		},
 		{
@@ -503,8 +515,9 @@ var standardLibraryRegistry = struct {
 				{name: "Path", typ: typeRef{name: "string"}},
 				{name: "Contents", typ: typeRef{name: "string"}},
 			},
-			result: typeRef{name: "Result<null,std.fs.Failure>"},
-			native: nativeStdFSWriteText,
+			result:  typeRef{name: "Result<null,std.fs.Failure>"},
+			effects: []string{effectFilesystem},
+			native:  nativeStdFSWriteText,
 		},
 		{
 			canonical:     string(nativeStdFSExists),
@@ -513,6 +526,7 @@ var standardLibraryRegistry = struct {
 			documentation: "Reports whether Path exists or returns Failure when its status cannot be read.",
 			params:        []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
 			result:        typeRef{name: "Result<bool,std.fs.Failure>"},
+			effects:       []string{effectFilesystem},
 			native:        nativeStdFSExists,
 		},
 		{
@@ -522,6 +536,7 @@ var standardLibraryRegistry = struct {
 			documentation: "Creates Path and every missing parent directory or returns Failure.",
 			params:        []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
 			result:        typeRef{name: "Result<null,std.fs.Failure>"},
+			effects:       []string{effectFilesystem},
 			native:        nativeStdFSCreateDirectoryAll,
 		},
 		{
@@ -531,6 +546,7 @@ var standardLibraryRegistry = struct {
 			documentation: "Removes the file or empty directory at Path or returns Failure.",
 			params:        []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
 			result:        typeRef{name: "Result<null,std.fs.Failure>"},
+			effects:       []string{effectFilesystem},
 			native:        nativeStdFSRemove,
 		},
 		{
@@ -540,6 +556,7 @@ var standardLibraryRegistry = struct {
 			documentation: "Lists the direct children of Path sorted by Name or returns Failure.",
 			params:        []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
 			result:        typeRef{name: "Result<" + stdFSEntryName + "[]," + stdFSFailureName + ">"},
+			effects:       []string{effectFilesystem},
 			native:        nativeStdFSReadDirectory,
 		},
 		{
@@ -549,6 +566,7 @@ var standardLibraryRegistry = struct {
 			documentation: "Creates a unique directory under the platform temporary root named after Prefix.",
 			params:        []paramDecl{{name: "Prefix", typ: typeRef{name: "string"}}},
 			result:        typeRef{name: "Result<" + stdFSTemporaryDirectoryName + "," + stdFSFailureName + ">"},
+			effects:       []string{effectFilesystem},
 			native:        nativeStdFSCreateTemporaryDirectory,
 		},
 		{
@@ -578,6 +596,7 @@ var standardLibraryRegistry = struct {
 			documentation: "Executes Request and returns a fully buffered Response or typed Failure.",
 			params:        []paramDecl{{name: "Request", typ: typeRef{name: stdHTTPRequestName}}},
 			result:        typeRef{name: "Result<" + stdHTTPResponseName + "," + stdHTTPFailureName + ">"},
+			effects:       []string{effectNetwork},
 			native:        nativeStdHTTPFetch,
 		},
 		{
@@ -610,8 +629,9 @@ var standardLibraryRegistry = struct {
 				{name: "Config", typ: typeRef{name: stdHTTPServerConfigName}},
 				{name: "Application", typ: typeRef{name: stdHTTPServerHandlerName}},
 			},
-			result: typeRef{name: "Result<null," + stdHTTPServerFailureName + ">"},
-			native: nativeStdHTTPServerServe,
+			result:  typeRef{name: "Result<null," + stdHTTPServerFailureName + ">"},
+			effects: sortedOperationEffects(allOperationEffects()),
+			native:  nativeStdHTTPServerServe,
 		},
 		{
 			canonical:     string(nativeStdPathJoin),
@@ -796,8 +816,9 @@ var standardLibraryRegistry = struct {
 				{name: "Reader", typ: typeRef{name: stdIOReaderName}},
 				{name: "MaxBytes", typ: typeRef{name: "int"}},
 			},
-			result: typeRef{name: "Result<bytes," + stdIOFailureName + ">"},
-			native: nativeStdIOReadAll,
+			result:  typeRef{name: "Result<bytes," + stdIOFailureName + ">"},
+			effects: []string{effectIO},
+			native:  nativeStdIOReadAll,
 		},
 		{
 			canonical:     string(nativeStdIOCopy),
@@ -809,8 +830,9 @@ var standardLibraryRegistry = struct {
 				{name: "Writer", typ: typeRef{name: stdIOWriterName}},
 				{name: "MaxBytes", typ: typeRef{name: "int"}},
 			},
-			result: typeRef{name: "Result<int," + stdIOFailureName + ">"},
-			native: nativeStdIOCopy,
+			result:  typeRef{name: "Result<int," + stdIOFailureName + ">"},
+			effects: []string{effectIO},
+			native:  nativeStdIOCopy,
 		},
 		{
 			canonical:     string(nativeStdSQLiteOpen),
@@ -819,6 +841,7 @@ var standardLibraryRegistry = struct {
 			documentation: "Opens a file-backed or :memory: SQLite database handle.",
 			params:        []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
 			result:        typeRef{name: "Result<" + stdSQLiteDatabaseName + "," + stdSQLiteFailureName + ">"},
+			effects:       []string{effectDatabase},
 			native:        nativeStdSQLiteOpen,
 		},
 	},
@@ -993,6 +1016,7 @@ var standardLibraryRegistry = struct {
 					documentation: "Removes the owned directory tree, does nothing when already closed, and throws Failure otherwise.",
 					result:        typeRef{name: "null"},
 					throws:        []typeRef{{name: stdFSFailureName}},
+					effects:       []string{effectFilesystem},
 					native:        nativeStdFSTemporaryDirectoryClose,
 				},
 			},
@@ -1124,6 +1148,7 @@ var standardLibraryRegistry = struct {
 					documentation: "Reads at most MaxBytes and returns null only at end-of-stream.",
 					params:        []paramDecl{{name: "MaxBytes", typ: typeRef{name: "int"}}},
 					result:        typeRef{name: "Result<bytes?," + stdIOFailureName + ">"},
+					effects:       []string{effectIO},
 					native:        nativeStdIOReaderRead,
 				},
 				{
@@ -1131,6 +1156,7 @@ var standardLibraryRegistry = struct {
 					documentation: "Closes the reader or throws Failure when cleanup fails.",
 					result:        typeRef{name: "null"},
 					throws:        []typeRef{{name: stdIOFailureName}},
+					effects:       []string{effectIO},
 					native:        nativeStdIOReaderClose,
 				},
 			},
@@ -1147,12 +1173,14 @@ var standardLibraryRegistry = struct {
 					documentation: "Writes the complete immutable Data chunk or returns Failure.",
 					params:        []paramDecl{{name: "Data", typ: typeRef{name: "bytes"}}},
 					result:        typeRef{name: "Result<null," + stdIOFailureName + ">"},
+					effects:       []string{effectIO},
 					native:        nativeStdIOWriterWrite,
 				},
 				{
 					name:          "Bytes",
 					documentation: "Returns an immutable snapshot of all bytes written so far.",
 					result:        typeRef{name: "bytes"},
+					effects:       []string{effectState},
 					native:        nativeStdIOWriterBytes,
 				},
 				{
@@ -1160,6 +1188,7 @@ var standardLibraryRegistry = struct {
 					documentation: "Closes the writer or throws Failure when cleanup fails.",
 					result:        typeRef{name: "null"},
 					throws:        []typeRef{{name: stdIOFailureName}},
+					effects:       []string{effectIO},
 					native:        nativeStdIOWriterClose,
 				},
 			},
@@ -1229,6 +1258,7 @@ var standardLibraryRegistry = struct {
 					documentation: "Executes one parameter-bound statement and returns execution metadata.",
 					params:        []paramDecl{{name: "Statement", typ: typeRef{name: stdSQLiteStatementName}}},
 					result:        typeRef{name: "Result<" + stdSQLiteExecutionName + "," + stdSQLiteFailureName + ">"},
+					effects:       []string{effectDatabase},
 					native:        nativeStdSQLiteDatabaseExecute,
 				},
 				{
@@ -1236,12 +1266,14 @@ var standardLibraryRegistry = struct {
 					documentation: "Executes one query and returns bounded rows mapped by column name.",
 					params:        []paramDecl{{name: "Query", typ: typeRef{name: stdSQLiteQueryName}}},
 					result:        typeRef{name: "Result<" + stdSQLiteRowName + "[]," + stdSQLiteFailureName + ">"},
+					effects:       []string{effectDatabase},
 					native:        nativeStdSQLiteDatabaseQuery,
 				},
 				{
 					name:          "Begin",
 					documentation: "Begins a new explicit transaction.",
 					result:        typeRef{name: "Result<" + stdSQLiteTransactionName + "," + stdSQLiteFailureName + ">"},
+					effects:       []string{effectDatabase},
 					native:        nativeStdSQLiteDatabaseBegin,
 				},
 				{
@@ -1249,6 +1281,7 @@ var standardLibraryRegistry = struct {
 					documentation: "Closes the database handle and releases all connections.",
 					result:        typeRef{name: "null"},
 					throws:        []typeRef{{name: stdSQLiteFailureName}},
+					effects:       []string{effectDatabase},
 					native:        nativeStdSQLiteDatabaseClose,
 				},
 			},
@@ -1265,6 +1298,7 @@ var standardLibraryRegistry = struct {
 					documentation: "Executes one parameter-bound statement inside this transaction.",
 					params:        []paramDecl{{name: "Statement", typ: typeRef{name: stdSQLiteStatementName}}},
 					result:        typeRef{name: "Result<" + stdSQLiteExecutionName + "," + stdSQLiteFailureName + ">"},
+					effects:       []string{effectDatabase},
 					native:        nativeStdSQLiteTransactionExecute,
 				},
 				{
@@ -1272,18 +1306,21 @@ var standardLibraryRegistry = struct {
 					documentation: "Executes one query inside this transaction.",
 					params:        []paramDecl{{name: "Query", typ: typeRef{name: stdSQLiteQueryName}}},
 					result:        typeRef{name: "Result<" + stdSQLiteRowName + "[]," + stdSQLiteFailureName + ">"},
+					effects:       []string{effectDatabase},
 					native:        nativeStdSQLiteTransactionQuery,
 				},
 				{
 					name:          "Commit",
 					documentation: "Commits this transaction.",
 					result:        typeRef{name: "Result<null," + stdSQLiteFailureName + ">"},
+					effects:       []string{effectDatabase},
 					native:        nativeStdSQLiteTransactionCommit,
 				},
 				{
 					name:          "Rollback",
 					documentation: "Rolls back this transaction.",
 					result:        typeRef{name: "Result<null," + stdSQLiteFailureName + ">"},
+					effects:       []string{effectDatabase},
 					native:        nativeStdSQLiteTransactionRollback,
 				},
 				{
@@ -1291,6 +1328,7 @@ var standardLibraryRegistry = struct {
 					documentation: "Closes the transaction, rolling it back if still active.",
 					result:        typeRef{name: "null"},
 					throws:        []typeRef{{name: stdSQLiteFailureName}},
+					effects:       []string{effectDatabase},
 					native:        nativeStdSQLiteTransactionClose,
 				},
 			},
@@ -1308,12 +1346,14 @@ var standardLibraryRegistry = struct {
 					documentation: "Reads at most MaxBytes and returns null only at end-of-stream.",
 					params:        []paramDecl{{name: "MaxBytes", typ: typeRef{name: "int"}}},
 					result:        typeRef{name: "Result<bytes?," + stdIOFailureName + ">"},
+					effects:       []string{effectIO},
 				},
 				{
 					name:          "Close",
 					documentation: "Closes the reader or throws Failure when cleanup fails.",
 					result:        typeRef{name: "null"},
 					throws:        []typeRef{{name: stdIOFailureName}},
+					effects:       []string{effectIO},
 				},
 			},
 		},
@@ -1328,12 +1368,14 @@ var standardLibraryRegistry = struct {
 					documentation: "Writes the complete immutable Data chunk or returns Failure.",
 					params:        []paramDecl{{name: "Data", typ: typeRef{name: "bytes"}}},
 					result:        typeRef{name: "Result<null," + stdIOFailureName + ">"},
+					effects:       []string{effectIO},
 				},
 				{
 					name:          "Close",
 					documentation: "Closes the writer or throws Failure when cleanup fails.",
 					result:        typeRef{name: "null"},
 					throws:        []typeRef{{name: stdIOFailureName}},
+					effects:       []string{effectIO},
 				},
 			},
 		},
@@ -1348,6 +1390,7 @@ var standardLibraryRegistry = struct {
 					documentation: "Produces the Response for Request. Domain failures must become explicit Response values; the method does not throw.",
 					params:        []paramDecl{{name: "Request", typ: typeRef{name: stdHTTPServerRequestName}}},
 					result:        typeRef{name: stdHTTPServerResponseName},
+					effects:       sortedOperationEffects(allOperationEffects()),
 				},
 			},
 		},
@@ -1369,6 +1412,7 @@ func registerStandardLibrary(p *program) {
 			typeParams:    append([]string(nil), declaration.typeParams...),
 			params:        declaration.params,
 			result:        declaration.result,
+			operations:    operationEffectRefs(declaration.effects...),
 			native:        declaration.native,
 			documentation: &documentation,
 		}
@@ -1393,6 +1437,7 @@ func registerStandardLibrary(p *program) {
 				params:            method.params,
 				result:            method.result,
 				throws:            method.throws,
+				operations:        operationEffectRefs(method.effects...),
 				receiver:          typeRef{name: declaration.canonical},
 				receiverCanonical: declaration.canonical,
 				inline:            true,
@@ -1481,6 +1526,7 @@ func standardMethodSignature(namespace string, declaration standardMethodDecl) *
 		params:        declaration.params,
 		result:        declaration.result,
 		throws:        declaration.throws,
+		operations:    operationEffectRefs(declaration.effects...),
 		documentation: &documentation,
 	}
 }

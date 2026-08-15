@@ -14,15 +14,15 @@ func TestStdEnvSyntheticDeclarations(t *testing.T) {
 use std.env.Get as GetEnv
 use std.env.Failure as EnvFailure
 
-function Read(Name: string) -> string? {
+function Read(Name: string) -> string? effects { environment } {
     GetEnv(Name)
 }
 
-function Write(Name: string, Value: string) -> Result<null, EnvFailure> {
+function Write(Name: string, Value: string) -> Result<null, EnvFailure> effects { environment } {
     std.env.Set(Name, Value)
 }
 
-function Remove(Name: string) -> Result<null, std.env.Failure> {
+function Remove(Name: string) -> Result<null, std.env.Failure> effects { environment } {
     std.env.Unset(Name)
 }
 
@@ -96,7 +96,7 @@ func TestStdEnvGeneratedSourceIsDeterministicAndRuntimeBacked(t *testing.T) {
 	program, diagnostics := compile([]Source{{
 		Name:      "main.slk",
 		Namespace: "root",
-		Text:      `function main() -> string? { std.env.Get("SLICK_STDLIB_BUILD_TIME_SENTINEL") }`,
+		Text:      `function main() -> string? effects { environment } { std.env.Get("SLICK_STDLIB_BUILD_TIME_SENTINEL") }`,
 	}})
 	requireNoDiagnostics(t, diagnostics)
 

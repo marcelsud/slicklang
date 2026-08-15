@@ -116,7 +116,7 @@ function Bool(Value: bool) -> string {
     if (Value) { "true" } else { "false" }
 }
 
-function Run(Base: string) -> Result<string, HTTPFailure> {
+function Run(Base: string) -> Result<string, HTTPFailure> effects { network } {
     let Binary = Fetch(HTTPRequest { Method: "GET" URL: Base + "/binary" })?
     let Echo = Fetch(HTTPRequest {
         Method: "POST"
@@ -163,7 +163,7 @@ function Run(Base: string) -> Result<string, HTTPFailure> {
     ], "|"))
 }
 
-function main() -> string {
+function main() -> string effects { environment, network } {
     let Base = std.env.Get("SLICK_HTTP_TEST_URL")
     if (Base == null) {
         "missing URL"
@@ -272,14 +272,14 @@ func TestStdHTTPFailuresEverywhere(t *testing.T) {
 	t.Setenv("SLICK_HTTP_TLS_URL", tlsServer.URL)
 
 	source := `
-function Kind(Request: std.http.Request) -> string {
+function Kind(Request: std.http.Request) -> string effects { network } {
     match std.http.Fetch(Request) {
         Ok(_) => "Ok"
         Err(Failure) => Failure.Kind
     }
 }
 
-function Detail(Request: std.http.Request) -> string {
+function Detail(Request: std.http.Request) -> string effects { network } {
     match std.http.Fetch(Request) {
         Ok(_) => "Ok"
         Err(Failure) => Failure.Kind + ":" + Failure.URL + ":" + Failure.Message
@@ -299,7 +299,7 @@ function DescribeFailure(Failure: std.http.Failure) -> string {
     }
 }
 
-function Summary(Request: std.http.Request) -> string {
+function Summary(Request: std.http.Request) -> string effects { network } {
     match std.http.Fetch(Request) {
         Ok(_) => "Ok"
         Err(Failure) => DescribeFailure(Failure)
@@ -310,7 +310,7 @@ function EmptyHeaders() -> Map<string, string[]> {
     map { "X-Test": std.text.Split("", "") }
 }
 
-function main() -> string {
+function main() -> string effects { environment, network } {
     let Base = std.env.Get("SLICK_HTTP_TEST_URL")
     let Refused = std.env.Get("SLICK_HTTP_REFUSED_URL")
     let TLS = std.env.Get("SLICK_HTTP_TLS_URL")
@@ -376,20 +376,20 @@ func TestStdHTTPResultControlFlowEverywhere(t *testing.T) {
 	t.Setenv("SLICK_HTTP_TEST_URL", server.URL)
 
 	output := runResultEverywhere(t, `
-function Inner(URL: string) -> Result<int, std.http.Failure> {
+function Inner(URL: string) -> Result<int, std.http.Failure> effects { network } {
     let Response = std.http.Fetch(std.http.Request { Method: "GET" URL: URL MaxResponseBytes: 1 })?
     Ok(Response.Status)
 }
-function Outer(URL: string) -> Result<int, std.http.Failure> {
+function Outer(URL: string) -> Result<int, std.http.Failure> effects { network } {
     let Status = Inner(URL)?
     Ok(Status)
 }
-function Recover(URL: string) -> Result<int, std.http.Failure> {
+function Recover(URL: string) -> Result<int, std.http.Failure> effects { network } {
     Outer(URL) catch (error) {
         std.http.Failure => Ok(999)
     }
 }
-function main() -> string {
+function main() -> string effects { environment, network } {
     let URL = std.env.Get("SLICK_HTTP_TEST_URL")
     if (URL == null) {
         "missing URL"

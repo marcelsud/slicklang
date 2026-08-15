@@ -161,7 +161,7 @@ func substituteTypeParams(name string, params map[string]string) string {
 		for index, thrown := range parsed.throws {
 			throws[index] = substituteTypeParams(thrown, params)
 		}
-		return callableType(parameters, substituteTypeParams(parsed.base, params), throws)
+		return callableType(parameters, substituteTypeParams(parsed.base, params), throws, parsed.operations)
 	case typeKindTuple:
 		parts := make([]string, len(parsed.args))
 		for index, arg := range parsed.args {

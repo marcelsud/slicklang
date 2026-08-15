@@ -7,9 +7,9 @@ import (
 	"strings"
 )
 
-// DescriptionSchemaVersion is 7 because field annotations appear on class
-// fields through the same authored/resolved annotation schema.
-const DescriptionSchemaVersion = 7
+// DescriptionSchemaVersion is 8 because declarations and callable types expose
+// operation effect sets.
+const DescriptionSchemaVersion = 8
 
 var ErrUnknownSymbol = errors.New("unknown symbol")
 
@@ -31,6 +31,7 @@ type SymbolDescription struct {
 	ReturnType         string                   `json:"return_type"`
 	ReturnCallable     *CallableTypeDescription `json:"return_callable"`
 	Throws             []string                 `json:"throws"`
+	Effects            []string                 `json:"effects"`
 	Native             bool                     `json:"native"`
 	Fields             []FieldDescription       `json:"fields"`
 	DeclaredMethods    []MethodDescription      `json:"declared_methods"`
@@ -47,12 +48,13 @@ type AnnotationDescription struct {
 }
 
 // CallableTypeDescription is the structure of a callable type, so a consumer
-// reads its parameter types, result, and checked effects directly instead of
+// reads its parameter types, result, and checked contracts directly instead of
 // parsing the display spelling.
 type CallableTypeDescription struct {
 	ParameterTypes []string `json:"parameter_types"`
 	ReturnType     string   `json:"return_type"`
 	Throws         []string `json:"throws"`
+	Effects        []string `json:"effects"`
 }
 
 type ParameterDescription struct {
@@ -81,13 +83,14 @@ type MethodDescription struct {
 	ReturnType     string                   `json:"return_type"`
 	ReturnCallable *CallableTypeDescription `json:"return_callable"`
 	Throws         []string                 `json:"throws"`
+	Effects        []string                 `json:"effects"`
 	Source         *SourceDescription       `json:"source"`
 }
 
 // describeCallable reports the structure of name when it is a callable type,
 // and nothing otherwise. Nested types keep their canonical spelling.
 func describeCallable(name string) *CallableTypeDescription {
-	params, result, throws, callable := callableTypeParts(name)
+	params, result, throws, effects, callable := callableTypeParts(name)
 	if !callable {
 		return nil
 	}
@@ -95,9 +98,11 @@ func describeCallable(name string) *CallableTypeDescription {
 		ParameterTypes: make([]string, 0, len(params)),
 		ReturnType:     result,
 		Throws:         make([]string, 0, len(throws)),
+		Effects:        make([]string, 0, len(effects)),
 	}
 	description.ParameterTypes = append(description.ParameterTypes, params...)
 	description.Throws = append(description.Throws, throws...)
+	description.Effects = append(description.Effects, effects...)
 	return description
 }
 
@@ -188,6 +193,7 @@ func emptySymbol(name, kind, visibility string) SymbolDescription {
 		TypeParameters:     []string{},
 		Parameters:         []ParameterDescription{},
 		Throws:             []string{},
+		Effects:            []string{},
 		Fields:             []FieldDescription{},
 		DeclaredMethods:    []MethodDescription{},
 		ImplementedMethods: []MethodDescription{},
@@ -205,6 +211,7 @@ func (p *program) describeFunction(function *functionDecl) SymbolDescription {
 	description.ReturnType = p.canonicalType(function.namespace, function.aliases, function.result)
 	description.ReturnCallable = describeCallable(description.ReturnType)
 	description.Throws = sortedSet(function.throwSet)
+	description.Effects = sortedOperationEffects(function.operationSet)
 	description.Native = function.native != ""
 	description.Source = describeSource(function.pos)
 	return description
@@ -249,6 +256,7 @@ func (p *program) describeClass(class *classDecl) SymbolDescription {
 			ReturnType:     implementationResult,
 			ReturnCallable: describeCallable(implementationResult),
 			Throws:         sortedSet(implementation.throwSet),
+			Effects:        sortedOperationEffects(implementation.operationSet),
 			Source:         describeSource(implementation.pos),
 		})
 	}
@@ -343,6 +351,7 @@ func (p *program) describeMethod(owner string, method *methodSignature, implemen
 		ReturnType:     result,
 		ReturnCallable: describeCallable(result),
 		Throws:         sortedSet(method.throwSet),
+		Effects:        sortedOperationEffects(method.operationSet),
 		Source:         describeSource(method.pos),
 	}
 }
@@ -395,6 +404,7 @@ func (p *program) describeFunctionMember(name string, function *functionDecl, me
 	description.ReturnType = p.canonicalType(function.namespace, function.aliases, function.result)
 	description.ReturnCallable = describeCallable(description.ReturnType)
 	description.Throws = sortedSet(function.throwSet)
+	description.Effects = sortedOperationEffects(function.operationSet)
 	description.Source = describeSource(function.pos)
 	return description
 }
@@ -407,6 +417,7 @@ func (p *program) describeMethodMember(name string, method *methodSignature) Sym
 	description.ReturnType = p.canonicalType(method.namespace, method.aliases, method.result)
 	description.ReturnCallable = describeCallable(description.ReturnType)
 	description.Throws = sortedSet(method.throwSet)
+	description.Effects = sortedOperationEffects(method.operationSet)
 	description.Source = describeSource(method.pos)
 	return description
 }

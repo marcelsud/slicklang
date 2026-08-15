@@ -252,6 +252,7 @@ func writeHumanDescription(output io.Writer, description compiler.SymbolDescript
 		writeParameters(output, description.Parameters)
 		fmt.Fprintf(output, "Returns: %s\n", description.ReturnType)
 		writeThrows(output, description.Throws)
+		writeEffects(output, description.Effects)
 		fmt.Fprintf(output, "Native: %t\n", description.Native)
 	}
 	if description.Kind == "annotation" {
@@ -261,6 +262,7 @@ func writeHumanDescription(output io.Writer, description compiler.SymbolDescript
 		writeParameters(output, description.Parameters)
 		fmt.Fprintf(output, "Returns: %s\n", description.ReturnType)
 		writeThrows(output, description.Throws)
+		writeEffects(output, description.Effects)
 	}
 	if description.Kind == "field" || description.Kind == "constant" {
 		fmt.Fprintf(output, "Type: %s\n", description.Type)
@@ -331,6 +333,13 @@ func writeThrows(output io.Writer, throws []string) {
 	}
 	fmt.Fprintf(output, "Throws: %s\n", strings.Join(throws, ", "))
 }
+func writeEffects(output io.Writer, effects []string) {
+	if len(effects) == 0 {
+		fmt.Fprintln(output, "Effects: none")
+		return
+	}
+	fmt.Fprintf(output, "Effects: %s\n", strings.Join(effects, ", "))
+}
 
 func writeFields(output io.Writer, fields []compiler.FieldDescription, omitted int, budget *describeBudget) {
 	fmt.Fprintln(output, "Fields:")
@@ -357,12 +366,17 @@ func writeMethods(output io.Writer, label string, methods []compiler.MethodDescr
 		if len(method.Throws) > 0 {
 			throws = " throws " + strings.Join(method.Throws, ", ")
 		}
-		fmt.Fprintf(output, "  %s %s(%s) -> %s%s%s%s%s\n",
+		effects := ""
+		if len(method.Effects) > 0 {
+			effects = " effects { " + strings.Join(method.Effects, ", ") + " }"
+		}
+		fmt.Fprintf(output, "  %s %s(%s) -> %s%s%s%s%s%s\n",
 			method.Visibility,
 			method.CanonicalName,
 			strings.Join(parameters, ", "),
 			method.ReturnType,
 			throws,
+			effects,
 			sourceSuffix(method.Source),
 			documentationSummary(method.Documentation),
 			annotationSummary(method.Annotations),

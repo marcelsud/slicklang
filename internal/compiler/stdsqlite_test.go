@@ -119,7 +119,7 @@ function ProcessRow(First: std.sqlite.Row, Affected: int) -> string {
     Id + "|" + Title + "|" + Price + "|" + Data + "|" + Extra + "|affected=" + std.convert.IntToString(Affected)
 }
 
-function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure {
+function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     using DB = std.sqlite.Open(":memory:")? {
         let CreateStmt = std.sqlite.Statement {
             SQL: "CREATE TABLE items (id INTEGER PRIMARY KEY, title TEXT, price REAL, data BLOB, extra TEXT)"
@@ -155,7 +155,7 @@ function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Fail
     }
 }
 
-function main() -> string throws std.sqlite.Failure {
+function main() -> string throws std.sqlite.Failure effects { database } {
     match Exercise() {
         Ok(Res) => Res
         Err(Fail) => Fail.Operation + ":" + Fail.Message
@@ -173,7 +173,7 @@ func TestStdSQLiteFileDatabaseAndPersistence(t *testing.T) {
 	// 1. Interpreter write + read on file
 	dbFileInterp := filepath.Join(t.TempDir(), "interp.db")
 	sourceWriteInterp := fmt.Sprintf(`
-function WriteData() -> Result<int, std.sqlite.Failure> throws std.sqlite.Failure {
+function WriteData() -> Result<int, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     using DB = std.sqlite.Open(%s)? {
         let CreateStmt = std.sqlite.Statement {
             SQL: "CREATE TABLE notes (id INTEGER PRIMARY KEY, content TEXT)"
@@ -190,7 +190,7 @@ function WriteData() -> Result<int, std.sqlite.Failure> throws std.sqlite.Failur
     }
 }
 
-function main() -> string throws std.sqlite.Failure {
+function main() -> string throws std.sqlite.Failure effects { database } {
     match WriteData() {
         Ok(Affected) => "inserted=" + std.convert.IntToString(Affected)
         Err(Fail) => Fail.Operation + ":" + Fail.Message
@@ -218,7 +218,7 @@ function ExtractContent(Row: std.sqlite.Row) -> string {
     }
 }
 
-function ReadData() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure {
+function ReadData() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     using DB = std.sqlite.Open(%s)? {
         let Query = std.sqlite.Query {
             SQL: "SELECT content FROM notes WHERE id = ?"
@@ -236,7 +236,7 @@ function ReadData() -> Result<string, std.sqlite.Failure> throws std.sqlite.Fail
     }
 }
 
-function main() -> string throws std.sqlite.Failure {
+function main() -> string throws std.sqlite.Failure effects { database } {
     match ReadData() {
         Ok(Content) => Content
         Err(Fail) => Fail.Operation + ":" + Fail.Message
@@ -253,7 +253,7 @@ function main() -> string throws std.sqlite.Failure {
 	// 2. Native write + read on separate file across process restarts
 	dbFileNative := filepath.Join(t.TempDir(), "native.db")
 	sourceWriteNative := fmt.Sprintf(`
-function WriteData() -> Result<int, std.sqlite.Failure> throws std.sqlite.Failure {
+function WriteData() -> Result<int, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     using DB = std.sqlite.Open(%s)? {
         let CreateStmt = std.sqlite.Statement {
             SQL: "CREATE TABLE notes (id INTEGER PRIMARY KEY, content TEXT)"
@@ -270,7 +270,7 @@ function WriteData() -> Result<int, std.sqlite.Failure> throws std.sqlite.Failur
     }
 }
 
-function main() -> string throws std.sqlite.Failure {
+function main() -> string throws std.sqlite.Failure effects { database } {
     match WriteData() {
         Ok(Affected) => "inserted=" + std.convert.IntToString(Affected)
         Err(Fail) => Fail.Operation + ":" + Fail.Message
@@ -305,7 +305,7 @@ function ExtractContent(Row: std.sqlite.Row) -> string {
     }
 }
 
-function ReadData() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure {
+function ReadData() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     using DB = std.sqlite.Open(%s)? {
         let Query = std.sqlite.Query {
             SQL: "SELECT content FROM notes WHERE id = ?"
@@ -323,7 +323,7 @@ function ReadData() -> Result<string, std.sqlite.Failure> throws std.sqlite.Fail
     }
 }
 
-function main() -> string throws std.sqlite.Failure {
+function main() -> string throws std.sqlite.Failure effects { database } {
     match ReadData() {
         Ok(Content) => Content
         Err(Fail) => Fail.Operation + ":" + Fail.Message
@@ -348,7 +348,7 @@ function main() -> string throws std.sqlite.Failure {
 func TestStdSQLiteMissingParentDirectoryFails(t *testing.T) {
 	badPath := filepath.Join(t.TempDir(), "nonexistent", "sub", "test.db")
 	source := fmt.Sprintf(`
-function main() -> string {
+function main() -> string effects { database } {
     match std.sqlite.Open(%s) {
         Ok(_) => "opened"
         Err(Fail) => Fail.Operation + "|" + (if (std.text.Contains(Fail.Message, "parent directory does not exist")) { "missing-dir" } else { Fail.Message })
@@ -377,7 +377,7 @@ function ExtractName(First: std.sqlite.Row) -> string {
     }
 }
 
-function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure {
+function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     using DB = std.sqlite.Open(":memory:")? {
         let CreateStmt = std.sqlite.Statement {
             SQL: "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"
@@ -408,7 +408,7 @@ function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Fail
     }
 }
 
-function main() -> string throws std.sqlite.Failure {
+function main() -> string throws std.sqlite.Failure effects { database } {
     match Exercise() {
         Ok(Name) => Name
         Err(Fail) => Fail.Operation + ":" + Fail.Message
@@ -424,7 +424,7 @@ function main() -> string throws std.sqlite.Failure {
 
 func TestStdSQLiteQueryBoundsAndLimits(t *testing.T) {
 	source := `
-function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure {
+function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     using DB = std.sqlite.Open(":memory:")? {
         let CreateStmt = std.sqlite.Statement {
             SQL: "CREATE TABLE t (id INTEGER, val TEXT)"
@@ -481,7 +481,7 @@ function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Fail
     }
 }
 
-function main() -> string throws std.sqlite.Failure {
+function main() -> string throws std.sqlite.Failure effects { database } {
     match Exercise() {
         Ok(Res) => Res
         Err(Fail) => Fail.Operation + ":" + Fail.Message
@@ -497,7 +497,7 @@ function main() -> string throws std.sqlite.Failure {
 
 func TestStdSQLiteDuplicateColumnsRejected(t *testing.T) {
 	source := `
-function QueryDuplicate(DB: std.sqlite.Database) -> string throws std.sqlite.Failure {
+function QueryDuplicate(DB: std.sqlite.Database) -> string throws std.sqlite.Failure effects { database } {
     let Q = std.sqlite.Query {
         SQL: "SELECT 1 AS x, 2 AS x"
         Parameters: []
@@ -510,13 +510,13 @@ function QueryDuplicate(DB: std.sqlite.Database) -> string throws std.sqlite.Fai
     }
 }
 
-function RunTest() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure {
+function RunTest() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     using DB = std.sqlite.Open(":memory:")? {
         Ok(QueryDuplicate(DB))
     }
 }
 
-function main() -> string throws std.sqlite.Failure {
+function main() -> string throws std.sqlite.Failure effects { database } {
     match RunTest() {
         Ok(Res) => Res
         Err(Fail) => Fail.Message
@@ -531,7 +531,7 @@ function main() -> string throws std.sqlite.Failure {
 
 func TestStdSQLiteSingleStatementEnforced(t *testing.T) {
 	source := `
-function ExecMulti(DB: std.sqlite.Database) -> string throws std.sqlite.Failure {
+function ExecMulti(DB: std.sqlite.Database) -> string throws std.sqlite.Failure effects { database } {
     let Stmt = std.sqlite.Statement {
         SQL: "CREATE TABLE a (x INT); CREATE TABLE b (y INT);"
         Parameters: []
@@ -542,13 +542,13 @@ function ExecMulti(DB: std.sqlite.Database) -> string throws std.sqlite.Failure 
     }
 }
 
-function RunTest() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure {
+function RunTest() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     using DB = std.sqlite.Open(":memory:")? {
         Ok(ExecMulti(DB))
     }
 }
 
-function main() -> string throws std.sqlite.Failure {
+function main() -> string throws std.sqlite.Failure effects { database } {
     match RunTest() {
         Ok(Res) => Res
         Err(Fail) => Fail.Message
@@ -576,7 +576,7 @@ function ExtractCount(First: std.sqlite.Row) -> int {
     }
 }
 
-function ReadCount(DB: std.sqlite.Database) -> Result<int, std.sqlite.Failure> {
+function ReadCount(DB: std.sqlite.Database) -> Result<int, std.sqlite.Failure> effects { database } {
     let Query = std.sqlite.Query { SQL: "SELECT COUNT(*) as c FROM t", Parameters: [], MaxRows: 10, MaxBytes: 1024 }
     let Rows = DB.Query(Query)?
     let First = Rows.Get(0)
@@ -587,7 +587,7 @@ function ReadCount(DB: std.sqlite.Database) -> Result<int, std.sqlite.Failure> {
     }
 }
 
-function TestCommit() -> Result<int, std.sqlite.Failure> throws std.sqlite.Failure {
+function TestCommit() -> Result<int, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     using DB = std.sqlite.Open(":memory:")? {
         let CreateStmt = std.sqlite.Statement { SQL: "CREATE TABLE t (v INT)", Parameters: [] }
         DB.Execute(CreateStmt)?
@@ -601,7 +601,7 @@ function TestCommit() -> Result<int, std.sqlite.Failure> throws std.sqlite.Failu
     }
 }
 
-function TestRollback() -> Result<int, std.sqlite.Failure> throws std.sqlite.Failure {
+function TestRollback() -> Result<int, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     using DB = std.sqlite.Open(":memory:")? {
         let CreateStmt = std.sqlite.Statement { SQL: "CREATE TABLE t (v INT)", Parameters: [] }
         DB.Execute(CreateStmt)?
@@ -615,7 +615,7 @@ function TestRollback() -> Result<int, std.sqlite.Failure> throws std.sqlite.Fai
     }
 }
 
-function RunAutoRollback(DB: std.sqlite.Database) -> Result<null, std.sqlite.Failure> throws std.sqlite.Failure {
+function RunAutoRollback(DB: std.sqlite.Database) -> Result<null, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     using Tx = DB.Begin()? {
         let InsertStmt = std.sqlite.Statement { SQL: "INSERT INTO t VALUES (999)", Parameters: [] }
         Tx.Execute(InsertStmt)?
@@ -623,7 +623,7 @@ function RunAutoRollback(DB: std.sqlite.Database) -> Result<null, std.sqlite.Fai
     }
 }
 
-function TestUsingAutoRollback() -> Result<int, std.sqlite.Failure> throws std.sqlite.Failure {
+function TestUsingAutoRollback() -> Result<int, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     using DB = std.sqlite.Open(":memory:")? {
         let CreateStmt = std.sqlite.Statement { SQL: "CREATE TABLE t (v INT)", Parameters: [] }
         DB.Execute(CreateStmt)?
@@ -632,7 +632,7 @@ function TestUsingAutoRollback() -> Result<int, std.sqlite.Failure> throws std.s
     }
 }
 
-function main() -> string throws std.sqlite.Failure {
+function main() -> string throws std.sqlite.Failure effects { database } {
     let C = match TestCommit() { Ok(V) => std.convert.IntToString(V), Err(_) => "err" }
     let R = match TestRollback() { Ok(V) => std.convert.IntToString(V), Err(_) => "err" }
     let U = match TestUsingAutoRollback() { Ok(V) => std.convert.IntToString(V), Err(_) => "err" }
@@ -648,7 +648,7 @@ function main() -> string throws std.sqlite.Failure {
 
 func TestStdSQLiteOperationsAfterClose(t *testing.T) {
 	source := `
-function TestClosedOps(DB: std.sqlite.Database) -> string {
+function TestClosedOps(DB: std.sqlite.Database) -> string effects { database } {
     let Stmt = std.sqlite.Statement { SQL: "CREATE TABLE t(x)", Parameters: [] }
     let ExecRes = match DB.Execute(Stmt) {
         Ok(_) => "succeeded"
@@ -666,13 +666,13 @@ function TestClosedOps(DB: std.sqlite.Database) -> string {
     ExecRes + "|" + QueryRes + "|" + BeginRes
 }
 
-function RunCloseFlow() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure {
+function RunCloseFlow() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     let DB = std.sqlite.Open(":memory:")?
     DB.Close()
     Ok(TestClosedOps(DB))
 }
 
-function main() -> string throws std.sqlite.Failure {
+function main() -> string throws std.sqlite.Failure effects { database } {
     match RunCloseFlow() {
         Ok(S) => S
         Err(Fail) => Fail.Message
@@ -688,7 +688,7 @@ function main() -> string throws std.sqlite.Failure {
 
 func TestStdSQLiteObjectLiteralsSurviveWithoutPanic(t *testing.T) {
 	source := `
-function main() -> string {
+function main() -> string effects { database } {
     let RawDB = std.sqlite.Database {}
     let Stmt = std.sqlite.Statement { SQL: "SELECT 1", Parameters: [] }
     let E1 = match RawDB.Execute(Stmt) {
@@ -735,7 +735,7 @@ function main() -> string {
 
 func TestStdSQLiteSharedHandleConcurrentWrites(t *testing.T) {
 	source := `
-function WriteOne(DB: std.sqlite.Database, Value: int) -> Result<null, std.sqlite.Failure> {
+function WriteOne(DB: std.sqlite.Database, Value: int) -> Result<null, std.sqlite.Failure> effects { database } {
     let Stmt = std.sqlite.Statement {
         SQL: "INSERT INTO t(x) VALUES (?)"
         Parameters: [std.sqlite.Value.Integer(Value)]
@@ -744,7 +744,7 @@ function WriteOne(DB: std.sqlite.Database, Value: int) -> Result<null, std.sqlit
     Ok(null)
 }
 
-function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure {
+function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     using DB = std.sqlite.Open(":memory:")? {
         let Create = std.sqlite.Statement { SQL: "CREATE TABLE t(x INT)", Parameters: [] }
         DB.Execute(Create)?
@@ -772,7 +772,7 @@ function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Fail
     }
 }
 
-function main() -> string throws std.sqlite.Failure {
+function main() -> string throws std.sqlite.Failure effects { database } {
     match Exercise() {
         Ok(S) => S
         Err(F) => F.Message
@@ -787,7 +787,7 @@ function main() -> string throws std.sqlite.Failure {
 
 func TestStdSQLiteMemoryTransactionDoesNotHang(t *testing.T) {
 	source := `
-function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure {
+function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     using DB = std.sqlite.Open(":memory:")? {
         let Create = std.sqlite.Statement { SQL: "CREATE TABLE t(x INT)", Parameters: [] }
         DB.Execute(Create)?
@@ -805,7 +805,7 @@ function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Fail
     }
 }
 
-function main() -> string throws std.sqlite.Failure {
+function main() -> string throws std.sqlite.Failure effects { database } {
     match Exercise() {
         Ok(S) => S
         Err(F) => F.Message
@@ -820,7 +820,7 @@ function main() -> string throws std.sqlite.Failure {
 
 func TestStdSQLiteCloseInvalidatesTransaction(t *testing.T) {
 	source := `
-function AfterClose(Tx: std.sqlite.Transaction) -> string {
+function AfterClose(Tx: std.sqlite.Transaction) -> string effects { database } {
     let Stmt = std.sqlite.Statement { SQL: "INSERT INTO t VALUES (1)", Parameters: [] }
     match Tx.Execute(Stmt) {
         Ok(_) => "executed"
@@ -828,7 +828,7 @@ function AfterClose(Tx: std.sqlite.Transaction) -> string {
     }
 }
 
-function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure {
+function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     let DB = std.sqlite.Open(":memory:")?
     let Create = std.sqlite.Statement { SQL: "CREATE TABLE t(x INT)", Parameters: [] }
     DB.Execute(Create)?
@@ -837,7 +837,7 @@ function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Fail
     Ok(AfterClose(Tx))
 }
 
-function main() -> string throws std.sqlite.Failure {
+function main() -> string throws std.sqlite.Failure effects { database } {
     match Exercise() {
         Ok(S) => S
         Err(F) => F.Message
@@ -867,7 +867,7 @@ function main() -> string {
 
 func TestStdSQLiteRejectsInvalidResultCells(t *testing.T) {
 	source := `
-function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure {
+function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     using DB = std.sqlite.Open(":memory:")? {
         let Inf = std.sqlite.Query { SQL: "SELECT 1e308 * 1e308 as v", Parameters: [], MaxRows: 10, MaxBytes: 1024 }
         match DB.Query(Inf) {
@@ -877,7 +877,7 @@ function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Fail
     }
 }
 
-function main() -> string throws std.sqlite.Failure {
+function main() -> string throws std.sqlite.Failure effects { database } {
     match Exercise() {
         Ok(S) => S
         Err(F) => F.Message
@@ -892,7 +892,7 @@ function main() -> string throws std.sqlite.Failure {
 
 func TestStdSQLitePreservesZeroLastInsertId(t *testing.T) {
 	source := `
-function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure {
+function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Failure effects { database } {
     using DB = std.sqlite.Open(":memory:")? {
         let Create = std.sqlite.Statement { SQL: "CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)", Parameters: [] }
         DB.Execute(Create)?
@@ -910,7 +910,7 @@ function Exercise() -> Result<string, std.sqlite.Failure> throws std.sqlite.Fail
     }
 }
 
-function main() -> string throws std.sqlite.Failure {
+function main() -> string throws std.sqlite.Failure effects { database } {
     match Exercise() {
         Ok(S) => S
         Err(F) => F.Message

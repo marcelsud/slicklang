@@ -58,7 +58,7 @@ function EncodeHealth() -> std.http.server.Response {
     }
 }
 
-function HandleHealth(Database: std.sqlite.Database) -> std.http.server.Response {
+function HandleHealth(Database: std.sqlite.Database) -> std.http.server.Response effects { database } {
     match CheckHealth(Database) {
         Ok(_) => EncodeHealth()
         Err(_) => ErrorResponseJson(500, "storage unavailable")
@@ -72,7 +72,7 @@ function EncodeTodoList(Todos: Todo[]) -> std.http.server.Response {
     }
 }
 
-function HandleListTodos(Database: std.sqlite.Database) -> std.http.server.Response {
+function HandleListTodos(Database: std.sqlite.Database) -> std.http.server.Response effects { database, state } {
     match ListTodos(Database, 100) {
         Ok(Todos) => EncodeTodoList(Todos)
         Err(_) => ErrorResponseJson(500, "storage error")
@@ -86,7 +86,7 @@ function EncodeCreatedTodo(Created: Todo) -> std.http.server.Response {
     }
 }
 
-function ProcessCreateTodo(Database: std.sqlite.Database, Payload: CreateTodo) -> std.http.server.Response {
+function ProcessCreateTodo(Database: std.sqlite.Database, Payload: CreateTodo) -> std.http.server.Response effects { database } {
     let TrimmedTitle = std.text.Trim(Payload.Title)
     if (TrimmedTitle == "") {
         ErrorResponseJson(422, "title must not be empty")
@@ -98,14 +98,14 @@ function ProcessCreateTodo(Database: std.sqlite.Database, Payload: CreateTodo) -
     }
 }
 
-function DecodeAndCreateTodo(Database: std.sqlite.Database, BodyString: string) -> std.http.server.Response {
+function DecodeAndCreateTodo(Database: std.sqlite.Database, BodyString: string) -> std.http.server.Response effects { database } {
     match std.json.Decode<CreateTodo>(BodyString) {
         Ok(Payload) => ProcessCreateTodo(Database, Payload)
         Err(_) => ErrorResponseJson(400, "invalid json payload")
     }
 }
 
-function HandleCreateTodo(Database: std.sqlite.Database, Body: bytes) -> std.http.server.Response {
+function HandleCreateTodo(Database: std.sqlite.Database, Body: bytes) -> std.http.server.Response effects { database } {
     match std.bytes.ToUtf8(Body) {
         Ok(BodyString) => DecodeAndCreateTodo(Database, BodyString)
         Err(_) => ErrorResponseJson(400, "invalid utf-8 body")
@@ -127,21 +127,21 @@ function RespondWithFoundTodo(Found: Todo?) -> std.http.server.Response {
     }
 }
 
-function HandleGetTodo(Database: std.sqlite.Database, Id: int) -> std.http.server.Response {
+function HandleGetTodo(Database: std.sqlite.Database, Id: int) -> std.http.server.Response effects { database } {
     match GetTodo(Database, Id) {
         Ok(Found) => RespondWithFoundTodo(Found)
         Err(_) => ErrorResponseJson(500, "storage error")
     }
 }
 
-function RunUpdateTodo(Database: std.sqlite.Database, Id: int, Title: string, Completed: bool) -> std.http.server.Response throws std.sqlite.Failure {
+function RunUpdateTodo(Database: std.sqlite.Database, Id: int, Title: string, Completed: bool) -> std.http.server.Response throws std.sqlite.Failure effects { database } {
     match UpdateTodoInTx(Database, Id, Title, Completed) {
         Ok(Found) => RespondWithFoundTodo(Found)
         Err(_) => ErrorResponseJson(500, "storage error")
     }
 }
 
-function ProcessUpdateTodo(Database: std.sqlite.Database, Id: int, Payload: UpdateTodo) -> std.http.server.Response {
+function ProcessUpdateTodo(Database: std.sqlite.Database, Id: int, Payload: UpdateTodo) -> std.http.server.Response effects { database } {
     let TrimmedTitle = std.text.Trim(Payload.Title)
     if (TrimmedTitle == "") {
         ErrorResponseJson(422, "title must not be empty")
@@ -153,14 +153,14 @@ function ProcessUpdateTodo(Database: std.sqlite.Database, Id: int, Payload: Upda
     }
 }
 
-function DecodeAndUpdateTodo(Database: std.sqlite.Database, Id: int, BodyString: string) -> std.http.server.Response {
+function DecodeAndUpdateTodo(Database: std.sqlite.Database, Id: int, BodyString: string) -> std.http.server.Response effects { database } {
     match std.json.Decode<UpdateTodo>(BodyString) {
         Ok(Payload) => ProcessUpdateTodo(Database, Id, Payload)
         Err(_) => ErrorResponseJson(400, "invalid json payload")
     }
 }
 
-function HandleUpdateTodo(Database: std.sqlite.Database, Id: int, Body: bytes) -> std.http.server.Response {
+function HandleUpdateTodo(Database: std.sqlite.Database, Id: int, Body: bytes) -> std.http.server.Response effects { database } {
     match std.bytes.ToUtf8(Body) {
         Ok(BodyString) => DecodeAndUpdateTodo(Database, Id, BodyString)
         Err(_) => ErrorResponseJson(400, "invalid utf-8 body")
@@ -175,14 +175,14 @@ function RespondWithDeleteResult(Deleted: bool) -> std.http.server.Response {
     }
 }
 
-function HandleDeleteTodo(Database: std.sqlite.Database, Id: int) -> std.http.server.Response {
+function HandleDeleteTodo(Database: std.sqlite.Database, Id: int) -> std.http.server.Response effects { database } {
     match DeleteTodo(Database, Id) {
         Ok(Deleted) => RespondWithDeleteResult(Deleted)
         Err(_) => ErrorResponseJson(500, "storage error")
     }
 }
 
-function DispatchTodoItem(Database: std.sqlite.Database, Method: string, IdText: string, Body: bytes) -> std.http.server.Response {
+function DispatchTodoItem(Database: std.sqlite.Database, Method: string, IdText: string, Body: bytes) -> std.http.server.Response effects { database } {
     let ParsedIdResult = std.convert.ParseInt(IdText)
     let Id = match ParsedIdResult {
         Ok(N) => N
@@ -209,7 +209,7 @@ function DispatchTodoItem(Database: std.sqlite.Database, Method: string, IdText:
 
 class TodoAPI implements std.http.server.Handler {
     Database: std.sqlite.Database
-    function Handle(Request: std.http.server.Request) -> std.http.server.Response {
+    function Handle(Request: std.http.server.Request) -> std.http.server.Response effects { database, state } {
         if (Request.Path == "/health") {
             if (Request.Method == "GET") {
                 HandleHealth(self.Database)

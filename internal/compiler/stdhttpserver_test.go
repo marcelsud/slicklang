@@ -24,7 +24,7 @@ import (
 
 const httpServerEchoHandler = `
 class Echo implements std.http.server.Handler {
-    function Handle(Request: std.http.server.Request) -> std.http.server.Response {
+    function Handle(Request: std.http.server.Request) -> std.http.server.Response effects { environment, network } {
         if (Request.Path == "/bad-status") {
             return std.http.server.Response {
                 Status: 0
@@ -369,7 +369,7 @@ function Describe(Result: Result<null, std.http.server.Failure>) -> string {
     }
 }
 
-function main() -> string {
+function main() -> string effects { database, environment, filesystem, io, network, process, random, state, time } {
     let Empty = Describe(std.http.server.Serve(std.http.server.Config { Address: "" }, Echo {}))
     let ZeroBody = Describe(std.http.server.Serve(std.http.server.Config {
         Address: "127.0.0.1:1"
@@ -407,7 +407,7 @@ function main() -> string {
 func TestStdHTTPServerServeContractsNative(t *testing.T) {
 	address := freeLoopbackAddress(t)
 	source := httpServerEchoHandler + `
-function main() -> Result<null, std.http.server.Failure> {
+function main() -> Result<null, std.http.server.Failure> effects { database, environment, filesystem, io, network, process, random, state, time } {
     let Address = std.env.Get("SLICK_HTTP_SERVER_ADDR")
     if (Address == null) {
         Err(std.http.server.Failure {
@@ -613,7 +613,7 @@ function main() -> Result<null, std.http.server.Failure> {
 func TestStdHTTPServerServeContractsInterpreter(t *testing.T) {
 	address := freeLoopbackAddress(t)
 	source := httpServerEchoHandler + `
-function main() -> Result<null, std.http.server.Failure> {
+function main() -> Result<null, std.http.server.Failure> effects { database, environment, filesystem, io, network, process, random, state, time } {
     let Address = std.env.Get("SLICK_HTTP_SERVER_ADDR")
     if (Address == null) {
         Err(std.http.server.Failure {
@@ -748,19 +748,19 @@ func TestStdHTTPServerStaticDiagnostics(t *testing.T) {
 		message string
 	}{
 		"Serve arity": {
-			source:  `function main() -> null { std.http.server.Serve() null }`,
+			source:  `function main() -> null effects { database, environment, filesystem, io, network, process, random, state, time } { std.http.server.Serve() null }`,
 			code:    "SLK320",
 			message: "Serve expects 2 arguments, found 0",
 		},
 		"Serve config type": {
-			source:  `function main() -> null { std.http.server.Serve("nope", Echo {}) null }` + httpServerEchoHandler,
+			source:  `function main() -> null effects { database, environment, filesystem, io, network, process, random, state, time } { std.http.server.Serve("nope", Echo {}) null }` + httpServerEchoHandler,
 			code:    "SLK320",
 			message: "argument 1 to std.http.server.Serve must be Config, found string",
 		},
 		"Handler missing method": {
 			source: `
 class Empty {}
-function main() -> null {
+function main() -> null effects { database, environment, filesystem, io, network, process, random, state, time } {
     std.http.server.Serve(std.http.server.Config { Address: "127.0.0.1:0" }, Empty {})
     null
 }
@@ -776,7 +776,7 @@ class Unsafe implements std.http.server.Handler {
         std.http.server.Response { Status: 200 }
     }
 }
-function main() -> null {
+function main() -> null effects { database, environment, filesystem, io, network, process, random, state, time } {
     std.http.server.Serve(std.http.server.Config { Address: "127.0.0.1:0" }, Unsafe { State: std.buffer.New<int>() })
     null
 }
@@ -810,7 +810,7 @@ class Unsafe implements std.http.server.Handler {
     }
 }
 
-function main() -> string {
+function main() -> string effects { database, environment, filesystem, io, network, process, random, state, time } {
     let Start = std.http.server.Serve
 	let Config = std.http.server.Config { Address: "127.0.0.1:0" }
 	let Application = Unsafe { State: std.buffer.New<int>() }
@@ -878,7 +878,7 @@ func TestStdHTTPServerClientUnchanged(t *testing.T) {
 	server := httptestServer(t)
 	t.Setenv("SLICK_HTTP_TEST_URL", server)
 	source := `
-function main() -> string {
+function main() -> string effects { environment, network } {
     let Base = std.env.Get("SLICK_HTTP_TEST_URL")
     if (Base == null) {
         "missing"

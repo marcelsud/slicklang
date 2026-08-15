@@ -17,7 +17,7 @@
 //   PUT    /todos/{id}  Update todo in transaction {"title":"...","completed":true}
 //   DELETE /todos/{id}  Delete todo by ID (returns 204 No Content)
 
-function StartServer(Database: std.sqlite.Database, Address: string) -> Result<null, std.sqlite.Failure> {
+function StartServer(Database: std.sqlite.Database, Address: string) -> Result<null, std.sqlite.Failure> effects { database, environment, filesystem, io, network, process, random, state, time } {
     let Application = TodoAPI {
         Database: Database
     }
@@ -41,14 +41,14 @@ function StartServer(Database: std.sqlite.Database, Address: string) -> Result<n
     }
 }
 
-function RunWithDatabase(DatabasePath: string, Address: string) -> Result<null, std.sqlite.Failure> throws std.sqlite.Failure {
+function RunWithDatabase(DatabasePath: string, Address: string) -> Result<null, std.sqlite.Failure> throws std.sqlite.Failure effects { database, environment, filesystem, io, network, process, random, state, time } {
     using Database = std.sqlite.Open(DatabasePath)? {
         let SchemaResult = InitializeSchema(Database)?
         StartServer(Database, Address)
     }
 }
 
-function RunServer() -> Result<null, std.sqlite.Failure> throws std.sqlite.Failure {
+function RunServer() -> Result<null, std.sqlite.Failure> throws std.sqlite.Failure effects { database, environment, filesystem, io, network, process, random, state, time } {
     let DatabasePath = std.env.Get("TODO_API_DATABASE")
     if (DatabasePath == null) {
         Err(std.sqlite.Failure {
@@ -79,6 +79,6 @@ function RunServer() -> Result<null, std.sqlite.Failure> throws std.sqlite.Failu
     }
 }
 
-function main() -> null throws std.sqlite.Failure {
+function main() -> null throws std.sqlite.Failure effects { database, environment, filesystem, io, network, process, random, state, time } {
     unwrap(RunServer())
 }

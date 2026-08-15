@@ -1,4 +1,4 @@
-function FetchPair(LeftURL: string, RightURL: string) -> Result<string, std.http.Failure> {
+function FetchPair(LeftURL: string, RightURL: string) -> Result<string, std.http.Failure> effects { network } {
     async let LeftJob = std.http.Fetch(std.http.Request {
         Method: "GET"
         URL: LeftURL
@@ -14,7 +14,7 @@ function FetchPair(LeftURL: string, RightURL: string) -> Result<string, std.http
     Ok(`${Left.Status}:${LeftLength},${Right.Status}:${RightLength}`)
 }
 
-function main() -> string {
+function main() -> string effects { environment, network } {
     let MaybeLeftURL = std.env.Get("SLICK_ASYNC_LEFT_URL")
     let LeftURL = if (MaybeLeftURL == null) {
         return "set SLICK_ASYNC_LEFT_URL and SLICK_ASYNC_RIGHT_URL"

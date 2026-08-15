@@ -16,13 +16,14 @@ type callableTarget struct {
 	aliases   map[string]aliasDecl
 	// generic is true when the target is one instantiation of a user-declared
 	// generic function, whose type arguments the call already supplied.
-	generic    bool
-	typeParams []string
-	params     []paramDecl
-	result     typeRef
-	throwSet   map[string]struct{}
-	native     nativeFunction
-	function   *functionDecl
+	generic      bool
+	typeParams   []string
+	params       []paramDecl
+	result       typeRef
+	throwSet     map[string]struct{}
+	operationSet operationEffectSet
+	native       nativeFunction
+	function     *functionDecl
 }
 
 type effectOrigin struct {
@@ -935,6 +936,7 @@ func (p *program) checkUsingExpression(node *usingExpression, scope *astScope, e
 		for thrown := range closeMethod.throwSet {
 			info.effects[thrown] = effectOrigin{pos: node.pos, origin: node.name + ".Close"}
 		}
+		p.requireOperationEffects(scope.function, closeMethod.operationSet, node.pos, node.name+".Close")
 	}
 	return info
 }
@@ -1094,6 +1096,7 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 	for thrown := range target.throwSet {
 		node.resolvedThrows[thrown] = effectOrigin{pos: node.pos, origin: target.name}
 	}
+	p.requireOperationEffects(scope.function, target.operationSet, node.pos, target.name)
 
 	if len(node.args) != len(params) {
 		p.add(node.pos, diagnosticCodeCallArgument, "%s expects %d arguments, found %d", target.name, len(params), len(node.args))
@@ -1220,14 +1223,15 @@ func (p *program) resolveGenericCall(function *functionDecl, node *callExpressio
 	node.resolvedCallee = instance.qualified
 	node.resolvedTypeArgs = args
 	return &callableTarget{
-		name:      name.name,
-		namespace: instance.namespace,
-		aliases:   instance.aliases,
-		generic:   true,
-		params:    instance.params,
-		result:    instance.result,
-		throwSet:  instance.throwSet,
-		function:  instance,
+		name:         name.name,
+		namespace:    instance.namespace,
+		aliases:      instance.aliases,
+		generic:      true,
+		params:       instance.params,
+		result:       instance.result,
+		throwSet:     instance.throwSet,
+		operationSet: instance.operationSet,
+		function:     instance,
 	}, false
 }
 
@@ -1251,7 +1255,7 @@ func (p *program) resolveASTCall(function *functionDecl, node *callExpression, n
 			if !p.requireAccess(name.pos, function.namespace, method.ownerNamespace, method.name, "method") {
 				return nil, true
 			}
-			return &callableTarget{name: name.name, namespace: method.namespace, aliases: method.aliases, params: method.params, result: method.result, throwSet: method.throwSet}, false
+			return &callableTarget{name: name.name, namespace: method.namespace, aliases: method.aliases, params: method.params, result: method.result, throwSet: method.throwSet, operationSet: method.operationSet}, false
 		}
 	}
 	if strings.Contains(name.name, ".") && !isAbsoluteCanonicalName(name.name) {
@@ -1268,15 +1272,16 @@ func (p *program) resolveASTCall(function *functionDecl, node *callExpression, n
 		return nil, true
 	}
 	return &callableTarget{
-		name:       name.name,
-		namespace:  callee.namespace,
-		aliases:    callee.aliases,
-		typeParams: callee.typeParams,
-		params:     callee.params,
-		result:     callee.result,
-		throwSet:   callee.throwSet,
-		native:     callee.native,
-		function:   callee,
+		name:         name.name,
+		namespace:    callee.namespace,
+		aliases:      callee.aliases,
+		typeParams:   callee.typeParams,
+		params:       callee.params,
+		result:       callee.result,
+		throwSet:     callee.throwSet,
+		operationSet: callee.operationSet,
+		native:       callee.native,
+		function:     callee,
 	}, false
 }
 
@@ -1309,13 +1314,13 @@ func (p *program) assignable(actual, expected string) bool {
 
 // callableAssignable decides whether one callable may be stored where another
 // is required. The rule is deliberately narrow: arity must match exactly,
-// parameter and result types are invariant, and the source's declared throw set
-// must be a subset of the target's. A non-throwing callable therefore fits
-// where errors are expected, but never the reverse, so a checked effect can
-// never be erased by passing a callable through a wider type.
+// parameter and result types are invariant, and the source's declared error
+// and operation effect sets must be subsets of the target's. A pure callable
+// therefore fits where effects are expected, but never the reverse: passing a
+// callable through a wider type cannot erase observable behavior.
 func callableAssignable(actual, expected string) bool {
-	actualParams, actualResult, actualThrows, isActual := callableTypeParts(actual)
-	expectedParams, expectedResult, expectedThrows, isExpected := callableTypeParts(expected)
+	actualParams, actualResult, actualThrows, actualOperations, isActual := callableTypeParts(actual)
+	expectedParams, expectedResult, expectedThrows, expectedOperations, isExpected := callableTypeParts(expected)
 	if !isActual || !isExpected {
 		return false
 	}
@@ -1333,6 +1338,12 @@ func callableAssignable(actual, expected string) bool {
 	}
 	for _, thrown := range actualThrows {
 		if !containsError(accepted, thrown) {
+			return false
+		}
+	}
+	acceptedOperations := operationEffectNamesSet(expectedOperations)
+	for _, operation := range actualOperations {
+		if _, accepted := acceptedOperations[operation]; !accepted {
 			return false
 		}
 	}

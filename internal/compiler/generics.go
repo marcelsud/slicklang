@@ -466,6 +466,7 @@ func (p *program) substitutedFunction(generic *functionDecl, substitutions map[s
 		params:        p.substitutedParams(generic.namespace, generic.aliases, substitutions, generic.params, found),
 		result:        p.substitutedRef(generic.namespace, generic.aliases, substitutions, generic.result),
 		throws:        p.substitutedRefs(generic.namespace, generic.aliases, substitutions, generic.throws, found),
+		operations:    append([]operationEffectRef(nil), generic.operations...),
 		body:          generic.body,
 		instanceOf:    generic.qualified,
 		documentation: generic.documentation,
@@ -578,6 +579,7 @@ func cloneExpression(expression expressionNode) expressionNode {
 		clone := *node
 		clone.params = append([]paramDecl(nil), node.params...)
 		clone.throws = append([]typeRef(nil), node.throws...)
+		clone.operations = append([]operationEffectRef(nil), node.operations...)
 		clone.body = cloneBlock(node.body)
 		clone.fn = nil
 		clone.captures = nil
@@ -702,6 +704,7 @@ func (p *program) substitutedSignature(method *methodSignature, substitutions ma
 		params:         p.substitutedParams(method.namespace, method.aliases, substitutions, method.params, found),
 		result:         p.substitutedRef(method.namespace, method.aliases, substitutions, method.result),
 		throws:         p.substitutedRefs(method.namespace, method.aliases, substitutions, method.throws, found),
+		operations:     append([]operationEffectRef(nil), method.operations...),
 		annotations:    method.annotations,
 		documentation:  method.documentation,
 		pos:            method.pos,

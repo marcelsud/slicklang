@@ -92,6 +92,8 @@ type methodSignature struct {
 	result         typeRef
 	throws         []typeRef
 	throwSet       map[string]struct{}
+	operations     []operationEffectRef
+	operationSet   operationEffectSet
 	annotations    []*annotationUse
 	documentation  *string
 	pos            position
@@ -140,6 +142,8 @@ type functionDecl struct {
 	result            typeRef
 	throws            []typeRef
 	throwSet          map[string]struct{}
+	operations        []operationEffectRef
+	operationSet      operationEffectSet
 	body              []token
 	ast               *blockNode
 	receiver          typeRef
@@ -662,7 +666,7 @@ func (p *parser) parseClassMethod(class *classDecl, registered bool) {
 	if !ok {
 		return
 	}
-	params, result, throws, body, hasBody, ok := p.parseCallableTail()
+	params, result, throws, operations, body, hasBody, ok := p.parseCallableTail()
 	if !ok {
 		return
 	}
@@ -674,6 +678,7 @@ func (p *parser) parseClassMethod(class *classDecl, registered bool) {
 		params:         params,
 		result:         result,
 		throws:         throws,
+		operations:     operations,
 		annotations:    p.consumeAnnotations(),
 		documentation:  p.consumeDocumentation(),
 		pos:            name.pos,
@@ -694,6 +699,7 @@ func (p *parser) parseClassMethod(class *classDecl, registered bool) {
 			params:            params,
 			result:            result,
 			throws:            throws,
+			operations:        operations,
 			body:              body,
 			receiver:          typeRef{name: class.qualified, pos: name.pos},
 			receiverCanonical: class.qualified,
@@ -786,7 +792,7 @@ func (p *parser) parseInterface() {
 		if !ok {
 			continue
 		}
-		params, result, throws, _, hasBody, ok := p.parseCallableTail()
+		params, result, throws, operations, _, hasBody, ok := p.parseCallableTail()
 		if !ok {
 			continue
 		}
@@ -801,6 +807,7 @@ func (p *parser) parseInterface() {
 			params:         params,
 			result:         result,
 			throws:         throws,
+			operations:     operations,
 			annotations:    p.consumeAnnotations(),
 			documentation:  p.consumeDocumentation(),
 			pos:            methodName.pos,
@@ -844,7 +851,7 @@ func (p *parser) parseFunction() {
 		genericReceiver = ref.name
 		ref = qualifiedRef{name: ref.name + "." + method.text, pos: ref.pos}
 	}
-	params, result, throws, body, hasBody, ok := p.parseCallableTail()
+	params, result, throws, operations, body, hasBody, ok := p.parseCallableTail()
 	if !ok {
 		return
 	}
@@ -883,6 +890,7 @@ func (p *parser) parseFunction() {
 			params:        params,
 			result:        result,
 			throws:        throws,
+			operations:    operations,
 			body:          body,
 			annotations:   p.consumeAnnotations(),
 			documentation: p.consumeDocumentation(),
@@ -910,6 +918,7 @@ func (p *parser) parseFunction() {
 		params:        params,
 		result:        result,
 		throws:        throws,
+		operations:    operations,
 		body:          body,
 		annotations:   p.consumeAnnotations(),
 		receiver:      typeRef{name: receiverName, pos: ref.pos},
@@ -923,25 +932,26 @@ func (p *parser) parseFunction() {
 	p.prog.methodImpls = append(p.prog.methodImpls, implementation)
 }
 
-func (p *parser) parseCallableTail() ([]paramDecl, typeRef, []typeRef, []token, bool, bool) {
+func (p *parser) parseCallableTail() ([]paramDecl, typeRef, []typeRef, []operationEffectRef, []token, bool, bool) {
 	params, ok := p.parseParams()
 	if !ok {
-		return nil, typeRef{}, nil, nil, false, false
+		return nil, typeRef{}, nil, nil, nil, false, false
 	}
 	if !p.accept("-") || !p.accept(">") {
 		p.error(p.current().pos, "expected '->' and a return type")
-		return nil, typeRef{}, nil, nil, false, false
+		return nil, typeRef{}, nil, nil, nil, false, false
 	}
-	// The declaration owns the throws clause, so a returned callable that
-	// declares effects of its own is parenthesized.
+	// The declaration owns the throws and effects clauses, so a returned
+	// callable that declares either is parenthesized.
 	result, ok := p.parseTypeAllowing(false)
 	if !ok {
-		return nil, typeRef{}, nil, nil, false, false
+		return nil, typeRef{}, nil, nil, nil, false, false
 	}
 	throws := p.parseThrows()
+	operations := p.parseEffects()
 	if !p.accept("{") {
 		p.accept(";")
-		return params, result, throws, nil, false, true
+		return params, result, throws, operations, nil, false, true
 	}
 	bodyStart := p.index
 	p.skipBlock()
@@ -949,7 +959,7 @@ func (p *parser) parseCallableTail() ([]paramDecl, typeRef, []typeRef, []token, 
 	if bodyEnd < bodyStart {
 		bodyEnd = bodyStart
 	}
-	return params, result, throws, p.tokens[bodyStart:bodyEnd], true, true
+	return params, result, throws, operations, p.tokens[bodyStart:bodyEnd], true, true
 }
 
 func (p *parser) parseParams() ([]paramDecl, bool) {
@@ -988,12 +998,12 @@ func (p *parser) parseType() (typeRef, bool) {
 	return p.parseTypeAllowing(true)
 }
 
-// parseTypeAllowing reads one type. allowThrows is false where a throws clause
-// belongs to the enclosing declaration rather than to the type being read, so a
-// returned callable that declares its own effects is written in parentheses.
-func (p *parser) parseTypeAllowing(allowThrows bool) (typeRef, bool) {
+// parseTypeAllowing reads one type. allowContracts is false where throws and
+// effects clauses belong to the enclosing declaration rather than to the type
+// being read, so a returned callable declaring either is parenthesized.
+func (p *parser) parseTypeAllowing(allowContracts bool) (typeRef, bool) {
 	pos := p.current().pos
-	text, next, message, errorPos := parseTypeTokensAllowing(p.tokens, p.index, allowThrows)
+	text, next, message, errorPos := parseTypeTokensAllowing(p.tokens, p.index, allowContracts)
 	if message != "" {
 		p.error(errorPos, "%s", message)
 		return typeRef{}, false
@@ -1010,8 +1020,8 @@ func parseTypeTokens(tokens []token, index int) (string, int, string, position) 
 	return parseTypeTokensAllowing(tokens, index, true)
 }
 
-func parseTypeTokensAllowing(tokens []token, index int, allowThrows bool) (string, int, string, position) {
-	text, next, message, errorPos := parseTypePrimary(tokens, index, allowThrows)
+func parseTypeTokensAllowing(tokens []token, index int, allowContracts bool) (string, int, string, position) {
+	text, next, message, errorPos := parseTypePrimary(tokens, index, allowContracts)
 	if message != "" {
 		return "", next, message, errorPos
 	}
@@ -1029,7 +1039,7 @@ func parseTypeTokensAllowing(tokens []token, index int, allowThrows bool) (strin
 		break
 	}
 	for next < len(tokens) && tokens[next].text == "|" {
-		right, after, message, errorPos := parseTypeTokensAllowing(tokens, next+1, allowThrows)
+		right, after, message, errorPos := parseTypeTokensAllowing(tokens, next+1, allowContracts)
 		if message != "" {
 			return "", after, message, errorPos
 		}
@@ -1039,7 +1049,7 @@ func parseTypeTokensAllowing(tokens []token, index int, allowThrows bool) (strin
 	return text, next, "", position{}
 }
 
-func parseTypePrimary(tokens []token, index int, allowThrows bool) (string, int, string, position) {
+func parseTypePrimary(tokens []token, index int, allowContracts bool) (string, int, string, position) {
 	if index >= len(tokens) {
 		return "", index, "expected type", typeTokenPos(tokens, index)
 	}
@@ -1053,7 +1063,7 @@ func parseTypePrimary(tokens []token, index int, allowThrows bool) (string, int,
 			if !wellFormed {
 				return "", index, "expected type", tokens[index].pos
 			}
-			return parseCallableTypeTail(tokens, elements, close+3, allowThrows)
+			return parseCallableTypeTail(tokens, elements, close+3, allowContracts)
 		}
 		// A malformed element keeps its written spelling, so the type checker
 		// reports one structural diagnostic instead of a parse cascade.
@@ -1082,17 +1092,17 @@ func parseTypePrimary(tokens []token, index int, allowThrows bool) (string, int,
 	return text, next, "", position{}
 }
 
-// parseCallableTypeTail reads the result type and optional throws clause that
-// follow a callable type's parameter list.
-func parseCallableTypeTail(tokens []token, params []string, index int, allowThrows bool) (string, int, string, position) {
-	// The result is read without a throws clause of its own, so throws always
-	// binds to the outermost callable and never becomes ambiguous.
+// parseCallableTypeTail reads the result type and optional throws and effects
+// clauses that follow a callable type's parameter list.
+func parseCallableTypeTail(tokens []token, params []string, index int, allowContracts bool) (string, int, string, position) {
+	// The result is read without contracts of its own, so both suffixes bind to
+	// the outermost callable and never become ambiguous.
 	result, next, message, errorPos := parseTypeTokensAllowing(tokens, index, false)
 	if message != "" {
 		return "", next, message, errorPos
 	}
 	var throws []string
-	if allowThrows && next < len(tokens) && tokens[next].text == "throws" {
+	if allowContracts && next < len(tokens) && tokens[next].text == "throws" {
 		next++
 		for {
 			thrown, after, message, errorPos := parseThrownTypeTokens(tokens, next)
@@ -1107,28 +1117,19 @@ func parseCallableTypeTail(tokens []token, params []string, index int, allowThro
 			next++
 		}
 	}
-	return callableType(params, result, throws), next, "", position{}
-}
-
-func parseEffectTypeTokens(tokens []token, index int) (typeRef, int, string, position) {
-	ref, next, ok := readQualified(tokens, index)
-	if !ok {
-		return typeRef{}, index, "expected error type after 'throws'", typeTokenPos(tokens, index)
-	}
-	name := ref.name
-	if next < len(tokens) && tokens[next].text == "<" {
-		close := matchingAngle(tokens, next)
-		if close < 0 {
-			return typeRef{}, next, "unterminated generic type", tokens[next].pos
+	var operations []string
+	if allowContracts && next < len(tokens) && tokens[next].text == "effects" {
+		refs, after, message, errorPos := parseOperationEffects(tokens, next+1)
+		if message != "" {
+			return "", next, message, errorPos
 		}
-		args, wellFormed := parseTypeTokenList(tokens, next+1, close)
-		if !wellFormed {
-			return typeRef{}, next, "malformed generic type", tokens[next].pos
+		operations = make([]string, len(refs))
+		for index, ref := range refs {
+			operations[index] = ref.name
 		}
-		name += "<" + strings.Join(args, ",") + ">"
-		next = close + 1
+		next = after
 	}
-	return typeRef{name: name, pos: ref.pos}, next, "", position{}
+	return callableType(params, result, throws, operations), next, "", position{}
 }
 
 // parseTypeTokenList reads the comma-separated types between start and end. It
@@ -1325,6 +1326,7 @@ func (p *program) check() {
 	p.checkDeclaredTypes()
 	p.checkVisibility()
 	p.resolveThrowSets()
+	p.resolveOperationEffectSets()
 	p.linkMethods()
 	for _, name := range sortedKeys(p.functions) {
 		function := p.functions[name]
@@ -1564,6 +1566,11 @@ func displayName(name string) string {
 				thrown[index] = displayName(name)
 			}
 			display += " throws " + strings.Join(thrown, " | ")
+		}
+		if len(parsed.operations) > 0 {
+			operations := append([]string(nil), parsed.operations...)
+			sort.Strings(operations)
+			display += " effects { " + strings.Join(operations, ", ") + " }"
 		}
 		return display
 	case typeKindTuple:

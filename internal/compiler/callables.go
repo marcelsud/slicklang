@@ -6,7 +6,7 @@ import (
 )
 
 // functionCallableType is the callable type a named function reads as when it
-// is used as a value. The throw set is sorted so one function has exactly one
+// is used as a value. Its contracts are sorted so one function has exactly one
 // callable spelling.
 func (p *program) functionCallableType(function *functionDecl) string {
 	params := make([]string, len(function.params))
@@ -18,7 +18,7 @@ func (p *program) functionCallableType(function *functionDecl) string {
 	for _, thrown := range function.throws {
 		throws[p.canonicalTypeName(function.namespace, function.aliases, thrown.name)] = struct{}{}
 	}
-	return callableType(params, result, sortedSet(throws))
+	return callableType(params, result, sortedSet(throws), sortedOperationEffects(function.operationSet))
 }
 
 // checkFunctionValue types a named function used without call parentheses. It
@@ -60,17 +60,19 @@ func (p *program) checkLambdaExpression(node *lambdaExpression, scope *astScope)
 		return expressionInfo{typ: node.resolved, effects: make(effectSet)}
 	}
 	function := &functionDecl{
-		name:      "lambda",
-		qualified: "lambda in " + scope.function.qualified,
-		namespace: scope.function.namespace,
-		aliases:   scope.function.aliases,
-		params:    node.params,
-		result:    node.result,
-		throws:    node.throws,
-		ast:       node.body,
-		pos:       node.pos,
+		name:       "lambda",
+		qualified:  "lambda in " + scope.function.qualified,
+		namespace:  scope.function.namespace,
+		aliases:    scope.function.aliases,
+		params:     node.params,
+		result:     node.result,
+		throws:     node.throws,
+		operations: node.operations,
+		ast:        node.body,
+		pos:        node.pos,
 	}
 	function.throwSet = p.resolveThrows(function.namespace, function.aliases, function.throws)
+	function.operationSet = p.resolveOperationEffects(function.operations)
 
 	lambdaScope := newASTScope(function, len(node.params)+len(scope.locals))
 	lambdaScope.recursive = recursiveNames(scope)
@@ -100,7 +102,7 @@ func (p *program) checkLambdaExpression(node *lambdaExpression, scope *astScope)
 	p.checkCallableBody(function, lambdaScope)
 
 	node.fn = function
-	node.resolved = callableType(paramTypes, resultType, sortedSet(function.throwSet))
+	node.resolved = callableType(paramTypes, resultType, sortedSet(function.throwSet), sortedOperationEffects(function.operationSet))
 	return expressionInfo{typ: node.resolved, effects: make(effectSet)}
 }
 
@@ -322,10 +324,11 @@ func templateNames(template string) []string {
 
 // checkCallableInvocation types a call whose target is a callable value rather
 // than a statically named function or method. Arity, argument assignability,
-// the result type, and the merged checked effects follow the callable type
-// alone, so invoking a value agrees with invoking the function it came from.
+// the result type, and the checked error and operation effects follow the
+// callable type alone, so invoking a value agrees with invoking the function
+// it came from.
 func (p *program) checkCallableInvocation(node *callExpression, scope *astScope, calleeType, label string, includeThrows bool) expressionInfo {
-	params, result, throws, callable := callableTypeParts(calleeType)
+	params, result, throws, operations, callable := callableTypeParts(calleeType)
 	if !callable {
 		info := expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 		if base, optional := optionalBase(calleeType); optional && isCallableType(base) {
@@ -353,6 +356,7 @@ func (p *program) checkCallableInvocation(node *callExpression, scope *astScope,
 	for _, thrown := range throws {
 		node.resolvedThrows[thrown] = effectOrigin{pos: node.pos, origin: label}
 	}
+	p.requireOperationEffects(scope.function, operationEffectNamesSet(operations), node.pos, label)
 	if len(node.args) != len(params) {
 		p.add(node.pos, diagnosticCodeCallArgument, "%s expects %d arguments, found %d", label, len(params), len(node.args))
 	}

@@ -35,7 +35,7 @@ func TestStdFSDirectoryEmissionIsConditional(t *testing.T) {
 
 	// The whole-file operations from issue #5 stay unconditional and must not
 	// drag the traversal or temporary-workspace helpers in with them.
-	wholeFile := generateStdFSProgram(t, `function main() -> Result<bool, std.fs.Failure> { std.fs.Exists(".") }`)
+	wholeFile := generateStdFSProgram(t, `function main() -> Result<bool, std.fs.Failure> effects { filesystem } { std.fs.Exists(".") }`)
 	for _, fragment := range traversal {
 		if strings.Contains(wholeFile, fragment) {
 			t.Fatalf("std.fs whole-file program contains %q", fragment)
@@ -46,7 +46,7 @@ func TestStdFSDirectoryEmissionIsConditional(t *testing.T) {
 	}
 
 	listing := generateStdFSProgram(t, `
-function main() -> string {
+function main() -> string effects { filesystem } {
     match std.fs.ReadDirectory(".") {
         Ok(Entries) => "listed"
         Err(Failure) => Failure.Message

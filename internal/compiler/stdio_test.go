@@ -19,10 +19,10 @@ class EmptyWriter {
  function Write(Data: bytes) -> Result<null, std.io.Failure> { Ok(null) }
  function Close() -> null throws std.io.Failure { null }
 }
-function Transfer(Reader: std.io.Reader, Writer: std.io.Writer) -> Result<int, std.io.Failure> {
+function Transfer(Reader: std.io.Reader, Writer: std.io.Writer) -> Result<int, std.io.Failure> effects { io } {
  std.io.Copy(Reader, Writer, 4)
 }
-function main() -> string {
+function main() -> string effects { io } {
  let Reader = EmptyReader {}
  let Writer = EmptyWriter {}
  match Transfer(Reader, Writer) {
@@ -38,7 +38,7 @@ function main() -> string {
 
 func TestStdIOInMemoryCopyAndSnapshotsEverywhere(t *testing.T) {
 	source := `
-function main() -> string throws std.io.Failure {
+function main() -> string throws std.io.Failure effects { io, state } {
  using Reader = std.io.ReaderFromBytes(std.bytes.FromUtf8("hello")) {
   using Writer = std.io.WriterToBytes() {
    let Before = Writer.Bytes()
@@ -73,7 +73,7 @@ function main() -> string throws std.io.Failure {
 func TestStdIOUsingAcceptsReaderWriterAndBytesWriter(t *testing.T) {
 	source := `
 function AsWriter(Value: std.io.BytesWriter) -> std.io.Writer { Value }
-function main() -> string throws std.io.Failure {
+function main() -> string throws std.io.Failure effects { io } {
  using Reader = std.io.ReaderFromBytes(std.bytes.FromUtf8("")) {
   using Writer = AsWriter(std.io.WriterToBytes()) {
    using BytesWriter = std.io.WriterToBytes() { "ok" }
@@ -88,7 +88,7 @@ function main() -> string throws std.io.Failure {
 
 func TestStdIOLimitsNeverWritePastBoundaryEverywhere(t *testing.T) {
 	source := `
-function main() -> string throws std.io.Failure {
+function main() -> string throws std.io.Failure effects { io, state } {
  using Reader = std.io.ReaderFromBytes(std.bytes.FromUtf8("abcd")) {
   using Writer = std.io.WriterToBytes() {
    let Copied = std.io.Copy(Reader, Writer, 3)
@@ -115,7 +115,7 @@ function main() -> string throws std.io.Failure {
 
 func TestStdIOReadAllLimitAndEmptyInputEverywhere(t *testing.T) {
 	limited := `
-function main() -> string throws std.io.Failure {
+function main() -> string throws std.io.Failure effects { io } {
  using Reader = std.io.ReaderFromBytes(std.bytes.FromUtf8("abcd")) {
   match std.io.ReadAll(Reader, 3) {
    Ok(Value) => "unexpected"
@@ -144,7 +144,7 @@ function main() -> string throws std.io.Failure {
 
 func TestStdIOInvalidReadFailureEverywhere(t *testing.T) {
 	invalid := `
-function main() -> string throws std.io.Failure {
+function main() -> string throws std.io.Failure effects { io } {
  using Reader = std.io.ReaderFromBytes(std.bytes.FromUtf8("x")) {
   match Reader.Read(0) {
    Ok(_) => "unexpected"
@@ -178,7 +178,7 @@ function main() -> string {
 
 func TestStdIOOperationsAfterUsingCloseFailWithoutPanicEverywhere(t *testing.T) {
 	source := `
-function main() -> string throws std.io.Failure {
+function main() -> string throws std.io.Failure effects { io, state } {
  let Reader = std.io.ReaderFromBytes(std.bytes.FromUtf8("x"))
  let ReaderScope = using ActiveReader = Reader { "closed" }
  let ReadFailure = match Reader.Read(1) {
@@ -214,7 +214,7 @@ class EmptyChunkReader {
  function Read(MaxBytes: int) -> Result<bytes?, std.io.Failure> { Ok(std.bytes.FromUtf8("")) }
  function Close() -> null throws std.io.Failure { null }
 }
-function main() -> string {
+function main() -> string effects { io } {
  let Reader = EmptyChunkReader {}
  match std.io.ReadAll(Reader, 10) {
   Ok(_) => "unexpected"
@@ -234,8 +234,8 @@ use std.io.Failure as IOFailure
 use std.io.ReaderFromBytes as OpenReader
 use std.io.WriterToBytes as OpenWriter
 use std.io.ReadAll as ReadAll
-function Consume(Reader: ByteReader) -> Result<bytes, IOFailure> { ReadAll(Reader, -1) }
-function main() -> string throws IOFailure {
+function Consume(Reader: ByteReader) -> Result<bytes, IOFailure> effects { io } { ReadAll(Reader, -1) }
+function main() -> string throws IOFailure effects { io } {
  using Reader = OpenReader(std.bytes.FromUtf8("")) {
   using Writer = OpenWriter() {
    match Writer.Write(std.bytes.FromUtf8("")) {
@@ -262,7 +262,7 @@ function main() -> string throws IOFailure {
 func TestStdIOLargePayloadIncludingNULEverywhere(t *testing.T) {
 	payload := strings.Repeat("ab", 20_000) + "\x00tail"
 	source := fmt.Sprintf(`
-function main() -> string throws std.io.Failure {
+function main() -> string throws std.io.Failure effects { io } {
  using Reader = std.io.ReaderFromBytes(std.bytes.FromUtf8(%s)) {
   match std.io.ReadAll(Reader, 50000) {
    Ok(Value) => match std.bytes.ToUtf8(Value) {
@@ -287,7 +287,7 @@ class FailingWriter {
  }
  function Close() -> null throws std.io.Failure { null }
 }
-function main() -> string throws std.io.Failure {
+function main() -> string throws std.io.Failure effects { io } {
  using Reader = std.io.ReaderFromBytes(std.bytes.FromUtf8("abc")) {
   using Writer = FailingWriter {} {
    match std.io.Copy(Reader, Writer, 8) {
@@ -320,13 +320,13 @@ function main() -> null { Use(BadReader {}) }`,
 		},
 		{
 			name:    "read argument",
-			source:  `function main() -> null throws std.io.Failure { using Reader = std.io.ReaderFromBytes(std.bytes.FromUtf8("")) { Reader.Read("many") null } }`,
+			source:  `function main() -> null throws std.io.Failure effects { io } { using Reader = std.io.ReaderFromBytes(std.bytes.FromUtf8("")) { Reader.Read("many") null } }`,
 			code:    "SLK",
 			message: "argument 1",
 		},
 		{
 			name:    "direct resource close",
-			source:  `function main() -> null { let Reader = std.io.ReaderFromBytes(std.bytes.FromUtf8("")) Reader.Close() }`,
+			source:  `function main() -> null effects { io } { let Reader = std.io.ReaderFromBytes(std.bytes.FromUtf8("")) Reader.Close() }`,
 			code:    "SLK393",
 			message: "must be closed by a using scope",
 		},

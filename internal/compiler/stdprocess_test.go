@@ -89,7 +89,7 @@ function Fail(Message: string) -> std.process.Status {
     }
 }
 
-function Execute(Program: string, Limit: int, Directory: string?, Arguments: string[]) -> std.process.Status {
+function Execute(Program: string, Limit: int, Directory: string?, Arguments: string[]) -> std.process.Status effects { process } {
     match std.process.Run(Program, Arguments, Directory, Limit) {
         Ok(Done) => std.process.Status {
             ExitCode: Done.ExitCode
@@ -100,7 +100,7 @@ function Execute(Program: string, Limit: int, Directory: string?, Arguments: str
     }
 }
 
-function WithDirectory(Program: string, Limit: int, Directory: string, Arguments: string[]) -> std.process.Status {
+function WithDirectory(Program: string, Limit: int, Directory: string, Arguments: string[]) -> std.process.Status effects { process } {
     if (Directory == "") {
         Execute(Program, Limit, null, Arguments)
     } else {
@@ -108,21 +108,21 @@ function WithDirectory(Program: string, Limit: int, Directory: string, Arguments
     }
 }
 
-function WithLimit(Program: string, LimitText: string, Directory: string, Arguments: string[]) -> std.process.Status {
+function WithLimit(Program: string, LimitText: string, Directory: string, Arguments: string[]) -> std.process.Status effects { process } {
     match std.convert.ParseInt(LimitText) {
         Ok(Limit) => WithDirectory(Program, Limit, Directory, Arguments)
         Err(Failure) => Fail(Failure.Message)
     }
 }
 
-function WithArguments(Program: string, LimitText: string, Directory: string, Arguments: string[]) -> std.process.Status {
+function WithArguments(Program: string, LimitText: string, Directory: string, Arguments: string[]) -> std.process.Status effects { process } {
     match Arguments.Slice(3, Arguments.Length()) {
         Ok(Rest) => WithLimit(Program, LimitText, Directory, Rest)
         Err(Failure) => Fail("usage")
     }
 }
 
-function WithDirectoryArgument(Program: string, LimitText: string, Arguments: string[]) -> std.process.Status {
+function WithDirectoryArgument(Program: string, LimitText: string, Arguments: string[]) -> std.process.Status effects { process } {
     let Directory = Arguments.Get(2)
     if (Directory == null) {
         Fail("usage")
@@ -131,7 +131,7 @@ function WithDirectoryArgument(Program: string, LimitText: string, Arguments: st
     }
 }
 
-function WithLimitArgument(Program: string, Arguments: string[]) -> std.process.Status {
+function WithLimitArgument(Program: string, Arguments: string[]) -> std.process.Status effects { process } {
     let LimitText = Arguments.Get(1)
     if (LimitText == null) {
         Fail("usage")
@@ -140,7 +140,7 @@ function WithLimitArgument(Program: string, Arguments: string[]) -> std.process.
     }
 }
 
-function main(Arguments: string[]) -> std.process.Status {
+function main(Arguments: string[]) -> std.process.Status effects { process } {
     let Program = Arguments.Get(0)
     if (Program == null) {
         Fail("usage")
@@ -548,14 +548,14 @@ func TestExitCodeOutsideTheValidRangeFailsAfterWritingOutput(t *testing.T) {
 // returned Status carries.
 func TestUsingCleanupCompletesBeforeStatusIsApplied(t *testing.T) {
 	source := usingTraceSupport + `
-function Work() -> string {
+function Work() -> string effects { environment } {
     using Handle = Acquire("C") {
         Append("B")
         "value"
     }
 }
 
-function main() -> std.process.Status {
+function main() -> std.process.Status effects { environment } {
     Reset()
     let Value = Work()
     std.process.Status {

@@ -15,7 +15,7 @@ func TestStdHTTPSyntheticDeclarations(t *testing.T) {
 use std.http.Fetch as Fetch
 use std.http.Request as HTTPRequest
 use std.http.Failure as HTTPFailure
-function Load(Request: HTTPRequest) -> Result<std.http.Response, HTTPFailure> { Fetch(Request) }
+function Load(Request: HTTPRequest) -> Result<std.http.Response, HTTPFailure> effects { network } { Fetch(Request) }
 function main() -> string { "ok" }
 `,
 	}})
@@ -64,7 +64,7 @@ func TestStdHTTPGeneratedSupportIsDeterministicAndConditional(t *testing.T) {
 	}
 
 	withHTTP, diagnostics := compile([]Source{{Name: "main.slk", Namespace: "root", Text: `
-function main() -> string {
+function main() -> string effects { network } {
     let Request = std.http.Request {
         Method: "GET"
         URL: "http://127.0.0.1:1"

@@ -139,6 +139,7 @@ func (p *program) checkTypeNameScoped(pos position, namespace string, scope *typ
 				p.add(pos, diagnosticCodeErrorValue, "%s does not name an Error type", displayName(thrown))
 			}
 		}
+		p.resolveOperationEffects(operationEffectRefsAt(pos, parsed.operations...))
 		return
 	case typeKindTuple:
 		if len(parsed.args) < 2 {
