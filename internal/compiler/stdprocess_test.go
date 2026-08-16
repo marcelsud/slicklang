@@ -458,6 +458,15 @@ func TestNativeProcessRunMatchesTheInterpreter(t *testing.T) {
 	}
 }
 
+func TestLLVMProcessRunMatchesTheInterpreter(t *testing.T) {
+	binary := buildProgram(t, processDriverSource, compiler.BackendLLVM)
+	for _, testCase := range processCases(t) {
+		t.Run(testCase.name, func(t *testing.T) {
+			testCase.assert(t, executeProgram(t, binary, testCase.arguments(t)))
+		})
+	}
+}
+
 // cliArguments exercises the argument vector itself: no arguments beyond the
 // exit code, empty strings, Unicode, and shell-looking text.
 var cliArguments = map[string][]string{

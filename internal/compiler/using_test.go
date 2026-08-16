@@ -265,6 +265,26 @@ function main() -> string throws BodyFailure | InnerFailure | OuterFailure {
 	}
 }
 
+func TestUsingSuppressionDoesNotMutateOrSelfReferenceErrors(t *testing.T) {
+	source := `
+class SharedFailure implements Error {}
+class Resource {
+    Failure: SharedFailure
+    function Close() -> null throws SharedFailure { throw self.Failure }
+}
+function main() -> string throws SharedFailure {
+    let Failure = SharedFailure("same")
+    using Handle = Resource { Failure: Failure } {
+        throw Failure
+    }
+}
+`
+	want := "root.SharedFailure: same (suppressed: root.SharedFailure: same)"
+	if got := runUsingFailureEverywhere(t, source); got != want {
+		t.Fatalf("shared using failure = %q, want %q", got, want)
+	}
+}
+
 func TestUsingDoesNotCloseWhenAcquisitionFails(t *testing.T) {
 	source := usingTraceSupport + `
 class AcquireFailure implements Error {}
@@ -570,19 +590,23 @@ func runUsingFailureEverywhere(t *testing.T, source string) string {
 	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
 		t.Fatalf("write Slick source: %v", err)
 	}
-	binary := filepath.Join(root, "app")
-	diagnostics, err := compiler.BuildPath(path, binary)
-	if err != nil {
-		t.Fatalf("build native binary: %v", err)
+	for _, backend := range []compiler.Backend{compiler.BackendGo, compiler.BackendLLVM} {
+		t.Run(string(backend), func(t *testing.T) {
+			binary := filepath.Join(root, "app-"+string(backend))
+			diagnostics, err := compiler.BuildPathBackend(path, binary, backend)
+			if err != nil {
+				t.Fatalf("build %s binary: %v", backend, err)
+			}
+			assertNoDiagnostics(t, diagnostics)
+			output, nativeError := exec.Command(binary).CombinedOutput()
+			if nativeError == nil {
+				t.Fatalf("%s binary succeeded, want using failure", backend)
+			}
+			native := strings.TrimSpace(string(output))
+			if interpretedError.Error() != native {
+				t.Fatalf("interpreter failed with %q, %s failed with %q", interpretedError, backend, native)
+			}
+		})
 	}
-	assertNoDiagnostics(t, diagnostics)
-	output, nativeError := exec.Command(binary).CombinedOutput()
-	if nativeError == nil {
-		t.Fatal("native binary succeeded, want using failure")
-	}
-	native := strings.TrimSpace(string(output))
-	if interpretedError.Error() != native {
-		t.Fatalf("interpreter failed with %q, native binary failed with %q", interpretedError, native)
-	}
-	return native
+	return interpretedError.Error()
 }

@@ -868,6 +868,10 @@ type jsonCodecNeed struct {
 	typ       string
 }
 
+func (p *program) usesStdJSON() bool {
+	return (&goGenerator{program: p}).usesJSON()
+}
+
 func (g *goGenerator) usesJSON() bool {
 	return len(g.collectJSONCodecs()) > 0
 }

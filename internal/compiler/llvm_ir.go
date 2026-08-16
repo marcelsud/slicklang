@@ -22,14 +22,23 @@ type llvmGen struct {
 	ifaceMethods map[string][]string
 	vtables      map[string]string
 	jsonTasks    map[string]string
+	usesJSON     bool
 	fn           *llvmFn
 }
 
 type llvmFn struct {
-	body  strings.Builder
-	next  int
-	block int
-	cur   string
+	allocas  strings.Builder
+	body     strings.Builder
+	next     int
+	block    int
+	cur      string
+	cleanups []llvmCleanup
+}
+
+type llvmCleanup struct {
+	resource  string
+	typ       string
+	taskScope string
 }
 
 type llvmBind struct {
@@ -64,7 +73,7 @@ func (g *llvmGen) setLocal(scope *llvmScope, name, typ, value string) {
 
 func (g *llvmGen) loadBind(bind llvmBind) string {
 	v := g.reg()
-	g.emit("  %s = load %%slick.val, ptr %s, align 8", v, bind.storage)
+	g.emit("  %s = load %%slick.val, ptr %s, align 8", v, bind.name)
 	return v
 }
 
@@ -97,6 +106,7 @@ func (p *program) generateLLVM() (string, error) {
 		ifaceMethods: map[string][]string{},
 		vtables:      map[string]string{},
 		jsonTasks:    map[string]string{},
+		usesJSON:     p.usesStdJSON(),
 	}
 	g.collectTypes()
 	g.emitHeader()
@@ -128,6 +138,9 @@ func (g *llvmGen) skipName(name string) bool {
 		return true
 	}
 	if strings.HasPrefix(name, "std.sqlite.") && !g.program.usesStdSQLite {
+		return true
+	}
+	if strings.HasPrefix(name, "std.json.") && !g.usesJSON {
 		return true
 	}
 	return false
@@ -165,7 +178,7 @@ func (g *llvmGen) collectTypes() {
 
 func (g *llvmGen) emitHeader() {
 	g.decl.WriteString("target datalayout = \"e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128\"\n")
-	g.decl.WriteString("target triple = \"x86_64-pc-linux-gnu\"\n")
+	fmt.Fprintf(&g.decl, "target triple = %q\n", LLVMTargetTriple)
 	g.decl.WriteString("%slick.val = type { i64, i64 }\n")
 	g.decl.WriteString("%slick.out = type { i64, %slick.val }\n\n")
 	fmt.Fprintf(&g.decl, "@slick_abi_version_%d = external constant i32\n\n", NativeABIVersion)
@@ -184,6 +197,7 @@ func (g *llvmGen) emitRuntimeDecls() {
 		"declare %slick.val @slick_rt_some(%slick.val)",
 		"declare %slick.val @slick_rt_result(i32, %slick.val)",
 		"declare %slick.val @slick_rt_class(i32, i32, ptr)",
+		"declare %slick.val @slick_rt_error_message(i32, %slick.val)",
 		"declare %slick.val @slick_rt_union(i32, i32, i32, ptr)",
 		"declare %slick.val @slick_rt_callable(ptr, i32, ptr, i32)",
 		"declare %slick.val @slick_rt_iface(i32, %slick.val, i32, ptr)",
@@ -251,8 +265,10 @@ func (g *llvmGen) emitRuntimeDecls() {
 		"declare void @slick_rt_print(%slick.val)",
 		"declare void @slick_rt_write_bytes(%slick.val, i32)",
 		"declare %slick.val @slick_rt_argv(i32, ptr)",
+		"declare void @slick_rt_invalid_exit(i64)",
 		"declare void @slick_rt_abort_missing(ptr)",
 		"declare void @slick_rt_format_p(ptr, ptr)",
+		"declare void @slick_rt_write_error_p(ptr)",
 		"declare void @slick_nat_json_decode(ptr sret(%slick.out), ptr, ptr, ptr)",
 		"declare void @slick_nat_json_encode(ptr sret(%slick.out), ptr, ptr, ptr)",
 		"declare i32 @slick_rt_class_type_p(ptr)",
@@ -589,7 +605,7 @@ func (g *llvmGen) emitFunction(fn *functionDecl, receiver string) error {
 	if err := g.emitCallableBody(fn, scope, result); err != nil {
 		return err
 	}
-	fmt.Fprintf(&g.out, "define void @%s(ptr sret(%%slick.out) %%ret, ptr %%ctx, ptr %%args) {\nentry:\n%s}\n\n", g.symbol(fn, receiver), g.fn.body.String())
+	fmt.Fprintf(&g.out, "define void @%s(ptr sret(%%slick.out) %%ret, ptr %%ctx, ptr %%args) {\nentry:\n%s%s}\n\n", g.symbol(fn, receiver), g.fn.allocas.String(), g.fn.body.String())
 	return nil
 }
 
@@ -612,12 +628,17 @@ func (g *llvmGen) label(prefix string) string {
 }
 
 func (g *llvmGen) emit(format string, args ...any) {
-	if format == "%s:" && len(args) == 1 {
-		if name, ok := args[0].(string); ok {
-			g.fn.cur = name
+	text := fmt.Sprintf(format, args...)
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasSuffix(line, ":") {
+			g.fn.cur = strings.TrimSuffix(line, ":")
+		}
+		if strings.Contains(line, " = alloca ") {
+			g.fn.allocas.WriteString(line + "\n")
+		} else {
+			g.fn.body.WriteString(line + "\n")
 		}
 	}
-	fmt.Fprintf(&g.fn.body, format+"\n", args...)
 }
 
 func (g *llvmGen) callVal(fn string, args string) string {
@@ -727,6 +748,7 @@ func (g *llvmGen) emitBlock(block *blockNode, scope *llvmScope, result, prelude 
 	if block != nil && block.hasAsync {
 		scope.taskScope = g.reg()
 		g.emit("  %s = call ptr @slick_rt_scope_new(ptr %%ctx)", scope.taskScope)
+		g.fn.cleanups = append(g.fn.cleanups, llvmCleanup{taskScope: scope.taskScope})
 	}
 	if block == nil || len(block.statements) == 0 {
 		return g.null(), strconv.Itoa(slickCodeOK), nil
@@ -769,6 +791,7 @@ func (g *llvmGen) emitBlock(block *blockNode, scope *llvmScope, result, prelude 
 		g.emit("  %s = load i32, ptr %s, align 4", lastCode, codeSlot)
 	}
 	if block.hasAsync {
+		g.fn.cleanups = g.fn.cleanups[:len(g.fn.cleanups)-1]
 		packed := g.packOut(lastCode, lastVal)
 		pslot := g.reg()
 		g.emit("  %s = alloca %%slick.out", pslot)
@@ -929,6 +952,34 @@ func (g *llvmGen) failIf(code, value string) error {
 	fail, ok := g.label("fail"), g.label("ok")
 	g.emit("  br i1 %s, label %%%s, label %%%s", nz, fail, ok)
 	g.emit("%s:", fail)
+	g.emitFailureReturn(code, value)
+	g.emit("%s:", ok)
+	return nil
+}
+
+func (g *llvmGen) emitFailureReturn(code, value string) {
+	for index := len(g.fn.cleanups) - 1; index >= 0; index-- {
+		cleanup := g.fn.cleanups[index]
+		if cleanup.taskScope != "" {
+			packed := g.packOut(code, value)
+			primary := g.reg()
+			g.emit("  %s = alloca %%slick.out", primary)
+			g.emit("  store %%slick.out %s, ptr %s", packed, primary)
+			finished := g.reg()
+			g.emit("  %s = alloca %%slick.out", finished)
+			g.emit("  call void @slick_rt_scope_finish(ptr sret(%%slick.out) %s, ptr %s, ptr %s)", finished, cleanup.taskScope, primary)
+			outcome := g.reg()
+			g.emit("  %s = load %%slick.out, ptr %s", outcome, finished)
+			raw := g.reg()
+			code, value = g.reg(), g.reg()
+			g.emit("  %s = extractvalue %%slick.out %s, 0", raw, outcome)
+			g.emit("  %s = trunc i64 %s to i32", code, raw)
+			g.emit("  %s = extractvalue %%slick.out %s, 1", value, outcome)
+			continue
+		}
+		closeCode, closeValue := g.emitCleanupClose(cleanup)
+		value, code = g.combineUsingOutcome(value, code, closeValue, closeCode)
+	}
 	isReturn := g.reg()
 	g.emit("  %s = icmp eq i32 %s, %d", isReturn, code, slickCodeReturn)
 	ret, other := g.label("failret"), g.label("failout")
@@ -937,8 +988,55 @@ func (g *llvmGen) failIf(code, value string) error {
 	g.retOut(strconv.Itoa(slickCodeOK), value)
 	g.emit("%s:", other)
 	g.retOut(code, value)
-	g.emit("%s:", ok)
-	return nil
+}
+
+func (g *llvmGen) emitCleanupClose(cleanup llvmCleanup) (string, string) {
+	context := g.reg()
+	g.emit("  %s = call ptr @slick_rt_cleanup_ctx()", context)
+	if g.program.interfaces[cleanup.typ] != nil {
+		slot := indexOf(g.ifaceMethods[cleanup.typ], "Close")
+		return g.callOut("slick_rt_iface_call", fmt.Sprintf("ptr %s, %%slick.val %s, i32 %d, i32 0, ptr null", context, cleanup.resource, slot))
+	}
+	return g.callOut(llvmMethodSymbol(cleanup.typ, "Close"), fmt.Sprintf("ptr %s, ptr %s", context, g.packVals([]string{cleanup.resource})))
+}
+
+func (g *llvmGen) combineUsingOutcome(bodyValue, bodyCode, closeValue, closeCode string) (string, string) {
+	valueSlot, codeSlot := g.reg(), g.reg()
+	g.emit("  %s = alloca %%slick.val, align 8", valueSlot)
+	g.emit("  %s = alloca i32, align 4", codeSlot)
+	closeFailed := g.reg()
+	g.emit("  %s = icmp ne i32 %s, 0", closeFailed, closeCode)
+	failed, clean, done := g.label("uscf"), g.label("uscok"), g.label("usd")
+	g.emit("  br i1 %s, label %%%s, label %%%s", closeFailed, failed, clean)
+	g.emit("%s:", clean)
+	g.emit("  store %%slick.val %s, ptr %s, align 8", bodyValue, valueSlot)
+	g.emit("  store i32 %s, ptr %s, align 4", bodyCode, codeSlot)
+	g.emit("  br label %%%s", done)
+	g.emit("%s:", failed)
+	bodyOK := g.reg()
+	g.emit("  %s = icmp eq i32 %s, 0", bodyOK, bodyCode)
+	control := g.reg()
+	g.emit("  %s = call i32 @slick_rt_is_control(i32 %s)", control, bodyCode)
+	controlNZ := g.reg()
+	g.emit("  %s = icmp ne i32 %s, 0", controlNZ, control)
+	preferClose := g.reg()
+	g.emit("  %s = or i1 %s, %s", preferClose, bodyOK, controlNZ)
+	prefer, suppress := g.label("uspref"), g.label("ussup")
+	g.emit("  br i1 %s, label %%%s, label %%%s", preferClose, prefer, suppress)
+	g.emit("%s:", prefer)
+	g.emit("  store %%slick.val %s, ptr %s, align 8", closeValue, valueSlot)
+	g.emit("  store i32 %s, ptr %s, align 4", closeCode, codeSlot)
+	g.emit("  br label %%%s", done)
+	g.emit("%s:", suppress)
+	combined := g.ptrCall("slick_rt_suppress_p", []string{bodyValue, closeValue}, "")
+	g.emit("  store %%slick.val %s, ptr %s, align 8", combined, valueSlot)
+	g.emit("  store i32 %s, ptr %s, align 4", bodyCode, codeSlot)
+	g.emit("  br label %%%s", done)
+	g.emit("%s:", done)
+	value, outcomeCode := g.reg(), g.reg()
+	g.emit("  %s = load %%slick.val, ptr %s, align 8", value, valueSlot)
+	g.emit("  %s = load i32, ptr %s, align 4", outcomeCode, codeSlot)
+	return value, outcomeCode
 }
 
 func (g *llvmGen) emitFor(node *forStatement, scope *llvmScope, result string) error {
@@ -1058,11 +1156,12 @@ func (g *llvmGen) emitAsyncLet(node *asyncLetStatement, scope *llvmScope, result
 		}
 		args = append(args, v)
 	}
+	width := max(1, len(args))
 	slot := g.reg()
-	g.emit("  %s = alloca [8 x %%slick.val]", slot)
+	g.emit("  %s = alloca [%d x %%slick.val]", slot, width)
 	for i, a := range args {
 		p := g.reg()
-		g.emit("  %s = getelementptr [8 x %%slick.val], ptr %s, i32 0, i32 %d", p, slot, i)
+		g.emit("  %s = getelementptr [%d x %%slick.val], ptr %s, i32 0, i32 %d", p, width, slot, i)
 		g.emit("  store %%slick.val %s, ptr %s", a, p)
 	}
 	var target string
@@ -1416,9 +1515,11 @@ func (g *llvmGen) emitLambda(node *lambdaExpression, scope *llvmScope) (string, 
 	}
 	result := g.program.resolveType(node.fn.namespace, node.fn.aliases, node.fn.result)
 	if err := g.emitCallableBody(node.fn, lscope, result); err != nil {
+		g.fn = saved
 		return "", err
 	}
-	fmt.Fprintf(&g.out, "define void @%s(ptr sret(%%slick.out) %%ret, ptr %%ctx, ptr %%args) {\nentry:\n%s}\n\n", sym, g.fn.body.String())
+	fmt.Fprintf(&g.out, "define void @%s(ptr sret(%%slick.out) %%ret, ptr %%ctx, ptr %%args) {\nentry:\n%s%s}\n\n",
+		sym, g.fn.allocas.String(), g.fn.body.String())
 	g.fn = saved
 	return g.callVal("slick_rt_callable", fmt.Sprintf("ptr @%s, i32 %d, ptr %s, i32 %d", sym, len(caps), g.packVals(caps), len(node.params))), nil
 }
@@ -1503,17 +1604,7 @@ func (g *llvmGen) emitCall(node *callExpression, scope *llvmScope) (string, stri
 			msg = g.callVal("slick_rt_format", "%slick.val "+args[0])
 		}
 		id := g.typeID[errorType]
-		fields := g.program.classes[errorType].fields
-		vals := make([]string, len(g.fieldIdx[errorType]))
-		for name, i := range g.fieldIdx[errorType] {
-			if name == "Message" {
-				vals[i] = msg
-			} else {
-				vals[i] = g.null()
-			}
-		}
-		_ = fields
-		return g.callVal("slick_rt_class", fmt.Sprintf("i32 %d, i32 %d, ptr %s", id, len(vals), g.packVals(vals))), strconv.Itoa(slickCodeOK), nil
+		return g.callVal("slick_rt_error_message", fmt.Sprintf("i32 %d, %%slick.val %s", id, msg)), strconv.Itoa(slickCodeOK), nil
 	}
 	if node.resolvedNative == nativeStdJsonDecode || node.resolvedNative == nativeStdJsonEncode {
 		if len(node.resolvedTypeArgs) != 1 {
@@ -1881,7 +1972,10 @@ func (g *llvmGen) narrow(cond expressionNode, outer, branch *llvmScope, then boo
 		return ""
 	}
 	v := g.ptrCall("slick_rt_optional_value_p", []string{g.loadBind(bind)}, "")
-	g.setLocal(branch, name, base, v)
+	slot := g.reg()
+	g.emit("  %s = alloca %%slick.val, align 8", slot)
+	g.emit("  store %%slick.val %s, ptr %s, align 8", v, slot)
+	branch.locals[name] = llvmBind{name: slot, typ: base, storage: bind.storage, declared: bind.declared}
 	return ""
 }
 
@@ -2029,55 +2123,15 @@ func (g *llvmGen) emitUsing(node *usingExpression, scope *llvmScope) (string, st
 	}
 	us := scope.clone()
 	g.setLocal(us, node.name, node.resolved, res)
+	cleanup := llvmCleanup{resource: res, typ: node.resolved}
+	g.fn.cleanups = append(g.fn.cleanups, cleanup)
 	bodyV, bodyC, err := g.emitBlock(node.body, us, node.result, "")
 	if err != nil {
 		return "", "", err
 	}
-	cleanupCtx := g.reg()
-	g.emit("  %s = call ptr @slick_rt_cleanup_ctx()", cleanupCtx)
-	var cc, cv string
-	if g.program.interfaces[node.resolved] != nil {
-		slot := indexOf(g.ifaceMethods[node.resolved], "Close")
-		cc, cv = g.callOut("slick_rt_iface_call", fmt.Sprintf("ptr %s, %%slick.val %s, i32 %d, i32 0, ptr null", cleanupCtx, res, slot))
-	} else {
-		closeName := llvmMethodSymbol(node.resolved, "Close")
-		cc, cv = g.callOut(closeName, fmt.Sprintf("ptr %s, ptr %s", cleanupCtx, g.packVals([]string{res})))
-	}
-	valueSlot, codeSlot := g.reg(), g.reg()
-	g.emit("  %s = alloca %%slick.val, align 8", valueSlot)
-	g.emit("  %s = alloca i32, align 4", codeSlot)
-	isClose := g.reg()
-	g.emit("  %s = icmp ne i32 %s, 0", isClose, cc)
-	cfail, cok, done := g.label("uscf"), g.label("uscok"), g.label("usd")
-	g.emit("  br i1 %s, label %%%s, label %%%s", isClose, cfail, cok)
-	g.emit("%s:", cok)
-	g.emit("  store %%slick.val %s, ptr %s, align 8", bodyV, valueSlot)
-	g.emit("  store i32 %s, ptr %s, align 4", bodyC, codeSlot)
-	g.emit("  br label %%%s", done)
-	g.emit("%s:", cfail)
-	bodyOK := g.reg()
-	g.emit("  %s = icmp eq i32 %s, 0", bodyOK, bodyC)
-	ctrl := g.reg()
-	g.emit("  %s = call i32 @slick_rt_is_control(i32 %s)", ctrl, bodyC)
-	ctrlNZ := g.reg()
-	g.emit("  %s = icmp ne i32 %s, 0", ctrlNZ, ctrl)
-	preferClose := g.reg()
-	g.emit("  %s = or i1 %s, %s", preferClose, bodyOK, ctrlNZ)
-	pref, sup := g.label("uspref"), g.label("ussup")
-	g.emit("  br i1 %s, label %%%s, label %%%s", preferClose, pref, sup)
-	g.emit("%s:", pref)
-	g.emit("  store %%slick.val %s, ptr %s, align 8", cv, valueSlot)
-	g.emit("  store i32 %s, ptr %s, align 4", cc, codeSlot)
-	g.emit("  br label %%%s", done)
-	g.emit("%s:", sup)
-	combined := g.ptrCall("slick_rt_suppress_p", []string{bodyV, cv}, "")
-	g.emit("  store %%slick.val %s, ptr %s, align 8", combined, valueSlot)
-	g.emit("  store i32 %s, ptr %s, align 4", bodyC, codeSlot)
-	g.emit("  br label %%%s", done)
-	g.emit("%s:", done)
-	value, code := g.reg(), g.reg()
-	g.emit("  %s = load %%slick.val, ptr %s, align 8", value, valueSlot)
-	g.emit("  %s = load i32, ptr %s, align 4", code, codeSlot)
+	g.fn.cleanups = g.fn.cleanups[:len(g.fn.cleanups)-1]
+	closeCode, closeValue := g.emitCleanupClose(cleanup)
+	value, code := g.combineUsingOutcome(bodyV, bodyC, closeValue, closeCode)
 	return value, code, nil
 }
 
@@ -2262,23 +2316,23 @@ func (g *llvmGen) convert(value, from, to string) string {
 	if from == to || to == "" || from == typeUnknown || from == typeNever {
 		return value
 	}
+	base, optional := optionalBase(to)
+	if optional {
+		if from == "null" {
+			return g.callVal("slick_rt_none", "")
+		}
+		if isOptionalType(from) {
+			return value
+		}
+		converted := g.convert(value, from, base)
+		return g.callVal("slick_rt_some", "%slick.val "+converted)
+	}
 	if iface := g.program.interfaces[to]; iface != nil {
 		if class := g.program.classes[from]; class != nil {
 			return g.wrapIface(value, from, to)
 		}
 	}
-	base, optional := optionalBase(to)
-	if !optional {
-		return value
-	}
-	if from == "null" {
-		return g.callVal("slick_rt_none", "")
-	}
-	if isOptionalType(from) {
-		return value
-	}
-	_ = base
-	return g.callVal("slick_rt_some", "%slick.val "+value)
+	return value
 }
 
 func (g *llvmGen) ifaceVTable(ifaceName, className string) string {
@@ -2291,7 +2345,11 @@ func (g *llvmGen) ifaceVTable(ifaceName, className string) string {
 		}
 		name := fmt.Sprintf("@.vt.%d", len(g.vtables))
 		g.vtables[key] = name
-		fmt.Fprintf(&g.decl, "%s = private global [%d x ptr] [%s]\n", name, max(1, len(methods)), strings.Join(ptrs, ", "))
+		if len(methods) == 0 {
+			fmt.Fprintf(&g.decl, "%s = private global [1 x ptr] zeroinitializer\n", name)
+		} else {
+			fmt.Fprintf(&g.decl, "%s = private global [%d x ptr] [%s]\n", name, len(methods), strings.Join(ptrs, ", "))
+		}
 	}
 	return g.vtables[key]
 }
@@ -2365,9 +2423,7 @@ func (g *llvmGen) emitMain() error {
 	g.out.WriteString("  br i1 %bad, label %fail, label %ok\nfail:\n")
 	g.out.WriteString("  %badval = alloca %slick.val\n")
 	g.out.WriteString("  store %slick.val %val, ptr %badval\n")
-	g.out.WriteString("  %msgval = alloca %slick.val\n")
-	g.out.WriteString("  call void @slick_rt_format_p(ptr %msgval, ptr %badval)\n")
-	g.out.WriteString("  call void @slick_rt_write_bytes_p(ptr %msgval, i32 2)\n")
+	g.out.WriteString("  call void @slick_rt_write_error_p(ptr %badval)\n")
 	g.out.WriteString("  ret i32 1\nok:\n")
 	if result == stdProcessStatusName {
 		g.out.WriteString(g.writeStatus())
@@ -2390,7 +2446,12 @@ func (g *llvmGen) writeStatus() string {
 	b.WriteString("  call void @slick_rt_write_bytes(%slick.val %outb, i32 1)\n")
 	b.WriteString("  call void @slick_rt_write_bytes(%slick.val %errb, i32 2)\n")
 	b.WriteString("  %exit = extractvalue %slick.val %codev, 1\n")
-	b.WriteString("  %exit32 = trunc i64 %exit to i32\n")
+	b.WriteString("  %exitlow = icmp slt i64 %exit, 0\n")
+	b.WriteString("  %exithigh = icmp sgt i64 %exit, 255\n")
+	b.WriteString("  %exitbad = or i1 %exitlow, %exithigh\n")
+	b.WriteString("  br i1 %exitbad, label %badstatus, label %goodstatus\n")
+	b.WriteString("badstatus:\n  call void @slick_rt_invalid_exit(i64 %exit)\n  ret i32 1\n")
+	b.WriteString("goodstatus:\n  %exit32 = trunc i64 %exit to i32\n")
 	b.WriteString("  ret i32 %exit32\n")
 	return b.String()
 }

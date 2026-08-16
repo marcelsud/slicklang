@@ -136,18 +136,22 @@ function main() -> string throws Failure {
 	if err := os.WriteFile(source, []byte(program), 0o644); err != nil {
 		t.Fatalf("write throwing Slick source: %v", err)
 	}
-	binary := filepath.Join(root, "app")
-	diagnostics, err := compiler.BuildPath(source, binary)
-	if err != nil {
-		t.Fatalf("build throwing Slick binary: %v", err)
-	}
-	assertNoDiagnostics(t, diagnostics)
-	output, err := exec.Command(binary).CombinedOutput()
-	if err == nil {
-		t.Fatalf("uncaught Slick error exited successfully")
-	}
-	if !strings.Contains(string(output), "root.Failure: boom") {
-		t.Fatalf("expected uncaught Slick error, found %q", output)
+	for _, backend := range []compiler.Backend{compiler.BackendGo, compiler.BackendLLVM} {
+		t.Run(string(backend), func(t *testing.T) {
+			binary := filepath.Join(root, "app-"+string(backend))
+			diagnostics, err := compiler.BuildPathBackend(source, binary, backend)
+			if err != nil {
+				t.Fatalf("build throwing Slick binary: %v", err)
+			}
+			assertNoDiagnostics(t, diagnostics)
+			output, err := exec.Command(binary).CombinedOutput()
+			if err == nil {
+				t.Fatalf("uncaught Slick error exited successfully")
+			}
+			if got, want := string(output), "root.Failure: boom\n"; got != want {
+				t.Fatalf("uncaught Slick error = %q, want %q", got, want)
+			}
+		})
 	}
 }
 

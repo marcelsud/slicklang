@@ -1,13 +1,19 @@
 package compiler
 
 import (
+	_ "embed"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 )
+
+//go:embed llvmlib/runtime.c
+var llvmRuntimeSource []byte
+
+//go:embed llvmlib/natives.c
+var llvmNativesSource []byte
 
 func buildLLVMBinary(program *program, output string) error {
 	tool, err := locateLLVMToolchain()
@@ -21,7 +27,7 @@ func buildLLVMBinary(program *program, output string) error {
 	if dump := os.Getenv("SLICK_DUMP_LL"); dump != "" {
 		_ = os.WriteFile(dump, []byte(ir), 0o644)
 	}
-	temporary, err := os.MkdirTemp("", "slick-llvm-*")
+	temporary, err := os.MkdirTemp(filepath.Dir(output), ".slick-llvm-*")
 	if err != nil {
 		return err
 	}
@@ -37,16 +43,24 @@ func buildLLVMBinary(program *program, output string) error {
 	if err := tool.assembleIR(irPath, objPath); err != nil {
 		return err
 	}
-	dir := llvmRuntimeDir()
-	usesJSON := strings.Contains(ir, "@slick_nat_json_decode") || strings.Contains(ir, "@slick_nat_json_encode")
-	jsonCompile, jsonLink, err := llvmJSONFlags(usesJSON)
+	jsonCompile, jsonLink, err := llvmJSONFlags(program.usesStdJSON())
 	if err != nil {
 		return err
 	}
 	objects := []string{objPath}
-	for _, name := range []string{"runtime.c", "natives.c"} {
-		src := filepath.Join(dir, name)
-		obj := filepath.Join(temporary, name+".o")
+	sources := []struct {
+		name string
+		data []byte
+	}{
+		{name: "runtime.c", data: llvmRuntimeSource},
+		{name: "natives.c", data: llvmNativesSource},
+	}
+	for _, source := range sources {
+		src := filepath.Join(temporary, source.name)
+		if err := os.WriteFile(src, source.data, 0o644); err != nil {
+			return fmt.Errorf("write embedded %s: %w", source.name, err)
+		}
+		obj := filepath.Join(temporary, source.name+".o")
 		compile := []string{"-c", "-std=c11", "-O2", "-fPIC", "-o", obj, src}
 		if program.usesStdSQLite {
 			compile = append(compile, "-DSLICK_HAS_SQLITE")
@@ -56,7 +70,7 @@ func buildLLVMBinary(program *program, output string) error {
 		}
 		compile = append(compile, jsonCompile...)
 		if out, err := runCC(tool.cc, compile...); err != nil {
-			return fmt.Errorf("compile %s: %w: %s", name, err, strings.TrimSpace(out))
+			return fmt.Errorf("compile %s: %w: %s", source.name, err, strings.TrimSpace(out))
 		}
 		objects = append(objects, obj)
 	}
@@ -74,19 +88,14 @@ func buildLLVMBinary(program *program, output string) error {
 		libs = append(libs, "-lcurl")
 	}
 	libs = append(libs, jsonLink...)
-	if err := tool.link(output, objects, libs); err != nil {
-		_ = os.Remove(output)
+	linkedOutput := filepath.Join(temporary, "program")
+	if err := tool.link(linkedOutput, objects, libs); err != nil {
 		return err
 	}
-	return nil
-}
-
-func llvmRuntimeDir() string {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		return "llvmlib"
+	if err := os.Rename(linkedOutput, output); err != nil {
+		return fmt.Errorf("install LLVM output: %w", err)
 	}
-	return filepath.Join(filepath.Dir(file), "llvmlib")
+	return nil
 }
 
 func runCC(cc string, args ...string) (string, error) {

@@ -28,7 +28,7 @@ Use the CLI as the source of truth for the installed compiler. Prefer exact comm
 
 The default path is `.` for every command. `build` always requires `-o` or `--output`. The default backend is Go; pass `--backend=llvm` or `--backend=go` to select a native backend explicitly. `--check` may appear before or after the path for both `fmt` and `quality`. Everything after the project path in `slick run` belongs to the program, not the toolchain.
 
-LLVM builds require LLVM 18 (`llvm-as-18` and `llc-18`) plus a C compiler. HTTP, JSON, and SQLite programs additionally require the libcurl, Jansson, and SQLite development libraries, respectively; native families are linked only when the checked program uses them. Set `SLICK_LLVM_BIN` when the LLVM tools are outside `PATH`.
+LLVM builds target `x86_64-pc-linux-gnu` and require a Linux/amd64 host, LLVM 18 (`llvm-as-18` and `llc-18`), and a C compiler. HTTP, JSON, and SQLite programs additionally require the libcurl, Jansson, and SQLite development libraries, respectively; native families are linked only when the checked program uses them. Set `SLICK_LLVM_BIN` when the LLVM tools are outside `PATH`.
 
 ## Work on a project
 

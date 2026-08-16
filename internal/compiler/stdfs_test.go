@@ -3,10 +3,15 @@ package compiler_test
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
+
+	"slick/internal/compiler"
 )
 
 func TestStdFSExactAliasesAndSignatures(t *testing.T) {
@@ -662,5 +667,75 @@ func TestStdFSDirectoryCallableDiagnostics(t *testing.T) {
 			source := "function main() -> " + test.resultType + " { " + test.call + " }"
 			assertDiagnostic(t, checkResult(t, source), "SLK320", test.message)
 		})
+	}
+}
+
+func TestLLVMReadTextDrainsFIFOAfterWriterCloses(t *testing.T) {
+	source := `
+function main() -> string effects { environment, filesystem } {
+    let Path = std.env.Get("SLICK_FIFO")
+    if (Path == null) {
+        "missing FIFO path"
+    } else {
+        match std.fs.ReadText(Path) {
+            Ok(Text) => Text
+            Err(Failure) => Failure.Message
+        }
+    }
+}
+`
+	binary := buildProgram(t, source, compiler.BackendLLVM)
+	fifo := filepath.Join(t.TempDir(), "input.fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatalf("create FIFO: %v", err)
+	}
+	var output strings.Builder
+	command := exec.Command(binary)
+	command.Env = append(os.Environ(), "SLICK_FIFO="+fifo)
+	command.Stdout = &output
+	command.Stderr = &output
+	if err := command.Start(); err != nil {
+		t.Fatalf("start FIFO reader: %v", err)
+	}
+	finished := make(chan error, 1)
+	go func() { finished <- command.Wait() }()
+	var writer *os.File
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		fd, err := syscall.Open(fifo, syscall.O_WRONLY|syscall.O_NONBLOCK, 0)
+		if err == nil {
+			writer = os.NewFile(uintptr(fd), fifo)
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if writer == nil {
+		_ = command.Process.Kill()
+		<-finished
+		t.Fatal("FIFO reader did not open")
+	}
+	if _, err := writer.WriteString("fifo-data"); err != nil {
+		_ = writer.Close()
+		_ = command.Process.Kill()
+		<-finished
+		t.Fatalf("write FIFO: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		_ = command.Process.Kill()
+		<-finished
+		t.Fatalf("close FIFO writer: %v", err)
+	}
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatalf("FIFO reader failed: %v; output=%q", err, output.String())
+		}
+	case <-time.After(5 * time.Second):
+		_ = command.Process.Kill()
+		<-finished
+		t.Fatal("FIFO reader did not stop after the writer closed")
+	}
+	if got := output.String(); got != "fifo-data\n" {
+		t.Fatalf("FIFO output = %q, want %q", got, "fifo-data\n")
 	}
 }

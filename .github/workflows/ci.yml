@@ -19,7 +19,7 @@ jobs:
       - name: Test
         env:
           SLICK_LLVM_BIN: /usr/bin
-        run: go test -count=1 -timeout 360s ./...
+        run: go test -count=1 -timeout 1200s ./...
       - name: Vet
         env:
           SLICK_LLVM_BIN: /usr/bin

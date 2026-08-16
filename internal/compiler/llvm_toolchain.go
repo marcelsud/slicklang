@@ -18,6 +18,12 @@ type llvmToolchain struct {
 }
 
 func locateLLVMToolchain() (llvmToolchain, error) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		return llvmToolchain{}, fmt.Errorf(
+			"LLVM backend target %s requires a linux/amd64 host, found %s/%s",
+			LLVMTargetTriple, runtime.GOOS, runtime.GOARCH,
+		)
+	}
 	bin := os.Getenv("SLICK_LLVM_BIN")
 	search := []string{}
 	if bin != "" {

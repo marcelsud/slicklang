@@ -6,12 +6,12 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <math.h>
+#include <locale.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
-#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -25,9 +25,6 @@
 #include <unistd.h>
 #include <wchar.h>
 #include <wctype.h>
-#ifdef SLICK_HAS_SQLITE
-#include <sqlite3.h>
-#endif
 #ifdef SLICK_HAS_JSON
 #include <jansson.h>
 #endif
@@ -91,6 +88,7 @@ typedef struct slick_scope slick_scope;
 typedef struct slick_ctx {
     volatile int cancelled;
     slick_scope *scope;
+    struct slick_ctx *parent;
 } slick_ctx;
 
 typedef struct slick_bytes {
@@ -129,6 +127,10 @@ typedef struct slick_class {
     int32_t field_count;
     void *resource;
     slick_value *fields;
+    slick_value error_message;
+    slick_value *suppressed;
+    int32_t suppressed_count;
+    int32_t suppressed_capacity;
 } slick_class;
 
 typedef struct slick_union {
@@ -183,20 +185,8 @@ typedef struct slick_tmpdir {
     char *path;
 } slick_tmpdir;
 
-#ifdef SLICK_HAS_SQLITE
-typedef struct slick_sqlite_db {
-    sqlite3 *db;
-    int closed;
-    pthread_mutex_t mu;
-    int has_tx;
-} slick_sqlite_db;
 
-typedef struct slick_sqlite_tx {
-    slick_sqlite_db *owner;
-    int closed;
-    int active;
-} slick_sqlite_tx;
-#endif
+typedef struct slick_arena slick_arena;
 
 struct slick_task {
     pthread_t thread;
@@ -210,6 +200,10 @@ struct slick_task {
     pthread_mutex_t mu;
     pthread_cond_t cv;
     slick_task *next;
+    slick_arena *arena;
+    slick_arena *parent_arena;
+    int arena_joined;
+    int started;
 };
 
 struct slick_scope {
@@ -221,8 +215,6 @@ const int slick_abi_version_1 = 1;
 
 static const slick_type_info *slick_types;
 static int slick_type_count;
-static int slick_abi_check = 1;
-const int slick_abi_version = 1;
 
 static slick_value slick_null(void) {
     slick_value v = {SLICK_NULL, 0, 0};
@@ -245,22 +237,168 @@ static slick_outcome slick_throw_val(slick_value v) {
     return o;
 }
 
+typedef struct slick_managed_block {
+    void *pointer;
+    struct slick_managed_block *next;
+} slick_managed_block;
+
+struct slick_arena {
+    pthread_mutex_t mutex;
+    slick_managed_block *blocks;
+    slick_arena *parent;
+};
+
+static slick_arena slick_root_arena = {PTHREAD_MUTEX_INITIALIZER, NULL, NULL};
+static _Thread_local slick_arena *slick_current_arena;
+static pthread_once_t slick_managed_once = PTHREAD_ONCE_INIT;
+
+static void slick_arena_release(slick_arena *arena) {
+    pthread_mutex_lock(&arena->mutex);
+    slick_managed_block *block = arena->blocks;
+    arena->blocks = NULL;
+    pthread_mutex_unlock(&arena->mutex);
+    while (block) {
+        slick_managed_block *next = block->next;
+        free(block->pointer);
+        free(block);
+        block = next;
+    }
+}
+
+static void slick_release_managed(void) {
+    slick_arena_release(&slick_root_arena);
+}
+
+static void slick_managed_init(void) {
+    atexit(slick_release_managed);
+}
+
+static slick_arena *slick_active_arena(void) {
+    pthread_once(&slick_managed_once, slick_managed_init);
+    return slick_current_arena ? slick_current_arena : &slick_root_arena;
+}
+
+void *slick_rt_arena_push(void) {
+    slick_arena *arena = calloc(1, sizeof(*arena));
+    if (!arena) {
+        fprintf(stderr, "slick: out of memory\n");
+        abort();
+    }
+    pthread_mutex_init(&arena->mutex, NULL);
+    arena->parent = slick_active_arena();
+    slick_current_arena = arena;
+    return arena;
+}
+
+void slick_rt_arena_pop(void *handle) {
+    slick_arena *arena = handle;
+    if (!arena) return;
+    slick_current_arena = arena->parent;
+    slick_arena_release(arena);
+    pthread_mutex_destroy(&arena->mutex);
+    free(arena);
+}
+void *slick_rt_arena_current(void) {
+    return slick_active_arena();
+}
+
+void *slick_rt_arena_enter(void *handle) {
+    slick_arena *previous = slick_current_arena;
+    slick_current_arena = handle;
+    return previous;
+}
+
+
+static void slick_arena_merge(slick_arena *parent, slick_arena *child) {
+    pthread_mutex_lock(&parent->mutex);
+    pthread_mutex_lock(&child->mutex);
+    if (child->blocks) {
+        slick_managed_block *tail = child->blocks;
+        while (tail->next) tail = tail->next;
+        tail->next = parent->blocks;
+        parent->blocks = child->blocks;
+        child->blocks = NULL;
+    }
+    pthread_mutex_unlock(&child->mutex);
+    pthread_mutex_unlock(&parent->mutex);
+}
+
+static void slick_track_managed(void *pointer) {
+    slick_managed_block *block = malloc(sizeof(*block));
+    if (!block) {
+        fprintf(stderr, "slick: out of memory\n");
+        abort();
+    }
+    block->pointer = pointer;
+    slick_arena *arena = slick_active_arena();
+    pthread_mutex_lock(&arena->mutex);
+    block->next = arena->blocks;
+    arena->blocks = block;
+    pthread_mutex_unlock(&arena->mutex);
+}
+
 static void *slick_xmalloc(size_t n) {
     void *p = calloc(1, n ? n : 1);
     if (!p) {
         fprintf(stderr, "slick: out of memory\n");
         abort();
     }
+    slick_track_managed(p);
     return p;
 }
 
+static slick_managed_block *slick_find_managed(slick_arena *arena, void *pointer) {
+    slick_managed_block *block = arena->blocks;
+    while (block && block->pointer != pointer) block = block->next;
+    return block;
+}
+
 static void *slick_xrealloc(void *p, size_t n) {
+    if (!p) return slick_xmalloc(n);
+    for (slick_arena *arena = slick_active_arena(); arena; arena = arena->parent) {
+        pthread_mutex_lock(&arena->mutex);
+        slick_managed_block *block = slick_find_managed(arena, p);
+        if (!block) {
+            pthread_mutex_unlock(&arena->mutex);
+            continue;
+        }
+        void *q = realloc(p, n ? n : 1);
+        if (!q) {
+            pthread_mutex_unlock(&arena->mutex);
+            fprintf(stderr, "slick: out of memory\n");
+            abort();
+        }
+        block->pointer = q;
+        pthread_mutex_unlock(&arena->mutex);
+        return q;
+    }
     void *q = realloc(p, n ? n : 1);
     if (!q) {
         fprintf(stderr, "slick: out of memory\n");
         abort();
     }
+    slick_track_managed(q);
     return q;
+}
+
+static void slick_xfree(void *pointer) {
+    if (!pointer) return;
+    for (slick_arena *arena = slick_active_arena(); arena; arena = arena->parent) {
+        pthread_mutex_lock(&arena->mutex);
+        slick_managed_block **link = &arena->blocks;
+        while (*link && (*link)->pointer != pointer) link = &(*link)->next;
+        if (!*link) {
+            pthread_mutex_unlock(&arena->mutex);
+            continue;
+        }
+        slick_managed_block *block = *link;
+        *link = block->next;
+        pthread_mutex_unlock(&arena->mutex);
+        free(block);
+        free(pointer);
+        return;
+    }
+    free(pointer);
 }
 
 static char *slick_xstrdup(const char *s) {
@@ -295,11 +433,9 @@ static double slick_as_float(slick_value v) {
 static slick_bytes *slick_new_bytes(const void *data, int64_t len) {
     slick_bytes *b = slick_xmalloc(sizeof(*b));
     b->len = len;
-    if (len > 0) {
-        b->data = slick_xmalloc((size_t)len + 1);
-        memcpy(b->data, data, (size_t)len);
-        b->data[len] = 0;
-    }
+    b->data = slick_xmalloc((size_t)len + 1);
+    if (len > 0) memcpy(b->data, data, (size_t)len);
+    b->data[len] = 0;
     return b;
 }
 
@@ -920,6 +1056,72 @@ static void slick_append_str(char **out, size_t *len, size_t *cap, const char *s
     slick_append(out, len, cap, s, strlen(s));
 }
 
+static int slick_decimal_exponent(const char *text) {
+    const char *start = text + (*text == '-' || *text == '+');
+    const char *exponent = strchr(start, 'e');
+    if (exponent) return atoi(exponent + 1);
+    const char *point = strchr(start, '.');
+    const char *digit = start;
+    while (*digit == '0' || *digit == '.') digit++;
+    if (!*digit) return 0;
+    if (!point) return (int)strlen(start) - 1;
+    if (digit < point) return (int)(point - digit) - 1;
+    return -(int)(digit - point);
+}
+
+static void slick_format_float_c(char *out, size_t capacity, double value) {
+    if (isnan(value)) {
+        snprintf(out, capacity, "NaN");
+        return;
+    }
+    if (isinf(value)) {
+        snprintf(out, capacity, signbit(value) ? "-Inf" : "+Inf");
+        return;
+    }
+    uint64_t target;
+    memcpy(&target, &value, sizeof(target));
+    for (int precision = 1; precision <= 17; precision++) {
+        char candidate[64];
+        snprintf(candidate, sizeof(candidate), "%.*g", precision, value);
+        char *end = NULL;
+        double parsed = strtod(candidate, &end);
+        uint64_t bits;
+        memcpy(&bits, &parsed, sizeof(bits));
+        if (end && *end == 0 && bits == target) {
+            int exponent = slick_decimal_exponent(candidate);
+            if (exponent >= -4 && exponent < 6) {
+                int places = precision - exponent - 1;
+                snprintf(out, capacity, "%.*f", places > 0 ? places : 0, value);
+            } else {
+                snprintf(out, capacity, "%.*e", precision - 1, value);
+            }
+            return;
+        }
+    }
+    snprintf(out, capacity, "%.17g", value);
+}
+
+static locale_t slick_numeric_locale;
+static pthread_once_t slick_numeric_locale_once = PTHREAD_ONCE_INIT;
+
+static void slick_init_numeric_locale(void) {
+    slick_numeric_locale = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
+}
+
+static void slick_format_float(char *out, size_t capacity, double value) {
+    pthread_once(&slick_numeric_locale_once, slick_init_numeric_locale);
+    locale_t previous = (locale_t)0;
+    if (slick_numeric_locale) previous = uselocale(slick_numeric_locale);
+    slick_format_float_c(out, capacity, value);
+    if (slick_numeric_locale) uselocale(previous);
+}
+
+slick_value slick_rt_float_text(double value) {
+    char out[64];
+    slick_format_float(out, sizeof(out), value);
+    return slick_rt_string(out, -1);
+}
+
 static void slick_format_into(char **out, size_t *len, size_t *cap, slick_value v) {
     char buf[64];
     if (v.kind == SLICK_OPTIONAL) {
@@ -942,7 +1144,7 @@ static void slick_format_into(char **out, size_t *len, size_t *cap, slick_value 
     case SLICK_FLOAT: {
         double d;
         memcpy(&d, &v.bits, sizeof(double));
-        snprintf(buf, sizeof(buf), "%.17g", d);
+        slick_format_float(buf, sizeof(buf), d);
         slick_append_str(out, len, cap, buf);
         return;
     }
@@ -1027,7 +1229,7 @@ slick_value slick_rt_format(slick_value v) {
         return slick_rt_string("", 0);
     }
     slick_value s = slick_rt_string(out, (int64_t)len);
-    free(out);
+    slick_xfree(out);
     return s;
 }
 
@@ -1046,31 +1248,40 @@ slick_value slick_rt_format_union(const char *name, int32_t n, slick_value *fiel
         slick_append_str(&out, &len, &cap, ")");
     }
     slick_value s = slick_rt_string(out ? out : "", (int64_t)len);
-    free(out);
+    slick_xfree(out);
     return s;
 }
 
-static slick_value slick_error_class(int32_t type_id, const char *message) {
+static slick_value slick_error_class(int32_t type_id, slick_value message) {
     const slick_type_info *info = (type_id >= 0 && type_id < slick_type_count) ? &slick_types[type_id] : NULL;
     int n = info ? info->field_count : 0;
     slick_value *fields = n ? slick_xmalloc(sizeof(slick_value) * (size_t)n) : NULL;
     for (int i = 0; i < n; i++) {
         if (info && info->field_names && strcmp(info->field_names[i], "Message") == 0) {
-            fields[i] = slick_rt_string(message, -1);
+            fields[i] = message;
         } else {
             fields[i] = slick_null();
         }
     }
-    slick_value err = slick_rt_class(type_id, n, fields);
-    return err;
+    slick_value value = slick_rt_class(type_id, n, fields);
+    slick_class *object = slick_as_class(value);
+    if (object) object->error_message = message;
+    return value;
 }
 
 slick_value slick_rt_error_message(int32_t type_id, slick_value message) {
-    return slick_error_class(type_id, slick_cstr(message));
+    return slick_error_class(type_id, message);
+}
+
+static int slick_context_cancelled(slick_ctx *ctx) {
+    for (; ctx; ctx = ctx->parent) {
+        if (__atomic_load_n(&ctx->cancelled, __ATOMIC_ACQUIRE)) return 1;
+    }
+    return 0;
 }
 
 slick_outcome slick_rt_check_cancel(slick_ctx *ctx) {
-    if (ctx && ctx->cancelled) {
+    if (slick_context_cancelled(ctx)) {
         slick_outcome o;
         o.code = SLICK_CANCEL;
         o.pad = 0;
@@ -1084,31 +1295,82 @@ int32_t slick_rt_is_control(int32_t code) {
     return code == SLICK_RETURN || code == SLICK_BREAK || code == SLICK_CONTINUE;
 }
 
+slick_value slick_rt_error_format(slick_value value);
+
 slick_value slick_rt_suppress(slick_value primary, slick_value extra) {
-    slick_value text = slick_rt_format(primary);
-    slick_value more = slick_rt_format(extra);
+    if (primary.kind == SLICK_ERROR || primary.kind == SLICK_CLASS) {
+        slick_class *object = slick_as_class(primary);
+        if (object) {
+            slick_class *copy = slick_xmalloc(sizeof(*copy));
+            *copy = *object;
+            copy->suppressed_count = object->suppressed_count + 1;
+            copy->suppressed_capacity = copy->suppressed_count;
+            copy->suppressed = slick_xmalloc(
+                sizeof(*copy->suppressed) * (size_t)copy->suppressed_count);
+            if (object->suppressed_count > 0) {
+                memcpy(copy->suppressed, object->suppressed,
+                    sizeof(*copy->suppressed) * (size_t)object->suppressed_count);
+            }
+            copy->suppressed[object->suppressed_count] = extra;
+            primary.bits = (int64_t)(uintptr_t)copy;
+            return primary;
+        }
+    }
+    slick_value text = slick_rt_error_format(primary);
+    slick_value more = slick_rt_error_format(extra);
     char *out = NULL;
     size_t len = 0, cap = 0;
     slick_append_str(&out, &len, &cap, slick_cstr(text));
     slick_append_str(&out, &len, &cap, " (suppressed: ");
     slick_append_str(&out, &len, &cap, slick_cstr(more));
     slick_append_str(&out, &len, &cap, ")");
-    slick_value s = slick_rt_string(out, (int64_t)len);
-    free(out);
-    if (primary.kind == SLICK_ERROR || primary.kind == SLICK_CLASS) {
-        slick_class *c = slick_as_class(primary);
-        if (c) {
-            for (int32_t i = 0; i < c->field_count; i++) {
-                const slick_type_info *info = &slick_types[c->type_id];
-                if (info->field_names && strcmp(info->field_names[i], "Message") == 0) {
-                    c->fields[i] = s;
-                    break;
-                }
-            }
-        }
-        return primary;
+    slick_value value = slick_rt_string(out, (int64_t)len);
+    slick_xfree(out);
+    return value;
+}
+
+static void slick_error_format_into(char **out, size_t *len, size_t *cap, slick_value value) {
+    if (value.kind != SLICK_ERROR && value.kind != SLICK_CLASS) {
+        slick_format_into(out, len, cap, value);
+        return;
     }
-    return s;
+    slick_class *object = slick_as_class(value);
+    if (!object || object->type_id < 0 || object->type_id >= slick_type_count) {
+        slick_format_into(out, len, cap, value);
+        return;
+    }
+    const slick_type_info *info = &slick_types[object->type_id];
+    slick_append_str(out, len, cap, info->name);
+    slick_value message = object->error_message;
+    for (int32_t i = 0; info->field_names && i < object->field_count; i++) {
+        if (strcmp(info->field_names[i], "Message") == 0 && object->fields[i].kind == SLICK_STRING &&
+            slick_as_bytes(object->fields[i])->len > 0) {
+            message = object->fields[i];
+            break;
+        }
+    }
+    if (message.kind == SLICK_STRING && slick_as_bytes(message)->len > 0) {
+        slick_append_str(out, len, cap, ": ");
+        slick_append(out, len, cap, (const char *)slick_as_bytes(message)->data,
+            (size_t)slick_as_bytes(message)->len);
+    }
+    if (object->suppressed_count > 0) {
+        slick_append_str(out, len, cap, " (suppressed: ");
+        for (int32_t i = 0; i < object->suppressed_count; i++) {
+            if (i) slick_append_str(out, len, cap, "; ");
+            slick_error_format_into(out, len, cap, object->suppressed[i]);
+        }
+        slick_append_str(out, len, cap, ")");
+    }
+}
+
+slick_value slick_rt_error_format(slick_value value) {
+    char *out = NULL;
+    size_t len = 0, cap = 0;
+    slick_error_format_into(&out, &len, &cap, value);
+    slick_value result = slick_rt_string(out ? out : "", (int64_t)len);
+    slick_xfree(out);
+    return result;
 }
 
 slick_scope *slick_rt_scope_new(slick_ctx *parent) {
@@ -1120,11 +1382,13 @@ slick_scope *slick_rt_scope_new(slick_ctx *parent) {
 
 static void *slick_task_main(void *arg) {
     slick_task *t = arg;
+    slick_current_arena = t->arena;
     t->fn(&t->result, &t->ctx, t->args);
     pthread_mutex_lock(&t->mu);
     t->done = 1;
     pthread_cond_broadcast(&t->cv);
     pthread_mutex_unlock(&t->mu);
+    slick_current_arena = NULL;
     return NULL;
 }
 
@@ -1136,17 +1400,45 @@ slick_value slick_rt_task_start(slick_ctx *ctx, slick_scope *scope, slick_task_f
         t->args = slick_xmalloc(sizeof(slick_value) * (size_t)argc);
         memcpy(t->args, args, sizeof(slick_value) * (size_t)argc);
     }
-    t->ctx.cancelled = ctx ? ctx->cancelled : 0;
+    t->ctx.cancelled = 0;
     t->ctx.scope = NULL;
+    t->ctx.parent = ctx;
+    t->parent_arena = slick_active_arena();
+    t->arena = slick_rt_arena_push();
+    slick_current_arena = t->parent_arena;
     pthread_mutex_init(&t->mu, NULL);
     pthread_cond_init(&t->cv, NULL);
     pthread_mutex_lock(&scope->mu);
     t->next = scope->children;
     scope->children = t;
     pthread_mutex_unlock(&scope->mu);
-    pthread_create(&t->thread, NULL, slick_task_main, t);
+    int create_error = pthread_create(&t->thread, NULL, slick_task_main, t);
+    if (create_error) {
+        t->result = slick_throw_val(slick_rt_string(strerror(create_error), -1));
+        t->done = 1;
+    } else {
+        t->started = 1;
+    }
     slick_value out = {SLICK_CLASS, 0, (int64_t)(uintptr_t)t};
     return out;
+}
+
+static void slick_task_wait(slick_task *t) {
+    pthread_mutex_lock(&t->mu);
+    while (!t->done) {
+        pthread_cond_wait(&t->cv, &t->mu);
+    }
+    pthread_mutex_unlock(&t->mu);
+    if (t->started) {
+        pthread_join(t->thread, NULL);
+        t->started = 0;
+    }
+    if (!t->arena_joined) {
+        slick_arena_merge(t->parent_arena, t->arena);
+        pthread_mutex_destroy(&t->arena->mutex);
+        free(t->arena);
+        t->arena_joined = 1;
+    }
 }
 
 slick_outcome slick_rt_task_await(slick_value task) {
@@ -1155,12 +1447,7 @@ slick_outcome slick_rt_task_await(slick_value task) {
         return slick_throw_val(slick_rt_string("pending binding already awaited", -1));
     }
     t->consumed = 1;
-    pthread_mutex_lock(&t->mu);
-    while (!t->done) {
-        pthread_cond_wait(&t->cv, &t->mu);
-    }
-    pthread_mutex_unlock(&t->mu);
-    pthread_join(t->thread, NULL);
+    slick_task_wait(t);
     return t->result;
 }
 
@@ -1171,7 +1458,7 @@ slick_outcome slick_rt_scope_finish(slick_scope *scope, slick_outcome *primary_v
     for (slick_task *t = scope->children; t; t = t->next) {
         if (!t->consumed) {
             outstanding = 1;
-            t->ctx.cancelled = 1;
+            __atomic_store_n(&t->ctx.cancelled, 1, __ATOMIC_RELEASE);
         }
     }
     pthread_mutex_unlock(&scope->mu);
@@ -1181,12 +1468,7 @@ slick_outcome slick_rt_scope_finish(slick_scope *scope, slick_outcome *primary_v
             continue;
         }
         t->consumed = 1;
-        pthread_mutex_lock(&t->mu);
-        while (!t->done) {
-            pthread_cond_wait(&t->cv, &t->mu);
-        }
-        pthread_mutex_unlock(&t->mu);
-        pthread_join(t->thread, NULL);
+        slick_task_wait(t);
         if (t->result.code == SLICK_OK || t->result.code == SLICK_CANCEL) {
             continue;
         }
@@ -1196,6 +1478,11 @@ slick_outcome slick_rt_scope_finish(slick_scope *scope, slick_outcome *primary_v
             primary.value = slick_rt_suppress(primary.value, t->result.value);
         }
     }
+    for (slick_task *t = scope->children; t; t = t->next) {
+        pthread_mutex_destroy(&t->mu);
+        pthread_cond_destroy(&t->cv);
+    }
+    pthread_mutex_destroy(&scope->mu);
     return primary;
 }
 
@@ -1260,65 +1547,20 @@ int32_t slick_rt_find_field(int32_t type_id, const char *name) {
     return -1;
 }
 
-static slick_value slick_class_field(slick_value obj, const char *name) {
-    slick_class *c = slick_as_class(obj);
-    if (!c) {
-        return slick_null();
-    }
-    int32_t i = slick_rt_find_field(c->type_id, name);
-    if (i < 0) {
-        return slick_null();
-    }
-    return c->fields[i];
-}
-
-static void slick_set_class_field(slick_value obj, const char *name, slick_value val) {
-    slick_class *c = slick_as_class(obj);
-    if (!c) {
-        return;
-    }
-    int32_t i = slick_rt_find_field(c->type_id, name);
-    if (i >= 0) {
-        c->fields[i] = val;
-    }
-}
-
-static slick_value slick_fail_fields(int32_t type_id, ...) {
-    const slick_type_info *info = (type_id >= 0 && type_id < slick_type_count) ? &slick_types[type_id] : NULL;
-    int n = info ? info->field_count : 0;
-    slick_value *fields = n ? slick_xmalloc(sizeof(slick_value) * (size_t)n) : NULL;
-    for (int i = 0; i < n; i++) {
-        fields[i] = slick_null();
-    }
-    va_list ap;
-    va_start(ap, type_id);
-    for (;;) {
-        const char *name = va_arg(ap, const char *);
-        if (!name) {
-            break;
-        }
-        slick_value val = va_arg(ap, slick_value);
-        if (!info) {
-            continue;
-        }
-        for (int i = 0; i < n; i++) {
-            if (strcmp(info->field_names[i], name) == 0) {
-                fields[i] = val;
-                break;
-            }
-        }
-    }
-    va_end(ap);
-    return slick_rt_class(type_id, n, fields);
-}
 
 /* --- arithmetic / unary helpers used by generated IR --- */
+static int64_t slick_wrapped_int(uint64_t bits) {
+    int64_t value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
 
 slick_value slick_rt_neg(slick_value v) {
     if (v.kind == SLICK_FLOAT) {
         return slick_rt_float(-slick_as_float(v));
     }
-    return slick_rt_int(-v.bits);
+    return slick_rt_int(slick_wrapped_int(0 - (uint64_t)v.bits));
 }
 
 slick_value slick_rt_not(slick_value v) {
@@ -1340,7 +1582,7 @@ slick_value slick_rt_add(slick_value a, slick_value b) {
         double y = b.kind == SLICK_FLOAT ? slick_as_float(b) : (double)b.bits;
         return slick_rt_float(x + y);
     }
-    return slick_rt_int(a.bits + b.bits);
+    return slick_rt_int(slick_wrapped_int((uint64_t)a.bits + (uint64_t)b.bits));
 }
 
 slick_value slick_rt_sub(slick_value a, slick_value b) {
@@ -1349,7 +1591,7 @@ slick_value slick_rt_sub(slick_value a, slick_value b) {
         double y = b.kind == SLICK_FLOAT ? slick_as_float(b) : (double)b.bits;
         return slick_rt_float(x - y);
     }
-    return slick_rt_int(a.bits - b.bits);
+    return slick_rt_int(slick_wrapped_int((uint64_t)a.bits - (uint64_t)b.bits));
 }
 
 slick_value slick_rt_mul(slick_value a, slick_value b) {
@@ -1358,7 +1600,7 @@ slick_value slick_rt_mul(slick_value a, slick_value b) {
         double y = b.kind == SLICK_FLOAT ? slick_as_float(b) : (double)b.bits;
         return slick_rt_float(x * y);
     }
-    return slick_rt_int(a.bits * b.bits);
+    return slick_rt_int(slick_wrapped_int((uint64_t)a.bits * (uint64_t)b.bits));
 }
 
 slick_value slick_rt_cmp(slick_value a, slick_value b, int32_t op) {
@@ -1399,7 +1641,7 @@ static pthread_once_t slick_signal_once = PTHREAD_ONCE_INIT;
 
 static void slick_cancel_signal(int signal_number) {
     (void)signal_number;
-    slick_root_context.cancelled = 1;
+    __atomic_store_n(&slick_root_context.cancelled, 1, __ATOMIC_RELEASE);
 }
 
 static void slick_install_signal_handlers(void) {
@@ -1418,6 +1660,7 @@ slick_ctx *slick_rt_cleanup_ctx(void) {
     static _Thread_local slick_ctx cleanup;
     cleanup.cancelled = 0;
     cleanup.scope = NULL;
+    cleanup.parent = NULL;
     return &cleanup;
 }
 
@@ -1438,6 +1681,9 @@ void slick_rt_write_bytes(slick_value v, int fd) {
     }
     FILE *f = fd == 2 ? stderr : stdout;
     fwrite(b->data, 1, (size_t)b->len, f);
+}
+void slick_rt_invalid_exit(int64_t code) {
+    fprintf(stderr, "std.process.Status ExitCode must be 0 through 255, found %" PRId64 "\n", code);
 }
 
 slick_value slick_rt_argv(int argc, char **argv) {
@@ -1561,14 +1807,22 @@ typedef struct slick_json_error {
 } slick_json_error;
 
 static char *slick_json_field_path(const char *path, const char *field) {
-    char *out = NULL;
-    if (asprintf(&out, "%s.%s", path, field) < 0) abort();
+    size_t path_length = strlen(path);
+    size_t field_length = strlen(field);
+    char *out = slick_xmalloc(path_length + field_length + 2);
+    memcpy(out, path, path_length);
+    out[path_length] = '.';
+    memcpy(out + path_length + 1, field, field_length + 1);
     return out;
 }
 
 static char *slick_json_index_path(const char *path, size_t index) {
-    char *out = NULL;
-    if (asprintf(&out, "%s[%zu]", path, index) < 0) abort();
+    char suffix[32];
+    int suffix_length = snprintf(suffix, sizeof(suffix), "[%zu]", index);
+    size_t path_length = strlen(path);
+    char *out = slick_xmalloc(path_length + (size_t)suffix_length + 1);
+    memcpy(out, path, path_length);
+    memcpy(out + path_length, suffix, (size_t)suffix_length + 1);
     return out;
 }
 
@@ -1617,7 +1871,7 @@ static int slick_json_decode_value(json_t *node, const char **schema, const char
     }
     if (kind == '[') {
         if (!json_is_array(node)) {
-            error->path = strdup(path); error->message = "expected JSON array"; return 0;
+            error->path = slick_xstrdup(path); error->message = "expected JSON array"; return 0;
         }
         const char *element_schema = *schema;
         size_t length = json_array_size(node);
@@ -1631,37 +1885,37 @@ static int slick_json_decode_value(json_t *node, const char **schema, const char
         return 1;
     }
     if (kind == 'n') {
-        if (!json_is_null(node)) { error->path = strdup(path); error->message = "expected JSON null"; return 0; }
+        if (!json_is_null(node)) { error->path = slick_xstrdup(path); error->message = "expected JSON null"; return 0; }
         *out = slick_null(); return 1;
     }
     if (kind == 'b') {
-        if (!json_is_boolean(node)) { error->path = strdup(path); error->message = "expected JSON boolean"; return 0; }
+        if (!json_is_boolean(node)) { error->path = slick_xstrdup(path); error->message = "expected JSON boolean"; return 0; }
         *out = slick_rt_bool(json_is_true(node)); return 1;
     }
     if (kind == 's') {
-        if (!json_is_string(node)) { error->path = strdup(path); error->message = "expected JSON string"; return 0; }
+        if (!json_is_string(node)) { error->path = slick_xstrdup(path); error->message = "expected JSON string"; return 0; }
         *out = slick_rt_string(json_string_value(node), (int64_t)json_string_length(node)); return 1;
     }
     if (kind == 'i') {
         if (json_is_real(node)) {
-            error->path = strdup(path); error->message = "expected JSON integer without fraction or exponent"; return 0;
+            error->path = slick_xstrdup(path); error->message = "expected JSON integer without fraction or exponent"; return 0;
         }
-        if (!json_is_integer(node)) { error->path = strdup(path); error->message = "expected JSON integer"; return 0; }
+        if (!json_is_integer(node)) { error->path = slick_xstrdup(path); error->message = "expected JSON integer"; return 0; }
         *out = slick_rt_int((int64_t)json_integer_value(node)); return 1;
     }
     if (kind == 'f') {
-        if (!json_is_number(node)) { error->path = strdup(path); error->message = "expected JSON number"; return 0; }
+        if (!json_is_number(node)) { error->path = slick_xstrdup(path); error->message = "expected JSON number"; return 0; }
         double number = json_number_value(node);
-        if (!isfinite(number)) { error->path = strdup(path); error->message = "number out of float64 range"; return 0; }
+        if (!isfinite(number)) { error->path = slick_xstrdup(path); error->message = "number out of float64 range"; return 0; }
         *out = slick_rt_float(number); return 1;
     }
     if (kind == 'c') {
         int32_t id = slick_json_schema_class(schema);
-        if (id < 0) { error->path = strdup(path); error->message = "unsupported JSON target type"; return 0; }
-        if (!json_is_object(node)) { error->path = strdup(path); error->message = "expected JSON object"; return 0; }
+        if (id < 0) { error->path = slick_xstrdup(path); error->message = "unsupported JSON target type"; return 0; }
+        if (!json_is_object(node)) { error->path = slick_xstrdup(path); error->message = "expected JSON object"; return 0; }
         const slick_type_info *info = &slick_types[id];
         slick_value *fields = slick_xmalloc(sizeof(*fields) * (size_t)(info->field_count ? info->field_count : 1));
-        bool *seen = calloc((size_t)(info->field_count ? info->field_count : 1), sizeof(bool));
+        bool *seen = slick_xmalloc(sizeof(*seen) * (size_t)(info->field_count ? info->field_count : 1));
         const char *key;
         json_t *value;
         json_object_foreach(node, key, value) {
@@ -1685,11 +1939,11 @@ static int slick_json_decode_value(json_t *node, const char **schema, const char
             error->message = "missing required field";
             return 0;
         }
-        free(seen);
+        slick_xfree(seen);
         *out = slick_rt_class(id, info->field_count, fields);
         return 1;
     }
-    error->path = strdup(path); error->message = "unsupported JSON target type"; return 0;
+    error->path = slick_xstrdup(path); error->message = "unsupported JSON target type"; return 0;
 }
 
 static json_t *slick_json_encode_value(slick_value value, const char **schema, const char *path,
@@ -1701,7 +1955,7 @@ static json_t *slick_json_encode_value(slick_value value, const char **schema, c
     }
     if (kind == '[') {
         slick_array *array = slick_as_array(value);
-        if (!array) { error->path = strdup(path); error->message = "unsupported JSON source type"; return NULL; }
+        if (!array) { error->path = slick_xstrdup(path); error->message = "unsupported JSON source type"; return NULL; }
         const char *element_schema = *schema;
         json_t *out = json_array();
         for (int64_t i = 0; i < array->len; i++) {
@@ -1719,13 +1973,13 @@ static json_t *slick_json_encode_value(slick_value value, const char **schema, c
     if (kind == 'i') return json_integer((json_int_t)value.bits);
     if (kind == 'f') {
         double number = slick_as_float(value);
-        if (!isfinite(number)) { error->path = strdup(path); error->message = "non-finite float cannot be encoded as JSON"; return NULL; }
+        if (!isfinite(number)) { error->path = slick_xstrdup(path); error->message = "non-finite float cannot be encoded as JSON"; return NULL; }
         return json_real(number);
     }
     if (kind == 'c') {
         int32_t id = slick_json_schema_class(schema);
         slick_class *object = slick_as_class(value);
-        if (id < 0 || !object) { error->path = strdup(path); error->message = "unsupported JSON source type"; return NULL; }
+        if (id < 0 || !object) { error->path = slick_xstrdup(path); error->message = "unsupported JSON source type"; return NULL; }
         const slick_type_info *info = &slick_types[id];
         json_t *out = json_object();
         for (int32_t i = 0; i < info->field_count; i++) {
@@ -1739,14 +1993,14 @@ static json_t *slick_json_encode_value(slick_value value, const char **schema, c
         }
         return out;
     }
-    error->path = strdup(path); error->message = "unsupported JSON source type"; return NULL;
+    error->path = slick_xstrdup(path); error->message = "unsupported JSON source type"; return NULL;
 }
 
 static char *slick_json_duplicate_key(const char *input, size_t length, size_t position) {
     if (position > length) position = length;
     size_t end = position;
     while (end > 0 && input[end - 1] != '"') end--;
-    if (end == 0) return strdup("");
+    if (end == 0) return slick_xstrdup("");
     size_t start = end - 1;
     while (start > 0) {
         start--;
@@ -1767,7 +2021,7 @@ slick_outcome slick_nat_json_decode(slick_ctx *ctx, slick_value *args, const cha
     json_t *tree = json_loadb(input, length, JSON_DECODE_ANY | JSON_REJECT_DUPLICATES, &parse);
     if (!tree) {
         const char *message = parse.text;
-        char *path = strdup("$");
+        char *path = slick_xstrdup("$");
         if (length == 0) message = "unexpected end of JSON input";
         else if (strstr(parse.text, "end of file expected")) message = "input contains more than one JSON value";
         else if (strstr(parse.text, "duplicate object key")) {
@@ -1808,6 +2062,11 @@ slick_outcome slick_nat_json_encode(slick_ctx *ctx, slick_value *args, const cha
 #endif
 
 void slick_rt_format_p(slick_value *o, slick_value *a) { *o = slick_rt_format(*a); }
+void slick_rt_write_error_p(slick_value *a) {
+    slick_value formatted = slick_rt_error_format(*a);
+    slick_rt_write_bytes(formatted, 2);
+    fputc('\n', stderr);
+}
 void slick_rt_not_p(slick_value *o, slick_value *a) { *o = slick_rt_not(*a); }
 void slick_rt_neg_p(slick_value *o, slick_value *a) { *o = slick_rt_neg(*a); }
 void slick_rt_add_p(slick_value *o, slick_value *a, slick_value *b) { *o = slick_rt_add(*a, *b); }

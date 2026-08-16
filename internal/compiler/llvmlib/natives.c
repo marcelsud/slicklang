@@ -35,7 +35,7 @@
 
 typedef struct slick_value { int32_t kind; int32_t flags; int64_t bits; } slick_value;
 typedef struct slick_outcome { int32_t code; int32_t pad; slick_value value; } slick_outcome;
-typedef struct slick_ctx { volatile int cancelled; void *scope; } slick_ctx;
+typedef struct slick_ctx { volatile int cancelled; void *scope; struct slick_ctx *parent; } slick_ctx;
 typedef slick_outcome (*slick_fn)(void *ctx, slick_value *args);
 
 enum { SLICK_OK = 0, SLICK_THROW = 1, SLICK_CANCEL = 5 };
@@ -43,6 +43,7 @@ enum { SLICK_OK = 0, SLICK_THROW = 1, SLICK_CANCEL = 5 };
 slick_value slick_rt_bool(int32_t v);
 slick_value slick_rt_int(int64_t v);
 slick_value slick_rt_float(double v);
+slick_value slick_rt_float_text(double v);
 slick_value slick_rt_string(const char *s, int64_t len);
 slick_value slick_rt_bytes(const void *data, int64_t len);
 slick_value slick_rt_array(int32_t kind, int64_t n, slick_value *items);
@@ -73,6 +74,10 @@ int64_t slick_rt_array_len(slick_value a);
 slick_outcome slick_rt_check_cancel(slick_ctx *ctx);
 slick_value slick_rt_format(slick_value v);
 slick_value slick_rt_iface(int32_t type_id, slick_value recv, int32_t n, slick_fn *vtable);
+void *slick_rt_arena_push(void);
+void slick_rt_arena_pop(void *arena);
+void *slick_rt_arena_current(void);
+void *slick_rt_arena_enter(void *arena);
 slick_outcome slick_rt_iface_call(slick_ctx *ctx, slick_value iface, int32_t slot, int32_t argc, slick_value *args);
 slick_value slick_rt_iface_receiver(slick_value value);
 slick_ctx *slick_rt_root_ctx(void);
@@ -136,7 +141,10 @@ static void *get_resource(slick_value obj) {
 }
 
 static int cancelled(slick_ctx *ctx) {
-    return ctx && ctx->cancelled;
+    for (; ctx; ctx = ctx->parent) {
+        if (__atomic_load_n(&ctx->cancelled, __ATOMIC_ACQUIRE)) return 1;
+    }
+    return 0;
 }
 
 static int utf8_decode_one(const uint8_t *p, int64_t n, int32_t *value, int *width) {
@@ -322,9 +330,7 @@ slick_outcome slick_nat_float_to_string(slick_ctx *c, slick_value *a) {
     double v;
     memcpy(&v, &a[0].bits, sizeof(double));
     if (!isfinite(v)) return slick_throw(slick_rt_string("std.convert.FloatToString cannot format non-finite float", -1));
-    char buf[64];
-    snprintf(buf, sizeof(buf), "%.17g", v);
-    return slick_ok(slick_rt_string(buf, -1));
+    return slick_ok(slick_rt_float_text(v));
 }
 
 slick_outcome slick_nat_math_div(slick_ctx *c, slick_value *a) {
@@ -396,39 +402,116 @@ static char *fs_message_text(const char *verb, const char *path, int code) {
 }
 
 static slick_value fs_fail_errno_value(const char *op, slick_value path, const char *verb, int code) {
-    size_t length = strlen(verb) + 1 + (size_t)sv_len(path) + 2 + strlen(strerror(code));
+    size_t message_length = strlen(verb) + 1 + (size_t)sv_len(path) + 2 + strlen(strerror(code));
     char *message = fs_message_n(verb, sv_str(path), (size_t)sv_len(path), code);
-    return make_class("std.fs.Failure", "Operation", slick_rt_string(op, -1), "Path", path,
-        "Message", slick_rt_string(message, (int64_t)length), NULL);
+    slick_value failure = make_class("std.fs.Failure", "Operation", slick_rt_string(op, -1), "Path", path,
+        "Message", slick_rt_string(message, (int64_t)message_length), NULL);
+    free(message);
+    return failure;
 }
 
 slick_outcome slick_nat_fs_read_text(slick_ctx *ctx, slick_value *a) {
     if (cancelled(ctx)) return slick_ok(slick_rt_result(0, fs_fail("ReadText", a[0], "operation cancelled")));
     if (!fs_path_valid(a[0])) return slick_ok(slick_rt_result(0, fs_fail_errno_value("ReadText", a[0], "open", EINVAL)));
-    FILE *f = fopen(sv_str(a[0]), "rb");
-    if (!f) return slick_ok(slick_rt_result(0, fs_fail("ReadText", a[0], fs_message_value("open", a[0], errno))));
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (n < 0) n = 0;
-    char *buf = malloc((size_t)n + 1);
-    size_t got = fread(buf, 1, (size_t)n, f);
-    fclose(f);
-    if (!utf8_valid((uint8_t *)buf, (int64_t)got).bits) {
-        free(buf);
+    int fd = open(sv_str(a[0]), O_RDONLY | O_NONBLOCK);
+    if (fd < 0) return slick_ok(slick_rt_result(0, fs_fail_errno_value("ReadText", a[0], "open", errno)));
+    struct stat file_status;
+    int is_fifo = fstat(fd, &file_status) == 0 && S_ISFIFO(file_status.st_mode);
+    int fifo_connected = 0;
+    uint8_t *buffer = NULL;
+    size_t length = 0, capacity = 0;
+    for (;;) {
+        if (cancelled(ctx)) {
+            close(fd);
+            free(buffer);
+            return slick_ok(slick_rt_result(0, fs_fail("ReadText", a[0], "operation cancelled")));
+        }
+        if (length + 32768 > capacity) {
+            size_t grown_capacity = capacity ? capacity * 2 : 32768;
+            uint8_t *grown = realloc(buffer, grown_capacity);
+            if (!grown) {
+                close(fd);
+                free(buffer);
+                return slick_ok(slick_rt_result(0, fs_fail("ReadText", a[0], "out of memory")));
+            }
+            buffer = grown;
+            capacity = grown_capacity;
+        }
+        ssize_t count = read(fd, buffer + length, capacity - length);
+        if (count > 0) {
+            if (is_fifo) fifo_connected = 1;
+            length += (size_t)count;
+            continue;
+        }
+        if (count == 0) {
+            if (is_fifo && !fifo_connected) {
+                struct pollfd wait_for_writer = {.fd = fd, .events = POLLIN | POLLHUP};
+                int ready = poll(&wait_for_writer, 1, 10);
+                if (ready < 0 && errno == EINTR) continue;
+                if (ready > 0 && (wait_for_writer.revents & POLLIN)) continue;
+                if (ready > 0 && (wait_for_writer.revents & POLLHUP)) break;
+                if (ready < 0) {
+                    int code = errno;
+                    close(fd);
+                    free(buffer);
+                    return slick_ok(slick_rt_result(0, fs_fail_errno_value("ReadText", a[0], "read", code)));
+                }
+                continue;
+            }
+            break;
+        }
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (is_fifo) fifo_connected = 1;
+            usleep(10000);
+            continue;
+        }
+        int code = errno;
+        close(fd);
+        free(buffer);
+        return slick_ok(slick_rt_result(0, fs_fail_errno_value("ReadText", a[0], "read", code)));
+    }
+    if (close(fd) != 0) {
+        int code = errno;
+        free(buffer);
+        return slick_ok(slick_rt_result(0, fs_fail_errno_value("ReadText", a[0], "close", code)));
+    }
+    if (!utf8_valid(buffer, (int64_t)length).bits) {
+        free(buffer);
         return slick_ok(slick_rt_result(0, fs_fail("ReadText", a[0], "invalid UTF-8")));
     }
-    slick_value out = slick_rt_string(buf, (int64_t)got);
-    free(buf);
-    return slick_ok(slick_rt_result(1, out));
+    slick_value output = slick_rt_string((const char *)buffer, (int64_t)length);
+    free(buffer);
+    return slick_ok(slick_rt_result(1, output));
 }
+
 slick_outcome slick_nat_fs_write_text(slick_ctx *ctx, slick_value *a) {
     if (cancelled(ctx)) return slick_ok(slick_rt_result(0, fs_fail("WriteText", a[0], "operation cancelled")));
     if (!fs_path_valid(a[0])) return slick_ok(slick_rt_result(0, fs_fail_errno_value("WriteText", a[0], "open", EINVAL)));
-    FILE *f = fopen(sv_str(a[0]), "wb");
-    if (!f) return slick_ok(slick_rt_result(0, fs_fail("WriteText", a[0], fs_message_value("open", a[0], errno))));
-    fwrite(sv_str(a[1]), 1, (size_t)sv_len(a[1]), f);
-    fclose(f);
+    int fd = open(sv_str(a[0]), O_WRONLY | O_CREAT | O_TRUNC | O_NONBLOCK, 0666);
+    if (fd < 0) return slick_ok(slick_rt_result(0, fs_fail_errno_value("WriteText", a[0], "open", errno)));
+    const uint8_t *text = sv_data(a[1]);
+    size_t length = (size_t)sv_len(a[1]), offset = 0;
+    while (offset < length) {
+        if (cancelled(ctx)) {
+            close(fd);
+            return slick_ok(slick_rt_result(0, fs_fail("WriteText", a[0], "operation cancelled")));
+        }
+        ssize_t count = write(fd, text + offset, length - offset);
+        if (count > 0) {
+            offset += (size_t)count;
+            continue;
+        }
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            usleep(10000);
+            continue;
+        }
+        int code = count < 0 ? errno : EIO;
+        close(fd);
+        return slick_ok(slick_rt_result(0, fs_fail_errno_value("WriteText", a[0], "write", code)));
+    }
+    if (close(fd) != 0) return slick_ok(slick_rt_result(0, fs_fail_errno_value("WriteText", a[0], "close", errno)));
     return slick_ok(slick_rt_result(1, (slick_value){0, 0, 0}));
 }
 slick_outcome slick_nat_fs_exists(slick_ctx *c, slick_value *a) {
@@ -681,70 +764,92 @@ slick_outcome slick_nat_text_trim(slick_ctx *c, slick_value *a) {
     if (leading) start = end = length;
     return slick_ok(slick_rt_string((const char *)text + start, end - start));
 }
-slick_outcome slick_nat_text_contains(slick_ctx *c, slick_value *a) { (void)c; return slick_ok(slick_rt_bool(strstr(sv_str(a[0]), sv_str(a[1])) != NULL)); }
+static int64_t bytes_find(const uint8_t *source, size_t source_len,
+    const uint8_t *needle, size_t needle_len) {
+    if (needle_len == 0) return 0;
+    if (needle_len > source_len) return -1;
+    for (size_t offset = 0; offset + needle_len <= source_len; offset++) {
+        if (memcmp(source + offset, needle, needle_len) == 0) return (int64_t)offset;
+    }
+    return -1;
+}
+
+slick_outcome slick_nat_text_contains(slick_ctx *c, slick_value *a) {
+    (void)c;
+    return slick_ok(slick_rt_bool(bytes_find(sv_data(a[0]), (size_t)sv_len(a[0]),
+        sv_data(a[1]), (size_t)sv_len(a[1])) >= 0));
+}
 slick_outcome slick_nat_text_starts(slick_ctx *c, slick_value *a) {
     (void)c;
-    return slick_ok(slick_rt_bool(strncmp(sv_str(a[0]), sv_str(a[1]), strlen(sv_str(a[1]))) == 0));
+    size_t source_len = (size_t)sv_len(a[0]), prefix_len = (size_t)sv_len(a[1]);
+    return slick_ok(slick_rt_bool(prefix_len == 0 || (source_len >= prefix_len &&
+        memcmp(sv_data(a[0]), sv_data(a[1]), prefix_len) == 0)));
 }
 slick_outcome slick_nat_text_ends(slick_ctx *c, slick_value *a) {
     (void)c;
-    size_t n = strlen(sv_str(a[0])), m = strlen(sv_str(a[1]));
-    return slick_ok(slick_rt_bool(n >= m && strcmp(sv_str(a[0]) + n - m, sv_str(a[1])) == 0));
+    size_t source_len = (size_t)sv_len(a[0]), suffix_len = (size_t)sv_len(a[1]);
+    return slick_ok(slick_rt_bool(suffix_len == 0 || (source_len >= suffix_len &&
+        memcmp(sv_data(a[0]) + source_len - suffix_len, sv_data(a[1]), suffix_len) == 0)));
 }
 slick_outcome slick_nat_text_split(slick_ctx *c, slick_value *a) {
     (void)c;
-    const char *s = sv_str(a[0]), *sep = sv_str(a[1]);
+    const uint8_t *source = sv_data(a[0]), *separator = sv_data(a[1]);
+    size_t source_len = (size_t)sv_len(a[0]), separator_len = (size_t)sv_len(a[1]);
     slick_value *items = NULL;
     int n = 0;
-    if (!*sep) {
-        size_t length = (size_t)sv_len(a[0]);
+    if (separator_len == 0) {
         size_t offset = 0;
-        while (offset < length) {
-            unsigned char first = (unsigned char)s[offset];
-            size_t width = first < 0x80 ? 1 : first < 0xe0 ? 2 : first < 0xf0 ? 3 : 4;
-            if (offset + width > length) width = 1;
-            for (size_t i = 1; i < width; i++) {
-                if (((unsigned char)s[offset + i] & 0xc0) != 0x80) {
-                    width = 1;
-                    break;
-                }
-            }
-            items = realloc(items, sizeof(slick_value) * (size_t)(n + 1));
-            items[n++] = slick_rt_string(s + offset, (int64_t)width);
-            offset += width;
+        while (offset < source_len) {
+            int32_t value;
+            int width;
+            if (!utf8_decode_one(source + offset, (int64_t)(source_len - offset), &value, &width)) width = 1;
+            items = realloc(items, sizeof(*items) * (size_t)(n + 1));
+            items[n++] = slick_rt_string((const char *)source + offset, width);
+            offset += (size_t)width;
         }
     } else {
-        const char *p = s;
+        size_t offset = 0;
         for (;;) {
-            const char *f = strstr(p, sep);
-            items = realloc(items, sizeof(slick_value) * (size_t)(n + 1));
-            if (!f) {
-                items[n++] = slick_rt_string(p, -1);
+            int64_t relative = bytes_find(source + offset, source_len - offset, separator, separator_len);
+            items = realloc(items, sizeof(*items) * (size_t)(n + 1));
+            if (relative < 0) {
+                items[n++] = slick_rt_string((const char *)source + offset, (int64_t)(source_len - offset));
                 break;
             }
-            items[n++] = slick_rt_string(p, (int64_t)(f - p));
-            p = f + strlen(sep);
+            size_t found_offset = offset + (size_t)relative;
+            items[n++] = slick_rt_string((const char *)source + offset, (int64_t)(found_offset - offset));
+            offset = found_offset + separator_len;
         }
     }
-    return slick_ok(slick_rt_array(6, n, items));
+    slick_value result = slick_rt_array(6, n, items);
+    free(items);
+    return slick_ok(result);
 }
 slick_outcome slick_nat_text_join(slick_ctx *c, slick_value *a) {
     (void)c;
     int64_t n = slick_rt_array_len(a[0]);
-    size_t seplen = strlen(sv_str(a[1])), total = 0;
+    size_t separator_len = (size_t)sv_len(a[1]), total = 0;
     for (int64_t i = 0; i < n; i++) {
-        total += strlen(sv_str(slick_rt_array_index(a[0], i)));
-        if (i + 1 < n) total += seplen;
+        total += (size_t)sv_len(slick_rt_array_index(a[0], i));
+        if (i + 1 < n) total += separator_len;
     }
-    char *out = malloc(total + 1);
-    out[0] = 0;
+    char *output = malloc(total + 1);
+    char *write = output;
     for (int64_t i = 0; i < n; i++) {
-        strcat(out, sv_str(slick_rt_array_index(a[0], i)));
-        if (i + 1 < n) strcat(out, sv_str(a[1]));
+        slick_value item = slick_rt_array_index(a[0], i);
+        if (sv_len(item) > 0) {
+            memcpy(write, sv_data(item), (size_t)sv_len(item));
+            write += sv_len(item);
+        }
+        if (i + 1 < n && separator_len > 0) {
+            memcpy(write, sv_data(a[1]), separator_len);
+            write += separator_len;
+        }
     }
-    slick_value v = slick_rt_string(out, (int64_t)total);
-    free(out);
-    return slick_ok(v);
+    *write = 0;
+    slick_value value = slick_rt_string(output, (int64_t)total);
+    free(output);
+    return slick_ok(value);
 }
 slick_outcome slick_nat_text_replace(slick_ctx *c, slick_value *a) {
     (void)c;
@@ -795,10 +900,15 @@ slick_outcome slick_nat_text_replace(slick_ctx *c, slick_value *a) {
 }
 slick_outcome slick_nat_text_cut(slick_ctx *c, slick_value *a) {
     (void)c;
-    const char *s = sv_str(a[0]), *sep = sv_str(a[1]);
-    const char *f = strstr(s, sep);
-    if (!f) return slick_ok(slick_rt_none());
-    slick_value parts[2] = {slick_rt_string(s, (int64_t)(f - s)), slick_rt_string(f + strlen(sep), -1)};
+    const uint8_t *source = sv_data(a[0]), *separator = sv_data(a[1]);
+    size_t source_len = (size_t)sv_len(a[0]), separator_len = (size_t)sv_len(a[1]);
+    int64_t found = bytes_find(source, source_len, separator, separator_len);
+    if (found < 0) return slick_ok(slick_rt_none());
+    size_t offset = (size_t)found;
+    slick_value parts[2] = {
+        slick_rt_string((const char *)source, (int64_t)offset),
+        slick_rt_string((const char *)source + offset + separator_len, (int64_t)(source_len - offset - separator_len)),
+    };
     return slick_ok(slick_rt_some(slick_rt_array(7, 2, parts)));
 }
 slick_outcome slick_nat_text_quote(slick_ctx *c, slick_value *a) {
@@ -1017,98 +1127,195 @@ slick_outcome slick_nat_io_copy(slick_ctx *ctx, slick_value *a) {
     }
 }
 
+static int64_t monotonic_milliseconds(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+static void process_capture(int fd, char *buffer, int64_t *length, int64_t *total,
+    int64_t maximum, int *open_pipe, int *overflow) {
+    char chunk[4096];
+    for (;;) {
+        ssize_t count = read(fd, chunk, sizeof(chunk));
+        if (count > 0) {
+            int64_t take = count;
+            if (take > maximum - *total) {
+                *overflow = 1;
+                take = maximum - *total;
+            }
+            if (take > 0) {
+                memcpy(buffer + *length, chunk, (size_t)take);
+                *length += take;
+                *total += take;
+            }
+            continue;
+        }
+        if (count == 0) *open_pipe = 0;
+        if (count < 0 && errno == EINTR) continue;
+        return;
+    }
+}
+
 slick_outcome slick_nat_process_run(slick_ctx *ctx, slick_value *a) {
     if (cancelled(ctx)) {
         return slick_ok(slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("Cancelled", -1), "Program", a[0], "Message", slick_rt_string("operation cancelled before child start", -1), NULL)));
     }
-    int64_t max = a[3].bits;
-    if (max < 0) {
-        return slick_ok(slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("OutputLimit", -1), "Program", a[0], "Message", slick_rt_string("MaxOutputBytes must not be negative", -1), NULL)));
+    int64_t maximum = a[3].bits;
+    if (maximum < 0 || (uint64_t)maximum > SIZE_MAX - 1) {
+        return slick_ok(slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("OutputLimit", -1), "Program", a[0], "Message", slick_rt_string("MaxOutputBytes must not be negative or exceed addressable memory", -1), NULL)));
     }
-    int64_t nargs = slick_rt_array_len(a[1]);
-    char **argv = calloc((size_t)nargs + 2, sizeof(char *));
+    if (memchr(sv_data(a[0]), 0, (size_t)sv_len(a[0]))) {
+        return slick_ok(slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("Spawn", -1), "Program", a[0], "Message", slick_rt_string("program contains NUL", -1), NULL)));
+    }
+    if (slick_rt_optional_present(a[2])) {
+        slick_value directory = slick_rt_optional_value(a[2]);
+        struct stat info;
+        if (memchr(sv_data(directory), 0, (size_t)sv_len(directory)) ||
+            stat(sv_str(directory), &info) != 0 || !S_ISDIR(info.st_mode)) {
+            return slick_ok(slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("WorkingDirectory", -1), "Program", a[0], "Message", slick_rt_string("working directory is not an existing directory", -1), NULL)));
+        }
+    }
+    int64_t argument_count = slick_rt_array_len(a[1]);
+    char **argv = calloc((size_t)argument_count + 2, sizeof(*argv));
+    if (!argv) {
+        return slick_ok(slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("Spawn", -1), "Program", a[0], "Message", slick_rt_string("out of memory", -1), NULL)));
+    }
     argv[0] = (char *)sv_str(a[0]);
-    for (int64_t i = 0; i < nargs; i++) argv[i + 1] = (char *)sv_str(slick_rt_array_index(a[1], i));
-    int outp[2], errp[2];
-    if (pipe(outp) || pipe(errp)) {
-        return slick_ok(slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("Spawn", -1), "Program", a[0], "Message", slick_rt_string(strerror(errno), -1), NULL)));
+    for (int64_t i = 0; i < argument_count; i++) {
+        slick_value argument = slick_rt_array_index(a[1], i);
+        if (memchr(sv_data(argument), 0, (size_t)sv_len(argument))) {
+            free(argv);
+            return slick_ok(slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("Spawn", -1), "Program", a[0], "Message", slick_rt_string("argument contains NUL", -1), NULL)));
+        }
+        argv[i + 1] = (char *)sv_str(argument);
+    }
+    int output_pipe[2] = {-1, -1}, error_pipe[2] = {-1, -1}, setup_pipe[2] = {-1, -1};
+    if (pipe(output_pipe) != 0 || pipe(error_pipe) != 0 || pipe(setup_pipe) != 0) {
+        int code = errno;
+        if (output_pipe[0] >= 0) close(output_pipe[0]);
+        if (output_pipe[1] >= 0) close(output_pipe[1]);
+        if (error_pipe[0] >= 0) close(error_pipe[0]);
+        if (error_pipe[1] >= 0) close(error_pipe[1]);
+        if (setup_pipe[0] >= 0) close(setup_pipe[0]);
+        if (setup_pipe[1] >= 0) close(setup_pipe[1]);
+        free(argv);
+        return slick_ok(slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("Spawn", -1), "Program", a[0], "Message", slick_rt_string(strerror(code), -1), NULL)));
     }
     pid_t pid = fork();
     if (pid < 0) {
-        return slick_ok(slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("Spawn", -1), "Program", a[0], "Message", slick_rt_string(strerror(errno), -1), NULL)));
+        int code = errno;
+        close(output_pipe[0]); close(output_pipe[1]); close(error_pipe[0]); close(error_pipe[1]);
+        close(setup_pipe[0]); close(setup_pipe[1]);
+        free(argv);
+        return slick_ok(slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("Spawn", -1), "Program", a[0], "Message", slick_rt_string(strerror(code), -1), NULL)));
     }
     if (pid == 0) {
-        if (slick_rt_optional_present(a[2])) {
-            if (chdir(sv_str(slick_rt_optional_value(a[2]))) != 0) _exit(127);
+        close(setup_pipe[0]);
+        fcntl(setup_pipe[1], F_SETFD, FD_CLOEXEC);
+        setpgid(0, 0);
+        int setup_error = 0;
+        if (slick_rt_optional_present(a[2]) && chdir(sv_str(slick_rt_optional_value(a[2]))) != 0) setup_error = errno;
+        if (!setup_error && dup2(output_pipe[1], STDOUT_FILENO) < 0) setup_error = errno;
+        if (!setup_error && dup2(error_pipe[1], STDERR_FILENO) < 0) setup_error = errno;
+        if (setup_error) {
+            ssize_t reported;
+            do {
+                reported = write(setup_pipe[1], &setup_error, sizeof(setup_error));
+            } while (reported < 0 && errno == EINTR);
+            _exit(127);
         }
-        dup2(outp[1], 1);
-        dup2(errp[1], 2);
-        close(outp[0]); close(outp[1]); close(errp[0]); close(errp[1]);
+        close(output_pipe[0]); close(output_pipe[1]); close(error_pipe[0]); close(error_pipe[1]);
         execvp(argv[0], argv);
+        setup_error = errno;
+        ssize_t reported;
+        do {
+            reported = write(setup_pipe[1], &setup_error, sizeof(setup_error));
+        } while (reported < 0 && errno == EINTR);
         _exit(127);
     }
-    close(outp[1]); close(errp[1]);
-    char *obuf = malloc((size_t)max + 1), *ebuf = malloc((size_t)max + 1);
-    int64_t olen = 0, elen = 0, total = 0;
-    int overflow = 0;
-    while (1) {
-        if (cancelled(ctx)) {
-            kill(pid, SIGTERM);
+    free(argv);
+    setpgid(pid, pid);
+    close(output_pipe[1]);
+    close(error_pipe[1]);
+    close(setup_pipe[1]);
+    int setup_error = 0;
+    ssize_t setup_count;
+    do {
+        setup_count = read(setup_pipe[0], &setup_error, sizeof(setup_error));
+    } while (setup_count < 0 && errno == EINTR);
+    close(setup_pipe[0]);
+    if (setup_count > 0) {
+        waitpid(pid, NULL, 0);
+        close(output_pipe[0]);
+        close(error_pipe[0]);
+        return slick_ok(slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("Spawn", -1), "Program", a[0], "Message", slick_rt_string(strerror(setup_error), -1), NULL)));
+    }
+    fcntl(output_pipe[0], F_SETFL, fcntl(output_pipe[0], F_GETFL, 0) | O_NONBLOCK);
+    fcntl(error_pipe[0], F_SETFL, fcntl(error_pipe[0], F_GETFL, 0) | O_NONBLOCK);
+    char *output = malloc((size_t)maximum + 1), *error_output = malloc((size_t)maximum + 1);
+    if (!output || !error_output) {
+        kill(-pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+        close(output_pipe[0]); close(error_pipe[0]);
+        free(output); free(error_output);
+        return slick_ok(slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("Spawn", -1), "Program", a[0], "Message", slick_rt_string("out of memory", -1), NULL)));
+    }
+    int64_t output_length = 0, error_length = 0, total = 0, cancelled_at = 0;
+    int overflow = 0, output_open = 1, error_open = 1, status = 0, wait_failure = 0;
+    for (;;) {
+        if (cancelled(ctx) && cancelled_at == 0) {
+            cancelled_at = monotonic_milliseconds();
+            kill(-pid, SIGTERM);
         }
-        struct pollfd fds[2] = {{outp[0], POLLIN, 0}, {errp[0], POLLIN, 0}};
-        int pr = poll(fds, 2, 50);
-        if (pr < 0 && errno != EINTR) break;
-        char tmp[4096];
-        if (fds[0].revents & POLLIN) {
-            ssize_t n = read(outp[0], tmp, sizeof(tmp));
-            if (n > 0) {
-                int64_t take = n;
-                if (total + take > max) { overflow = 1; take = max - total; kill(pid, SIGKILL); }
-                if (take > 0) { memcpy(obuf + olen, tmp, (size_t)take); olen += take; total += take; }
-            }
+        if (cancelled_at && monotonic_milliseconds() - cancelled_at >= 250) kill(-pid, SIGKILL);
+        if (overflow) kill(-pid, SIGKILL);
+        struct pollfd descriptors[2] = {
+            {output_pipe[0], POLLIN | POLLHUP, 0},
+            {error_pipe[0], POLLIN | POLLHUP, 0},
+        };
+        int poll_result = poll(descriptors, 2, 25);
+        if (poll_result < 0 && errno != EINTR) {
+            wait_failure = errno;
+            kill(-pid, SIGKILL);
         }
-        if (fds[1].revents & POLLIN) {
-            ssize_t n = read(errp[0], tmp, sizeof(tmp));
-            if (n > 0) {
-                int64_t take = n;
-                if (total + take > max) { overflow = 1; take = max - total; kill(pid, SIGKILL); }
-                if (take > 0) { memcpy(ebuf + elen, tmp, (size_t)take); elen += take; total += take; }
-            }
+        if (output_open && (poll_result <= 0 || descriptors[0].revents)) {
+            process_capture(output_pipe[0], output, &output_length, &total, maximum, &output_open, &overflow);
         }
-        int status;
-        pid_t w = waitpid(pid, &status, WNOHANG);
-        if (w == pid) {
-            char tmp2[4096];
-            ssize_t n;
-            while ((n = read(outp[0], tmp2, sizeof(tmp2))) > 0) {
-                int64_t take = n;
-                if (total + take > max) { overflow = 1; take = max - total; }
-                if (take > 0) { memcpy(obuf + olen, tmp2, (size_t)take); olen += take; total += take; }
-            }
-            while ((n = read(errp[0], tmp2, sizeof(tmp2))) > 0) {
-                int64_t take = n;
-                if (total + take > max) { overflow = 1; take = max - total; }
-                if (take > 0) { memcpy(ebuf + elen, tmp2, (size_t)take); elen += take; total += take; }
-            }
-            close(outp[0]); close(errp[0]);
-            if (cancelled(ctx)) {
-                return slick_ok(slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("Cancelled", -1), "Program", a[0], "Message", slick_rt_string("operation cancelled; child process was signalled", -1), NULL)));
-            }
-            if (overflow) {
-                char msg[64];
-                snprintf(msg, sizeof(msg), "captured output exceeds %" PRId64 " bytes", max);
-                return slick_ok(slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("OutputLimit", -1), "Program", a[0], "Message", slick_rt_string(msg, -1), NULL)));
-            }
-            if (WIFSIGNALED(status)) {
-                return slick_ok(slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("Signal", -1), "Program", a[0], "Message", slick_rt_string("child process was terminated by a signal", -1), NULL)));
-            }
-            return slick_ok(slick_rt_result(1, make_class("std.process.Completed",
-                "ExitCode", slick_rt_int(WEXITSTATUS(status)),
-                "Output", slick_rt_bytes(obuf, olen),
-                "ErrorOutput", slick_rt_bytes(ebuf, elen), NULL)));
+        if (error_open && (poll_result <= 0 || descriptors[1].revents)) {
+            process_capture(error_pipe[0], error_output, &error_length, &total, maximum, &error_open, &overflow);
+        }
+        pid_t waited = waitpid(pid, &status, WNOHANG);
+        if (waited == pid) break;
+        if (waited < 0 && errno != EINTR) {
+            wait_failure = errno;
+            break;
         }
     }
-    return slick_ok(slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("Wait", -1), "Program", a[0], "Message", slick_rt_string("wait failed", -1), NULL)));
+    process_capture(output_pipe[0], output, &output_length, &total, maximum, &output_open, &overflow);
+    process_capture(error_pipe[0], error_output, &error_length, &total, maximum, &error_open, &overflow);
+    close(output_pipe[0]);
+    close(error_pipe[0]);
+    slick_value result;
+    if (cancelled_at) {
+        result = slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("Cancelled", -1), "Program", a[0], "Message", slick_rt_string("operation cancelled; child process was signalled and reaped", -1), NULL));
+    } else if (overflow) {
+        char message[64];
+        snprintf(message, sizeof(message), "captured output exceeds %" PRId64 " bytes", maximum);
+        result = slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("OutputLimit", -1), "Program", a[0], "Message", slick_rt_string(message, -1), NULL));
+    } else if (wait_failure) {
+        result = slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("Wait", -1), "Program", a[0], "Message", slick_rt_string(strerror(wait_failure), -1), NULL));
+    } else if (WIFSIGNALED(status)) {
+        result = slick_rt_result(0, make_class("std.process.Failure", "Operation", slick_rt_string("Signal", -1), "Program", a[0], "Message", slick_rt_string("child process was terminated by a signal", -1), NULL));
+    } else {
+        result = slick_rt_result(1, make_class("std.process.Completed",
+            "ExitCode", slick_rt_int(WEXITSTATUS(status)),
+            "Output", slick_rt_bytes(output, output_length),
+            "ErrorOutput", slick_rt_bytes(error_output, error_length), NULL));
+    }
+    free(output);
+    free(error_output);
+    return slick_ok(result);
 }
 
 static int valid_token_n(const char *s, size_t n) {
@@ -1145,6 +1352,7 @@ static slick_value http_fail(const char *kind, const char *url, const char *msg,
 
 static char *sanitize_url(const char *raw) {
     char *out = strdup(raw ? raw : "");
+    if (!out) return NULL;
     char *q = strchr(out, '?');
     char *h = strchr(out, '#');
     char *cut = q && h ? (q < h ? q : h) : (q ? q : h);
@@ -1168,10 +1376,6 @@ typedef struct native_map {
     int64_t len;
     native_map_entry *entries;
 } native_map;
-typedef struct native_pair {
-    slick_value first;
-    slick_value second;
-} native_pair;
 
 typedef struct native_class {
     int32_t type_id;
@@ -1205,14 +1409,12 @@ static int slick_value_task_safe(slick_value value) {
     switch (value.kind) {
     case 0: case 1: case 2: case 3: case 4: case 5:
         return 1;
-    case 6: {
+    case 6: case 7: {
         int64_t n = slick_rt_array_len(value);
-        for (int64_t i = 0; i < n; i++) if (!slick_value_task_safe(slick_rt_array_index(value, i))) return 0;
+        for (int64_t i = 0; i < n; i++) {
+            if (!slick_value_task_safe(slick_rt_array_index(value, i))) return 0;
+        }
         return 1;
-    }
-    case 7: {
-        native_pair *pair = (native_pair *)(uintptr_t)value.bits;
-        return pair && slick_value_task_safe(pair->first) && slick_value_task_safe(pair->second);
     }
     case 8: {
         native_map *map = (native_map *)(uintptr_t)value.bits;
@@ -1224,8 +1426,8 @@ static int slick_value_task_safe(slick_value value) {
     case 9:
         return 0;
     case 10: case 11: {
-        native_pair *pair = (native_pair *)(uintptr_t)value.bits;
-        return !pair || slick_value_task_safe(pair->first);
+        slick_value *payload = (slick_value *)(uintptr_t)value.bits;
+        return !payload || slick_value_task_safe(*payload);
     }
     case 12: case 17: {
         native_class *object = (native_class *)(uintptr_t)value.bits;
@@ -1294,6 +1496,7 @@ static void init_curl(void) {
 
 static size_t http_write(char *data, size_t size, size_t count, void *opaque) {
     http_transfer *transfer = opaque;
+    if (size && count > SIZE_MAX / size) return 0;
     size_t n = size * count;
     if (cancelled(transfer->ctx)) return 0;
     if (n > (size_t)INT64_MAX || transfer->length > (size_t)transfer->max ||
@@ -1304,7 +1507,9 @@ static size_t http_write(char *data, size_t size, size_t count, void *opaque) {
     if (transfer->length + n > transfer->capacity) {
         size_t capacity = transfer->capacity ? transfer->capacity * 2 : 4096;
         while (capacity < transfer->length + n) capacity *= 2;
-        transfer->body = realloc(transfer->body, capacity);
+        uint8_t *grown = realloc(transfer->body, capacity);
+        if (!grown) return 0;
+        transfer->body = grown;
         transfer->capacity = capacity;
     }
     memcpy(transfer->body + transfer->length, data, n);
@@ -1314,6 +1519,7 @@ static size_t http_write(char *data, size_t size, size_t count, void *opaque) {
 
 static size_t http_read(char *buffer, size_t size, size_t count, void *opaque) {
     http_transfer *transfer = opaque;
+    if (size && count > SIZE_MAX / size) return CURL_READFUNC_ABORT;
     size_t capacity = size * count;
     size_t remaining = transfer->upload_length - transfer->upload_offset;
     size_t take = remaining < capacity ? remaining : capacity;
@@ -1326,6 +1532,7 @@ static size_t http_read(char *buffer, size_t size, size_t count, void *opaque) {
 
 static size_t http_header(char *data, size_t size, size_t count, void *opaque) {
     http_transfer *transfer = opaque;
+    if (size && count > SIZE_MAX / size) return 0;
     size_t n = size * count;
     if (n >= 5 && strncasecmp(data, "HTTP/", 5) == 0) {
         transfer->headers = slick_rt_empty_map();
@@ -1348,6 +1555,7 @@ static size_t http_header(char *data, size_t size, size_t count, void *opaque) {
         slick_value old = slick_rt_optional_value(found);
         int64_t old_len = slick_rt_array_len(old);
         slick_value *items = malloc(sizeof(*items) * (size_t)(old_len + 1));
+        if (!items) return 0;
         for (int64_t i = 0; i < old_len; i++) items[i] = slick_rt_array_index(old, i);
         items[old_len] = item;
         values = slick_rt_array(6, old_len + 1, items);
@@ -1459,7 +1667,7 @@ slick_outcome slick_nat_http_fetch(slick_ctx *ctx, slick_value *a) {
             slick_value values = headers->entries[i].value;
             int64_t values_len = slick_rt_array_len(values);
             if (values_len == 0) {
-                char message[128];
+                char message[320];
                 snprintf(message, sizeof(message), "%s header values must not be empty", name);
                 char *safe = sanitize_url(url);
                 slick_value failure = http_fail("InvalidRequest", safe, message, slick_rt_none());
@@ -1472,7 +1680,7 @@ slick_outcome slick_nat_http_fetch(slick_ctx *ctx, slick_value *a) {
                 const char *raw = sv_str(value);
                 int64_t length = sv_len(value);
                 if (length < 0 || !valid_field_value(raw, (size_t)length)) {
-                    char message[160];
+                    char message[320];
                     snprintf(message, sizeof(message), "%s header value contains a forbidden control byte", name);
                     char *safe = sanitize_url(url);
                     slick_value failure = http_fail("InvalidRequest", safe, message, slick_rt_none());
@@ -1481,11 +1689,24 @@ slick_outcome slick_nat_http_fetch(slick_ctx *ctx, slick_value *a) {
                 }
                 size_t line_len = strlen(name) + 2 + (size_t)length;
                 char *line = malloc(line_len + 1);
+                if (!line) {
+                    char *safe = sanitize_url(url);
+                    slick_value failure = http_fail("Network", safe, "out of memory", slick_rt_none());
+                    free(safe); curl_slist_free_all(request_headers);
+                    return slick_ok(slick_rt_result(0, failure));
+                }
                 snprintf(line, line_len + 1, "%s: ", name);
                 memcpy(line + strlen(name) + 2, raw, (size_t)length);
                 line[line_len] = 0;
-                request_headers = curl_slist_append(request_headers, line);
+                struct curl_slist *grown_headers = curl_slist_append(request_headers, line);
                 free(line);
+                if (!grown_headers) {
+                    char *safe = sanitize_url(url);
+                    slick_value failure = http_fail("Network", safe, "out of memory", slick_rt_none());
+                    free(safe); curl_slist_free_all(request_headers);
+                    return slick_ok(slick_rt_result(0, failure));
+                }
+                request_headers = grown_headers;
             }
         }
     }
@@ -1605,7 +1826,7 @@ typedef struct http_server {
     int64_t read_timeout_ms;
     int64_t write_timeout_ms;
     int64_t shutdown_timeout_ms;
-    volatile int stop;
+    int stop;
     pthread_mutex_t workers_mutex;
     int workers;
 } http_server;
@@ -1617,6 +1838,7 @@ typedef struct http_handler_job {
     slick_outcome outcome;
     pthread_mutex_t mutex;
     int done;
+    void *arena;
 } http_handler_job;
 
 static void *http_server_loop(void *arg);
@@ -1677,17 +1899,14 @@ slick_outcome slick_nat_http_serve(slick_ctx *ctx, slick_value *a) {
         return slick_ok(slick_rt_result(0, http_server_fail("Bind", addr, "failed to bind listen address")));
     }
     int fd = -1;
-    int bind_error = EADDRNOTAVAIL;
     for (struct addrinfo *candidate = addresses; candidate; candidate = candidate->ai_next) {
         fd = socket(candidate->ai_family, candidate->ai_socktype, candidate->ai_protocol);
         if (fd < 0) {
-            bind_error = errno;
             continue;
         }
         int yes = 1;
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
         if (bind(fd, candidate->ai_addr, candidate->ai_addrlen) == 0 && listen(fd, 128) == 0) break;
-        bind_error = errno;
         close(fd);
         fd = -1;
     }
@@ -1696,6 +1915,10 @@ slick_outcome slick_nat_http_serve(slick_ctx *ctx, slick_value *a) {
         return slick_ok(slick_rt_result(0, http_server_fail("Bind", addr, "failed to bind listen address")));
     }
     http_server *srv = calloc(1, sizeof(*srv));
+    if (!srv) {
+        close(fd);
+        return slick_ok(slick_rt_result(0, http_server_fail("Serve", addr, "out of memory")));
+    }
     srv->ctx = ctx;
     srv->handler = a[1];
     srv->fd = fd;
@@ -1718,22 +1941,33 @@ slick_outcome slick_nat_http_serve(slick_ctx *ctx, slick_value *a) {
     pthread_t accept_thread;
     if (pthread_create(&accept_thread, NULL, http_server_loop, srv) != 0) {
         close(fd);
+        pthread_mutex_destroy(&srv->workers_mutex);
+        free(srv);
         return slick_ok(slick_rt_result(0, http_server_fail("Serve", addr, "failed to start HTTP server")));
     }
-    while (!cancelled(ctx) && !srv->stop) usleep(10000);
-    srv->stop = 1;
+    while (!cancelled(ctx) && !__atomic_load_n(&srv->stop, __ATOMIC_ACQUIRE)) usleep(10000);
+    __atomic_store_n(&srv->stop, 1, __ATOMIC_RELEASE);
     shutdown(fd, SHUT_RDWR);
     close(fd);
     pthread_join(accept_thread, NULL);
     int64_t waited_ms = 0;
-    while (waited_ms < srv->shutdown_timeout_ms) {
+    int workers;
+    do {
         pthread_mutex_lock(&srv->workers_mutex);
-        int workers = srv->workers;
+        workers = srv->workers;
         pthread_mutex_unlock(&srv->workers_mutex);
         if (workers == 0) break;
         usleep(10000);
         waited_ms += 10;
+    } while (waited_ms < srv->shutdown_timeout_ms);
+    while (workers != 0) {
+        pthread_mutex_lock(&srv->workers_mutex);
+        workers = srv->workers;
+        pthread_mutex_unlock(&srv->workers_mutex);
+        if (workers != 0) usleep(10000);
     }
+    pthread_mutex_destroy(&srv->workers_mutex);
+    free(srv);
     return slick_ok(slick_rt_result(1, (slick_value){0, 0, 0}));
 }
 
@@ -1883,7 +2117,9 @@ static int http_hop_header(const char *name, char **nominated, size_t nominated_
 
 static void *http_run_handler(void *argument) {
     http_handler_job *job = argument;
+    void *previous_arena = slick_rt_arena_enter(job->arena);
     job->outcome = slick_rt_iface_call(&job->ctx, job->server->handler, 0, 1, &job->request);
+    slick_rt_arena_enter(previous_arena);
     pthread_mutex_lock(&job->mutex);
     job->done = 1;
     pthread_mutex_unlock(&job->mutex);
@@ -1950,7 +2186,140 @@ static void http_worker_finished(http_server *server) {
     pthread_mutex_unlock(&server->workers_mutex);
 }
 
-static void *http_connection_main(void *argument) {
+typedef struct {
+    int fd;
+    const uint8_t *buffer;
+    size_t length;
+    size_t offset;
+} http_input;
+
+static int http_input_read(http_input *input, void *destination, size_t length) {
+    uint8_t *output = destination;
+    while (length > 0) {
+        if (input->offset < input->length) {
+            size_t available = input->length - input->offset;
+            size_t count = available < length ? available : length;
+            memcpy(output, input->buffer + input->offset, count);
+            input->offset += count;
+            output += count;
+            length -= count;
+            continue;
+        }
+        ssize_t count = recv(input->fd, output, length, 0);
+        if (count <= 0) return 0;
+        output += (size_t)count;
+        length -= (size_t)count;
+    }
+    return 1;
+}
+
+static int http_input_line(http_input *input, char *line, size_t capacity) {
+    size_t length = 0;
+    for (;;) {
+        uint8_t byte;
+        if (!http_input_read(input, &byte, 1)) return 0;
+        if (byte == '\r') {
+            if (!http_input_read(input, &byte, 1) || byte != '\n') return 0;
+            line[length] = 0;
+            return 1;
+        }
+        if (byte == '\n' || length + 1 >= capacity) return 0;
+        line[length++] = (char)byte;
+    }
+}
+
+// Returns 1 on success, 2 when the decoded body exceeds max_body, and 0 for
+// malformed or incomplete framing.
+static int http_read_chunked(http_input *input, int64_t max_body, int64_t max_header,
+    uint8_t **body, int64_t *body_length) {
+    uint8_t *output = NULL;
+    size_t length = 0, capacity = 0, trailer_bytes = 0;
+    char line[1024];
+    for (;;) {
+        if (!http_input_line(input, line, sizeof(line))) {
+            free(output);
+            return 0;
+        }
+        char *size_text = http_trim(line);
+        char *extension = strchr(size_text, ';');
+        if (extension) *extension = 0;
+        size_text = http_trim(size_text);
+        if (!*size_text) {
+            free(output);
+            return 0;
+        }
+        uint64_t chunk = 0;
+        for (char *cursor = size_text; *cursor; cursor++) {
+            unsigned digit;
+            if (*cursor >= '0' && *cursor <= '9') digit = (unsigned)(*cursor - '0');
+            else if (*cursor >= 'a' && *cursor <= 'f') digit = (unsigned)(*cursor - 'a' + 10);
+            else if (*cursor >= 'A' && *cursor <= 'F') digit = (unsigned)(*cursor - 'A' + 10);
+            else {
+                free(output);
+                return 0;
+            }
+            if (chunk > (UINT64_MAX - digit) / 16) {
+                free(output);
+                return 0;
+            }
+            chunk = chunk * 16 + digit;
+        }
+        if (chunk == 0) {
+            for (;;) {
+                if (!http_input_line(input, line, sizeof(line))) {
+                    free(output);
+                    return 0;
+                }
+                trailer_bytes += strlen(line) + 2;
+                if (trailer_bytes > (size_t)max_header) {
+                    free(output);
+                    return 0;
+                }
+                if (!*line) {
+                    *body = output;
+                    *body_length = (int64_t)length;
+                    return 1;
+                }
+            }
+        }
+        if (chunk > (uint64_t)max_body || length > (size_t)max_body - (size_t)chunk) {
+            free(output);
+            return 2;
+        }
+        size_t needed = length + (size_t)chunk;
+        if (needed > capacity) {
+            size_t grown = capacity ? capacity : ((size_t)max_body < 4096 ? (size_t)max_body : 4096);
+            while (grown < needed) {
+                size_t next = grown <= (size_t)max_body / 2 ? grown * 2 : (size_t)max_body;
+                if (next <= grown) {
+                    grown = needed;
+                    break;
+                }
+                grown = next;
+            }
+            uint8_t *resized = realloc(output, grown);
+            if (!resized) {
+                free(output);
+                fprintf(stderr, "slick: out of memory\n");
+                abort();
+            }
+            output = resized;
+            capacity = grown;
+        }
+        if (!http_input_read(input, output + length, (size_t)chunk)) {
+            free(output);
+            return 0;
+        }
+        length = needed;
+        uint8_t ending[2];
+        if (!http_input_read(input, ending, sizeof(ending)) || ending[0] != '\r' || ending[1] != '\n') {
+            free(output);
+            return 0;
+        }
+    }
+}
+
+static void *http_connection_run(void *argument) {
     http_connection *connection = argument;
     http_server *server = connection->server;
     int fd = connection->fd;
@@ -2023,7 +2392,7 @@ static void *http_connection_main(void *argument) {
     http_server_header *parsed = NULL;
     size_t parsed_count = 0;
     int64_t content_length = 0;
-    int content_length_seen = 0;
+    int content_length_seen = 0, transfer_encoding_seen = 0, transfer_encoding_supported = 1;
     char *line = request_line_end + 2;
     while (line < header_end) {
         char *line_end = strstr(line, "\r\n");
@@ -2067,7 +2436,24 @@ static void *http_connection_main(void *argument) {
             content_length = length;
             content_length_seen = 1;
         }
+        if (strcasecmp(name, "Transfer-Encoding") == 0) {
+            transfer_encoding_seen++;
+            if (strcasecmp(value, "chunked") != 0) transfer_encoding_supported = 0;
+        }
         line = line_end + 2;
+    }
+    if ((transfer_encoding_seen && content_length_seen) || transfer_encoding_seen > 1 ||
+        (transfer_encoding_seen && !transfer_encoding_supported)) {
+        int unsupported = transfer_encoding_seen == 1 && !content_length_seen &&
+            !transfer_encoding_supported;
+        http_simple_response(fd, unsupported ? 501 : 400,
+            unsupported ? "Not Implemented" : "Bad Request");
+        for (size_t i = 0; i < parsed_count; i++) free(parsed[i].name);
+        free(parsed);
+        free(buffer);
+        close(fd);
+        http_worker_finished(server);
+        return NULL;
     }
     if (content_length > server->max_body) {
         http_simple_response(fd, 413, "Payload Too Large");
@@ -2111,9 +2497,26 @@ static void *http_connection_main(void *argument) {
     free(parsed);
 
     uint8_t *body = NULL;
-    if (content_length > 0) {
+    int64_t body_length = content_length;
+    size_t available = used > header_bytes ? used - header_bytes : 0;
+    if (transfer_encoding_seen) {
+        http_input input = {
+            .fd = fd,
+            .buffer = (const uint8_t *)buffer + header_bytes,
+            .length = available,
+        };
+        int framing = http_read_chunked(&input, server->max_body, server->max_header,
+            &body, &body_length);
+        if (framing != 1) {
+            http_simple_response(fd, framing == 2 ? 413 : 400,
+                framing == 2 ? "Payload Too Large" : "Bad Request");
+            free(buffer);
+            close(fd);
+            http_worker_finished(server);
+            return NULL;
+        }
+    } else if (content_length > 0) {
         body = malloc((size_t)content_length);
-        size_t available = used > header_bytes ? used - header_bytes : 0;
         if (available > (size_t)content_length) available = (size_t)content_length;
         memcpy(body, buffer + header_bytes, available);
         size_t received = available;
@@ -2150,13 +2553,14 @@ static void *http_connection_main(void *argument) {
         "Path", slick_rt_string(target, -1),
         "Query", query,
         "Headers", headers,
-        "Body", slick_rt_bytes(body, content_length), NULL);
+        "Body", slick_rt_bytes(body, body_length), NULL);
     free(target);
     free(body);
 
     http_handler_job job = {
         .server = server,
-        .ctx = {0, NULL},
+        .ctx = {0, NULL, server->ctx},
+        .arena = slick_rt_arena_current(),
         .request = request,
     };
     pthread_mutex_init(&job.mutex, NULL);
@@ -2170,17 +2574,20 @@ static void *http_connection_main(void *argument) {
             int done = job.done;
             pthread_mutex_unlock(&job.mutex);
             if (done) break;
-            if (cancelled(server->ctx) || server->stop) job.ctx.cancelled = 1;
+            if (cancelled(server->ctx) || __atomic_load_n(&server->stop, __ATOMIC_ACQUIRE)) {
+                __atomic_store_n(&job.ctx.cancelled, 1, __ATOMIC_RELEASE);
+            }
             char probe;
             ssize_t peeked = recv(fd, &probe, 1, MSG_PEEK | MSG_DONTWAIT);
             if (peeked == 0) {
                 client_cancelled = 1;
-                job.ctx.cancelled = 1;
+                __atomic_store_n(&job.ctx.cancelled, 1, __ATOMIC_RELEASE);
             }
             usleep(10000);
         }
         pthread_join(handler_thread, NULL);
-        if (!client_cancelled && !cancelled(server->ctx) && !server->stop) {
+        if (!client_cancelled && !cancelled(server->ctx) &&
+            !__atomic_load_n(&server->stop, __ATOMIC_ACQUIRE)) {
             http_send_handler_response(fd, method, job.outcome);
         }
     }
@@ -2190,15 +2597,22 @@ static void *http_connection_main(void *argument) {
     http_worker_finished(server);
     return NULL;
 }
+static void *http_connection_main(void *argument) {
+    void *arena = slick_rt_arena_push();
+    void *result = http_connection_run(argument);
+    slick_rt_arena_pop(arena);
+    return result;
+}
+
 
 static void *http_server_loop(void *argument) {
     http_server *server = argument;
-    while (!server->stop) {
+    while (!__atomic_load_n(&server->stop, __ATOMIC_ACQUIRE)) {
         struct sockaddr_storage address;
         socklen_t address_length = sizeof(address);
         int fd = accept(server->fd, (struct sockaddr *)&address, &address_length);
         if (fd < 0) {
-            if (server->stop) break;
+            if (__atomic_load_n(&server->stop, __ATOMIC_ACQUIRE)) break;
             continue;
         }
         http_connection *connection = malloc(sizeof(*connection));
@@ -2220,185 +2634,484 @@ static void *http_server_loop(void *argument) {
 }
 
 #ifdef SLICK_HAS_SQLITE
-typedef struct { sqlite3 *db; int closed; pthread_mutex_t mu; int has_tx; } sdb;
-typedef struct { sdb *owner; int closed; int active; } stx;
+typedef struct sqlite_transaction sqlite_transaction;
+typedef struct {
+    sqlite3 *db;
+    int closed;
+    pthread_mutex_t mu;
+    sqlite_transaction *active_transaction;
+} sdb;
+struct sqlite_transaction {
+    sdb *owner;
+    int closed;
+    int active;
+};
+typedef sqlite_transaction stx;
+typedef struct { int32_t type_id; int32_t tag; int32_t field_count; slick_value *fields; } sqlite_union;
 
-static slick_value sqlite_fail(const char *op, int *code, const char *msg) {
-    slick_value c = code ? slick_rt_some(slick_rt_int(*code)) : slick_rt_none();
-    return make_class("std.sqlite.Failure", "Operation", slick_rt_string(op, -1), "Code", c, "Message", slick_rt_string(msg, -1), NULL);
+static slick_value sqlite_fail(const char *operation, int *code, const char *message) {
+    slick_value value = code ? slick_rt_some(slick_rt_int(*code)) : slick_rt_none();
+    return make_class("std.sqlite.Failure", "Operation", slick_rt_string(operation, -1),
+        "Code", value, "Message", slick_rt_string(message, -1), NULL);
 }
 
-static int bind_params(sqlite3_stmt *st, slick_value params) {
-    int64_t n = slick_rt_array_len(params);
-    for (int64_t i = 0; i < n; i++) {
-        slick_value v = slick_rt_array_index(params, i);
-        int tag = v.flags;
-        if (v.kind == 13) tag = v.flags;
-        typedef struct { int32_t type_id; int32_t tag; int32_t field_count; slick_value *fields; } uobj;
-        uobj *u = (uobj *)(uintptr_t)v.bits;
-        int t = u ? u->tag : 0;
-        if (t == 1) sqlite3_bind_null(st, (int)i + 1);
-        else if (t == 2) sqlite3_bind_int64(st, (int)i + 1, u->fields[0].bits);
-        else if (t == 3) {
-            double d; memcpy(&d, &u->fields[0].bits, sizeof(double));
-            sqlite3_bind_double(st, (int)i + 1, d);
-        } else if (t == 4) sqlite3_bind_text(st, (int)i + 1, sv_str(u->fields[0]), (int)sv_len(u->fields[0]), SQLITE_TRANSIENT);
-        else if (t == 5) sqlite3_bind_blob(st, (int)i + 1, sv_data(u->fields[0]), (int)sv_len(u->fields[0]), SQLITE_TRANSIENT);
+static int sqlite_cancelled(void *context) {
+    return cancelled(context);
+}
+static int sqlite_lock(sdb *database, slick_ctx *context) {
+    for (;;) {
+        int result = pthread_mutex_trylock(&database->mu);
+        if (result == 0) return 1;
+        if (result != EBUSY || cancelled(context)) return 0;
+        usleep(10000);
     }
-    return 0;
 }
 
-static slick_value sqlite_value(int type, sqlite3_stmt *st, int col) {
-    int uid = slick_rt_union_id("std.sqlite.Value");
-    if (type == SQLITE_NULL) return slick_rt_union(uid, 1, 0, NULL);
+
+static int sqlite_prepare_one(sqlite3 *database, slick_value sql_value, sqlite3_stmt **statement,
+    const char **detail) {
+    int64_t length = sv_len(sql_value);
+    if (length <= 0) {
+        *detail = "SQL statement must not be empty";
+        return SQLITE_MISUSE;
+    }
+    if (length > INT_MAX) {
+        *detail = "SQL statement is too large";
+        return SQLITE_TOOBIG;
+    }
+    const char *sql = sv_str(sql_value), *tail = NULL;
+    int result = sqlite3_prepare_v2(database, sql, (int)length, statement, &tail);
+    if (result != SQLITE_OK) return result;
+    if (!*statement) {
+        *detail = "SQL statement must not be empty";
+        return SQLITE_MISUSE;
+    }
+    const char *end = sql + length;
+    while (tail < end) {
+        sqlite3_stmt *extra = NULL;
+        const char *next = NULL;
+        result = sqlite3_prepare_v2(database, tail, (int)(end - tail), &extra, &next);
+        if (result != SQLITE_OK) return result;
+        if (extra) {
+            sqlite3_finalize(extra);
+            *detail = "statement contains multiple SQL statements";
+            return SQLITE_MISUSE;
+        }
+        if (!next || next <= tail) break;
+        tail = next;
+    }
+    return SQLITE_OK;
+}
+
+static int sqlite_bind_params(sqlite3_stmt *statement, slick_value parameters, const char **detail) {
+    int64_t count = slick_rt_array_len(parameters);
+    if (count != sqlite3_bind_parameter_count(statement)) {
+        *detail = "parameter count does not match SQL placeholders";
+        return SQLITE_RANGE;
+    }
+    for (int64_t index = 0; index < count; index++) {
+        slick_value value = slick_rt_array_index(parameters, index);
+        sqlite_union *variant = value.kind == 13 ? (sqlite_union *)(uintptr_t)value.bits : NULL;
+        if (!variant || variant->tag < 1 || variant->tag > 5 ||
+            (variant->tag == 1 ? variant->field_count != 0 : variant->field_count != 1)) {
+            *detail = "invalid SQLite parameter value";
+            return SQLITE_MISMATCH;
+        }
+        int result = SQLITE_MISMATCH;
+        if (variant->tag == 1) {
+            result = sqlite3_bind_null(statement, (int)index + 1);
+        } else if (variant->tag == 2 && variant->fields[0].kind == 2) {
+            result = sqlite3_bind_int64(statement, (int)index + 1, variant->fields[0].bits);
+        } else if (variant->tag == 3 && variant->fields[0].kind == 3) {
+            double number;
+            memcpy(&number, &variant->fields[0].bits, sizeof(number));
+            if (!isfinite(number)) {
+                *detail = "cannot bind non-finite floating-point value";
+                return SQLITE_MISMATCH;
+            }
+            result = sqlite3_bind_double(statement, (int)index + 1, number);
+        } else if (variant->tag == 4 && variant->fields[0].kind == 4) {
+            if (!utf8_valid(sv_data(variant->fields[0]), sv_len(variant->fields[0])).bits) {
+                *detail = "text parameter contains invalid UTF-8";
+                return SQLITE_MISMATCH;
+            }
+            result = sqlite3_bind_text64(statement, (int)index + 1, sv_str(variant->fields[0]),
+                (sqlite3_uint64)sv_len(variant->fields[0]), SQLITE_TRANSIENT, SQLITE_UTF8);
+        } else if (variant->tag == 5 && variant->fields[0].kind == 5) {
+            result = sqlite3_bind_blob64(statement, (int)index + 1, sv_data(variant->fields[0]),
+                (sqlite3_uint64)sv_len(variant->fields[0]), SQLITE_TRANSIENT);
+        } else {
+            *detail = "invalid SQLite parameter payload";
+            return SQLITE_MISMATCH;
+        }
+        if (result != SQLITE_OK) return result;
+    }
+    return SQLITE_OK;
+}
+
+static slick_value sqlite_value(int type, sqlite3_stmt *statement, int column) {
+    int union_id = slick_rt_union_id("std.sqlite.Value");
+    if (type == SQLITE_NULL) return slick_rt_union(union_id, 1, 0, NULL);
     if (type == SQLITE_INTEGER) {
-        slick_value v = slick_rt_int(sqlite3_column_int64(st, col));
-        return slick_rt_union(uid, 2, 1, &v);
+        slick_value value = slick_rt_int(sqlite3_column_int64(statement, column));
+        return slick_rt_union(union_id, 2, 1, &value);
     }
     if (type == SQLITE_FLOAT) {
-        slick_value v = slick_rt_float(sqlite3_column_double(st, col));
-        return slick_rt_union(uid, 3, 1, &v);
+        slick_value value = slick_rt_float(sqlite3_column_double(statement, column));
+        return slick_rt_union(union_id, 3, 1, &value);
     }
+    int length = sqlite3_column_bytes(statement, column);
     if (type == SQLITE_BLOB) {
-        const void *p = sqlite3_column_blob(st, col);
-        int n = sqlite3_column_bytes(st, col);
-        slick_value v = slick_rt_bytes(p, n);
-        return slick_rt_union(uid, 5, 1, &v);
+        slick_value value = slick_rt_bytes(sqlite3_column_blob(statement, column), length);
+        return slick_rt_union(union_id, 5, 1, &value);
     }
-    const unsigned char *t = sqlite3_column_text(st, col);
-    slick_value v = slick_rt_string((const char *)t, -1);
-    return slick_rt_union(uid, 4, 1, &v);
+    slick_value value = slick_rt_string((const char *)sqlite3_column_text(statement, column), length);
+    return slick_rt_union(union_id, 4, 1, &value);
 }
 
-slick_outcome slick_nat_sqlite_open(slick_ctx *c, slick_value *a) {
-    (void)c;
-    sqlite3 *db = NULL;
-    int rc = sqlite3_open(sv_str(a[0]), &db);
-    if (rc != SQLITE_OK) {
-        int code = rc;
-        const char *msg = db ? sqlite3_errmsg(db) : "open failed";
-        if (db) sqlite3_close(db);
-        return slick_ok(slick_rt_result(0, sqlite_fail("Open", &code, msg)));
+slick_outcome slick_nat_sqlite_open(slick_ctx *context, slick_value *arguments) {
+    if (cancelled(context)) {
+        return slick_ok(slick_rt_result(0, sqlite_fail("Open", NULL, "operation cancelled")));
     }
-    sdb *h = calloc(1, sizeof(*h));
-    h->db = db;
-    pthread_mutex_init(&h->mu, NULL);
-    slick_value obj = make_class("std.sqlite.Database", NULL);
-    set_resource(obj, h);
-    return slick_ok(slick_rt_result(1, obj));
-}
-
-static slick_outcome sqlite_exec(slick_ctx *c, sdb *db, slick_value stmt) {
-    if (!db || db->closed) return slick_ok(slick_rt_result(0, sqlite_fail("Execute", NULL, "database is closed")));
-    if (cancelled(c)) return slick_ok(slick_rt_result(0, sqlite_fail("Execute", NULL, "operation cancelled")));
-    sqlite3_stmt *st = NULL;
-    int rc = sqlite3_prepare_v2(db->db, sv_str(class_field(stmt, "SQL")), -1, &st, NULL);
-    if (rc != SQLITE_OK) {
-        int code = rc;
-        return slick_ok(slick_rt_result(0, sqlite_fail("Execute", &code, sqlite3_errmsg(db->db))));
+    if (memchr(sv_data(arguments[0]), 0, (size_t)sv_len(arguments[0]))) {
+        return slick_ok(slick_rt_result(0, sqlite_fail("Open", NULL, "path contains NUL")));
     }
-    bind_params(st, class_field(stmt, "Parameters"));
-    rc = sqlite3_step(st);
-    if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
-        int code = rc;
-        sqlite3_finalize(st);
-        return slick_ok(slick_rt_result(0, sqlite_fail("Execute", &code, sqlite3_errmsg(db->db))));
-    }
-    int64_t changes = sqlite3_changes64(db->db);
-    sqlite3_int64 last = sqlite3_last_insert_rowid(db->db);
-    sqlite3_finalize(st);
-    return slick_ok(slick_rt_result(1, make_class("std.sqlite.Execution",
-        "RowsAffected", slick_rt_int(changes),
-        "LastInsertId", slick_rt_some(slick_rt_int(last)), NULL)));
-}
-
-static slick_outcome sqlite_query(slick_ctx *c, sdb *db, slick_value q) {
-    if (!db || db->closed) return slick_ok(slick_rt_result(0, sqlite_fail("Query", NULL, "database is closed")));
-    if (cancelled(c)) return slick_ok(slick_rt_result(0, sqlite_fail("Query", NULL, "operation cancelled")));
-    sqlite3_stmt *st = NULL;
-    int rc = sqlite3_prepare_v2(db->db, sv_str(class_field(q, "SQL")), -1, &st, NULL);
-    if (rc != SQLITE_OK) {
-        int code = rc;
-        return slick_ok(slick_rt_result(0, sqlite_fail("Query", &code, sqlite3_errmsg(db->db))));
-    }
-    bind_params(st, class_field(q, "Parameters"));
-    int64_t max_rows = class_field(q, "MaxRows").bits;
-    slick_value *rows = NULL;
-    int64_t n = 0;
-    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
-        if (n >= max_rows) break;
-        int cols = sqlite3_column_count(st);
-        slick_value map = slick_rt_empty_map();
-        for (int i = 0; i < cols; i++) {
-            map = slick_rt_map_with(map, slick_rt_string(sqlite3_column_name(st, i), -1),
-                sqlite_value(sqlite3_column_type(st, i), st, i));
+    const char *path = sv_str(arguments[0]);
+    if (strcmp(path, ":memory:") != 0) {
+        char *parent = strdup(path);
+        char *slash = strrchr(parent, '/');
+        if (slash) {
+            if (slash == parent) slash[1] = 0;
+            else *slash = 0;
+            struct stat status;
+            if (strcmp(parent, ".") != 0 && strcmp(parent, "/") != 0 &&
+                (stat(parent, &status) != 0 || !S_ISDIR(status.st_mode))) {
+                size_t length = strlen(parent) + 38;
+                char *message = malloc(length);
+                snprintf(message, length, "parent directory does not exist: %s", parent);
+                slick_value failure = sqlite_fail("Open", NULL, message);
+                free(message);
+                free(parent);
+                return slick_ok(slick_rt_result(0, failure));
+            }
         }
-        rows = realloc(rows, sizeof(slick_value) * (size_t)(n + 1));
-        rows[n++] = make_class("std.sqlite.Row", "Values", map, NULL);
+        free(parent);
     }
-    sqlite3_finalize(st);
-    return slick_ok(slick_rt_result(1, slick_rt_array(6, n, rows)));
+    sqlite3 *database = NULL;
+    int result = sqlite3_open_v2(sv_str(arguments[0]), &database,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, NULL);
+    if (result != SQLITE_OK) {
+        int code = result;
+        slick_value failure = sqlite_fail("Open", &code, database ? sqlite3_errmsg(database) : "open failed");
+        if (database) sqlite3_close(database);
+        return slick_ok(slick_rt_result(0, failure));
+    }
+    sdb *handle = calloc(1, sizeof(*handle));
+    if (!handle) {
+        sqlite3_close(database);
+        return slick_ok(slick_rt_result(0, sqlite_fail("Open", NULL, "out of memory")));
+    }
+    handle->db = database;
+    pthread_mutex_init(&handle->mu, NULL);
+    slick_value object = make_class("std.sqlite.Database", NULL);
+    set_resource(object, handle);
+    return slick_ok(slick_rt_result(1, object));
 }
 
-slick_outcome slick_nat_sqlite_db_exec(slick_ctx *c, slick_value *a) { return sqlite_exec(c, get_resource(a[0]), a[1]); }
-slick_outcome slick_nat_sqlite_db_query(slick_ctx *c, slick_value *a) { return sqlite_query(c, get_resource(a[0]), a[1]); }
-slick_outcome slick_nat_sqlite_db_begin(slick_ctx *c, slick_value *a) {
-    (void)c;
-    sdb *db = get_resource(a[0]);
-    if (!db || db->closed) return slick_ok(slick_rt_result(0, sqlite_fail("Begin", NULL, "database is closed")));
-    char *err = NULL;
-    if (sqlite3_exec(db->db, "BEGIN", NULL, NULL, &err) != SQLITE_OK) {
-        slick_value f = sqlite_fail("Begin", NULL, err ? err : "begin failed");
-        sqlite3_free(err);
-        return slick_ok(slick_rt_result(0, f));
+static slick_outcome sqlite_execute(slick_ctx *context, sdb *database, slick_value descriptor,
+    stx *transaction) {
+    if (!database) return slick_ok(slick_rt_result(0, sqlite_fail("Execute", NULL, "database is closed")));
+    if (!sqlite_lock(database, context)) {
+        return slick_ok(slick_rt_result(0, sqlite_fail("Execute", NULL, "operation cancelled")));
     }
-    stx *tx = calloc(1, sizeof(*tx));
-    tx->owner = db;
-    tx->active = 1;
-    db->has_tx = 1;
-    slick_value obj = make_class("std.sqlite.Transaction", NULL);
-    set_resource(obj, tx);
-    return slick_ok(slick_rt_result(1, obj));
+    if ((transaction && !transaction->active) || database->closed ||
+        (!transaction && database->active_transaction)) {
+        const char *message = transaction && !transaction->active ? "transaction is closed" :
+            database->closed ? "database is closed" : "a transaction is already active";
+        pthread_mutex_unlock(&database->mu);
+        return slick_ok(slick_rt_result(0, sqlite_fail("Execute", NULL, message)));
+    }
+    if (cancelled(context)) {
+        pthread_mutex_unlock(&database->mu);
+        return slick_ok(slick_rt_result(0, sqlite_fail("Execute", NULL, "operation cancelled")));
+    }
+    sqlite3_progress_handler(database->db, 1000, sqlite_cancelled, context);
+    sqlite3_stmt *statement = NULL;
+    const char *detail = NULL;
+    int result = sqlite_prepare_one(database->db, class_field(descriptor, "SQL"), &statement, &detail);
+    if (result == SQLITE_OK) result = sqlite_bind_params(statement, class_field(descriptor, "Parameters"), &detail);
+    if (result == SQLITE_OK) result = sqlite3_step(statement);
+    if (result == SQLITE_ROW) result = SQLITE_DONE;
+    if (result != SQLITE_DONE) {
+        int code = result;
+        int *failure_code = detail || cancelled(context) ? NULL : &code;
+        const char *message = cancelled(context) ? "operation cancelled" : (detail ? detail : sqlite3_errmsg(database->db));
+        if (statement) sqlite3_finalize(statement);
+        sqlite3_progress_handler(database->db, 0, NULL, NULL);
+        pthread_mutex_unlock(&database->mu);
+        return slick_ok(slick_rt_result(0, sqlite_fail("Execute", failure_code, message)));
+    }
+    int64_t changes = sqlite3_changes64(database->db);
+    sqlite3_int64 inserted = sqlite3_last_insert_rowid(database->db);
+    sqlite3_finalize(statement);
+    sqlite3_progress_handler(database->db, 0, NULL, NULL);
+    pthread_mutex_unlock(&database->mu);
+    return slick_ok(slick_rt_result(1, make_class("std.sqlite.Execution",
+        "RowsAffected", slick_rt_int(changes), "LastInsertId", slick_rt_some(slick_rt_int(inserted)), NULL)));
 }
-slick_outcome slick_nat_sqlite_db_close(slick_ctx *c, slick_value *a) {
-    (void)c;
-    sdb *db = get_resource(a[0]);
-    if (!db || db->closed) return slick_ok((slick_value){0, 0, 0});
-    db->closed = 1;
-    sqlite3_close(db->db);
+
+static slick_outcome sqlite_query(slick_ctx *context, sdb *database, slick_value descriptor,
+    stx *transaction) {
+    if (!database) return slick_ok(slick_rt_result(0, sqlite_fail("Query", NULL, "database is closed")));
+    int64_t maximum_rows = class_field(descriptor, "MaxRows").bits;
+    int64_t maximum_bytes = class_field(descriptor, "MaxBytes").bits;
+    if (maximum_rows <= 0 || maximum_bytes <= 0) {
+        return slick_ok(slick_rt_result(0, sqlite_fail("Query", NULL, "MaxRows and MaxBytes must be greater than zero")));
+    }
+    if (!sqlite_lock(database, context)) {
+        return slick_ok(slick_rt_result(0, sqlite_fail("Query", NULL, "operation cancelled")));
+    }
+    if ((transaction && !transaction->active) || database->closed ||
+        (!transaction && database->active_transaction)) {
+        const char *message = transaction && !transaction->active ? "transaction is closed" :
+            database->closed ? "database is closed" : "a transaction is already active";
+        pthread_mutex_unlock(&database->mu);
+        return slick_ok(slick_rt_result(0, sqlite_fail("Query", NULL, message)));
+    }
+    if (cancelled(context)) {
+        pthread_mutex_unlock(&database->mu);
+        return slick_ok(slick_rt_result(0, sqlite_fail("Query", NULL, "operation cancelled")));
+    }
+    sqlite3_progress_handler(database->db, 1000, sqlite_cancelled, context);
+    sqlite3_stmt *statement = NULL;
+    const char *detail = NULL;
+    char detail_buffer[256];
+    int result = sqlite_prepare_one(database->db, class_field(descriptor, "SQL"), &statement, &detail);
+    if (result == SQLITE_OK) result = sqlite_bind_params(statement, class_field(descriptor, "Parameters"), &detail);
+    int columns = result == SQLITE_OK ? sqlite3_column_count(statement) : 0;
+    for (int left = 0; result == SQLITE_OK && left < columns; left++) {
+        for (int right = left + 1; right < columns; right++) {
+            if (strcmp(sqlite3_column_name(statement, left), sqlite3_column_name(statement, right)) == 0) {
+                snprintf(detail_buffer, sizeof(detail_buffer),
+                    "query returned duplicate column name %c%s%c; use SQL aliases",
+                    '"', sqlite3_column_name(statement, left), '"');
+                detail = detail_buffer;
+                result = SQLITE_MISMATCH;
+                break;
+            }
+        }
+    }
+    slick_value *rows = NULL;
+    int64_t row_count = 0, byte_count = 0;
+    while (result == SQLITE_OK && (result = sqlite3_step(statement)) == SQLITE_ROW) {
+        row_count++;
+        if (row_count > maximum_rows) {
+            snprintf(detail_buffer, sizeof(detail_buffer),
+                "query exceeded maximum row limit of %" PRId64, maximum_rows);
+            detail = detail_buffer;
+            result = SQLITE_TOOBIG;
+            break;
+        }
+        slick_value map = slick_rt_empty_map();
+        for (int column = 0; column < columns; column++) {
+            int type = sqlite3_column_type(statement, column);
+            if (type == SQLITE_FLOAT && !isfinite(sqlite3_column_double(statement, column))) {
+                detail = "query returned a non-finite floating-point value";
+                result = SQLITE_MISMATCH;
+                break;
+            }
+            if (type == SQLITE_TEXT && !utf8_valid(sqlite3_column_text(statement, column),
+                    sqlite3_column_bytes(statement, column)).bits) {
+                detail = "query returned invalid UTF-8 text";
+                result = SQLITE_MISMATCH;
+                break;
+            }
+            int64_t size = type == SQLITE_TEXT || type == SQLITE_BLOB ?
+                sqlite3_column_bytes(statement, column) : 8;
+            if (size > maximum_bytes - byte_count) {
+                snprintf(detail_buffer, sizeof(detail_buffer),
+                    "query exceeded maximum byte limit of %" PRId64, maximum_bytes);
+                detail = detail_buffer;
+                result = SQLITE_TOOBIG;
+                break;
+            }
+            byte_count += size;
+            map = slick_rt_map_with(map, slick_rt_string(sqlite3_column_name(statement, column), -1),
+                sqlite_value(type, statement, column));
+        }
+        if (result != SQLITE_ROW) break;
+        slick_value *grown = realloc(rows, sizeof(*rows) * (size_t)row_count);
+        if (!grown) {
+            detail = "out of memory";
+            result = SQLITE_NOMEM;
+            break;
+        }
+        rows = grown;
+        rows[row_count - 1] = make_class("std.sqlite.Row", "Values", map, NULL);
+        result = SQLITE_OK;
+    }
+    if (result == SQLITE_DONE) result = SQLITE_OK;
+    if (result != SQLITE_OK) {
+        int code = result;
+        int *failure_code = detail || cancelled(context) ? NULL : &code;
+        const char *message = cancelled(context) ? "operation cancelled" : (detail ? detail : sqlite3_errmsg(database->db));
+        if (statement) sqlite3_finalize(statement);
+        sqlite3_progress_handler(database->db, 0, NULL, NULL);
+        pthread_mutex_unlock(&database->mu);
+        free(rows);
+        return slick_ok(slick_rt_result(0, sqlite_fail("Query", failure_code, message)));
+    }
+    sqlite3_finalize(statement);
+    sqlite3_progress_handler(database->db, 0, NULL, NULL);
+    pthread_mutex_unlock(&database->mu);
+    slick_value output = slick_rt_array(6, row_count, rows);
+    free(rows);
+    return slick_ok(slick_rt_result(1, output));
+}
+
+slick_outcome slick_nat_sqlite_db_exec(slick_ctx *context, slick_value *arguments) {
+    return sqlite_execute(context, get_resource(arguments[0]), arguments[1], NULL);
+}
+slick_outcome slick_nat_sqlite_db_query(slick_ctx *context, slick_value *arguments) {
+    return sqlite_query(context, get_resource(arguments[0]), arguments[1], NULL);
+}
+slick_outcome slick_nat_sqlite_db_begin(slick_ctx *context, slick_value *arguments) {
+    sdb *database = get_resource(arguments[0]);
+    if (!database) return slick_ok(slick_rt_result(0, sqlite_fail("Begin", NULL, "database is closed")));
+    if (!sqlite_lock(database, context)) {
+        return slick_ok(slick_rt_result(0, sqlite_fail("Begin", NULL, "operation cancelled")));
+    }
+    if (database->closed || database->active_transaction || cancelled(context)) {
+        const char *message = database->closed ? "database is closed" :
+            database->active_transaction ? "a transaction is already active" : "operation cancelled";
+        pthread_mutex_unlock(&database->mu);
+        return slick_ok(slick_rt_result(0, sqlite_fail("Begin", NULL, message)));
+    }
+    char *message = NULL;
+    int result = sqlite3_exec(database->db, "BEGIN", NULL, NULL, &message);
+    if (result != SQLITE_OK) {
+        int code = result;
+        slick_value failure = sqlite_fail("Begin", &code, message ? message : sqlite3_errmsg(database->db));
+        sqlite3_free(message);
+        pthread_mutex_unlock(&database->mu);
+        return slick_ok(slick_rt_result(0, failure));
+    }
+    stx *transaction = calloc(1, sizeof(*transaction));
+    if (!transaction) {
+        sqlite3_exec(database->db, "ROLLBACK", NULL, NULL, NULL);
+        pthread_mutex_unlock(&database->mu);
+        return slick_ok(slick_rt_result(0, sqlite_fail("Begin", NULL, "out of memory")));
+    }
+    transaction->owner = database;
+    transaction->active = 1;
+    database->active_transaction = transaction;
+    pthread_mutex_unlock(&database->mu);
+    slick_value object = make_class("std.sqlite.Transaction", NULL);
+    set_resource(object, transaction);
+    return slick_ok(slick_rt_result(1, object));
+}
+
+slick_outcome slick_nat_sqlite_db_close(slick_ctx *context, slick_value *arguments) {
+    (void)context;
+    sdb *database = get_resource(arguments[0]);
+    if (!database) return slick_ok((slick_value){0, 0, 0});
+    pthread_mutex_lock(&database->mu);
+    if (database->closed) {
+        pthread_mutex_unlock(&database->mu);
+        return slick_ok((slick_value){0, 0, 0});
+    }
+    database->closed = 1;
+    if (database->active_transaction) {
+        database->active_transaction->active = 0;
+        database->active_transaction->closed = 1;
+        sqlite3_exec(database->db, "ROLLBACK", NULL, NULL, NULL);
+        database->active_transaction = NULL;
+    }
+    int result = sqlite3_close(database->db);
+    if (result != SQLITE_OK) {
+        int code = result;
+        slick_value failure = sqlite_fail("Close", &code, sqlite3_errstr(result));
+        pthread_mutex_unlock(&database->mu);
+        return slick_throw(failure);
+    }
+    pthread_mutex_unlock(&database->mu);
     return slick_ok((slick_value){0, 0, 0});
 }
-slick_outcome slick_nat_sqlite_tx_exec(slick_ctx *c, slick_value *a) {
-    stx *tx = get_resource(a[0]);
-    if (!tx || !tx->active) return slick_ok(slick_rt_result(0, sqlite_fail("Execute", NULL, "transaction is closed")));
-    return sqlite_exec(c, tx->owner, a[1]);
+
+slick_outcome slick_nat_sqlite_tx_exec(slick_ctx *context, slick_value *arguments) {
+    stx *transaction = get_resource(arguments[0]);
+    if (!transaction) return slick_ok(slick_rt_result(0, sqlite_fail("Execute", NULL, "transaction is closed")));
+    return sqlite_execute(context, transaction->owner, arguments[1], transaction);
 }
-slick_outcome slick_nat_sqlite_tx_query(slick_ctx *c, slick_value *a) {
-    stx *tx = get_resource(a[0]);
-    if (!tx || !tx->active) return slick_ok(slick_rt_result(0, sqlite_fail("Query", NULL, "transaction is closed")));
-    return sqlite_query(c, tx->owner, a[1]);
+slick_outcome slick_nat_sqlite_tx_query(slick_ctx *context, slick_value *arguments) {
+    stx *transaction = get_resource(arguments[0]);
+    if (!transaction) return slick_ok(slick_rt_result(0, sqlite_fail("Query", NULL, "transaction is closed")));
+    return sqlite_query(context, transaction->owner, arguments[1], transaction);
 }
-static slick_outcome sqlite_tx_end(stx *tx, const char *sql, const char *op) {
-    if (!tx || !tx->active) return slick_ok(slick_rt_result(0, sqlite_fail(op, NULL, "transaction is closed")));
-    char *err = NULL;
-    int rc = sqlite3_exec(tx->owner->db, sql, NULL, NULL, &err);
-    tx->active = 0;
-    tx->owner->has_tx = 0;
-    if (rc != SQLITE_OK) {
-        slick_value f = sqlite_fail(op, NULL, err ? err : op);
-        sqlite3_free(err);
-        return slick_ok(slick_rt_result(0, f));
+
+static slick_outcome sqlite_transaction_end(slick_ctx *context, stx *transaction,
+    const char *sql, const char *operation) {
+    if (!transaction) {
+        return slick_ok(slick_rt_result(0, sqlite_fail(operation, NULL, "transaction is closed")));
+    }
+    sdb *database = transaction->owner;
+    if (!sqlite_lock(database, context)) {
+        return slick_ok(slick_rt_result(0, sqlite_fail(operation, NULL, "operation cancelled")));
+    }
+    if (!transaction->active || database->closed) {
+        pthread_mutex_unlock(&database->mu);
+        return slick_ok(slick_rt_result(0, sqlite_fail(operation, NULL, "transaction is closed")));
+    }
+    if (cancelled(context) && strcmp(operation, "Close") != 0) {
+        pthread_mutex_unlock(&database->mu);
+        return slick_ok(slick_rt_result(0, sqlite_fail(operation, NULL, "operation cancelled")));
+    }
+    char *message = NULL;
+    int result = sqlite3_exec(database->db, sql, NULL, NULL, &message);
+    transaction->active = 0;
+    if (database->active_transaction == transaction) database->active_transaction = NULL;
+    pthread_mutex_unlock(&database->mu);
+    if (result != SQLITE_OK) {
+        int code = result;
+        slick_value failure = sqlite_fail(operation, &code, message ? message : sqlite3_errstr(result));
+        sqlite3_free(message);
+        return slick_ok(slick_rt_result(0, failure));
     }
     return slick_ok(slick_rt_result(1, (slick_value){0, 0, 0}));
 }
-slick_outcome slick_nat_sqlite_tx_commit(slick_ctx *c, slick_value *a) { (void)c; return sqlite_tx_end(get_resource(a[0]), "COMMIT", "Commit"); }
-slick_outcome slick_nat_sqlite_tx_rollback(slick_ctx *c, slick_value *a) { (void)c; return sqlite_tx_end(get_resource(a[0]), "ROLLBACK", "Rollback"); }
-slick_outcome slick_nat_sqlite_tx_close(slick_ctx *c, slick_value *a) {
-    (void)c;
-    stx *tx = get_resource(a[0]);
-    if (!tx || tx->closed) return slick_ok((slick_value){0, 0, 0});
-    if (tx->active) sqlite_tx_end(tx, "ROLLBACK", "Close");
-    tx->closed = 1;
+
+slick_outcome slick_nat_sqlite_tx_commit(slick_ctx *context, slick_value *arguments) {
+    return sqlite_transaction_end(context, get_resource(arguments[0]), "COMMIT", "Commit");
+}
+slick_outcome slick_nat_sqlite_tx_rollback(slick_ctx *context, slick_value *arguments) {
+    return sqlite_transaction_end(context, get_resource(arguments[0]), "ROLLBACK", "Rollback");
+}
+slick_outcome slick_nat_sqlite_tx_close(slick_ctx *context, slick_value *arguments) {
+    (void)context;
+    stx *transaction = get_resource(arguments[0]);
+    if (!transaction) return slick_ok((slick_value){0, 0, 0});
+    sdb *database = transaction->owner;
+    pthread_mutex_lock(&database->mu);
+    if (transaction->closed) {
+        pthread_mutex_unlock(&database->mu);
+        return slick_ok((slick_value){0, 0, 0});
+    }
+    transaction->closed = 1;
+    int result = SQLITE_OK;
+    char *message = NULL;
+    if (transaction->active && !database->closed) {
+        result = sqlite3_exec(database->db, "ROLLBACK", NULL, NULL, &message);
+    }
+    transaction->active = 0;
+    if (database->active_transaction == transaction) database->active_transaction = NULL;
+    pthread_mutex_unlock(&database->mu);
+    if (result != SQLITE_OK) {
+        int code = result;
+        slick_value failure = sqlite_fail("Close", &code,
+            message ? message : sqlite3_errstr(result));
+        sqlite3_free(message);
+        return slick_throw(failure);
+    }
     return slick_ok((slick_value){0, 0, 0});
 }
 #else
