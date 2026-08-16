@@ -189,7 +189,7 @@ type program struct {
 	usesStdProcess     bool
 	usesStdSQLite      bool
 	usesUsing          bool
-	usesAsync          bool
+	usesContext        bool
 }
 
 func newProgram(terminals ...terminalAnnotationDecl) *program {

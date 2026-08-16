@@ -531,6 +531,8 @@ function Squares(Limit: int) -> int[] effects { state } {
 
 The compiler owns `std.buffer`, `std.bytes`, `std.collections`, `std.convert`, `std.env`, `std.fs`, `std.http`, `std.http.server`, `std.io`, `std.json`, `std.math`, `std.path`, `std.process`, `std.sqlite`, `std.text`, `std.unicode`, and `std.utf8`. Do not guess names, arity, optional results, resource rules, failure types, or effects. Discover them from the installed compiler:
 
+Blocking standard-library calls inherit the current HTTP-handler or async-task cancellation scope in both the interpreter and native binaries. Cancellation returns the module's typed failure: `std.http.Failure.Kind` is `Cancelled`; `std.process.Run` signals and reaps its child; a cancelled `std.fs.WriteText` may leave the target truncated or partially written. Whole-file filesystem calls accept regular files and named pipes and reject other non-regular inputs.
+
 ```bash
 slick describe std
 slick describe --json std.fs.ReadText

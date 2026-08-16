@@ -119,6 +119,7 @@ func (p *program) generateGo() (string, error) {
 		p.usesStdProcess = true
 	}
 	generator := &goGenerator{program: p, imports: map[string]bool{
+		"context":       true,
 		"errors":        true,
 		"fmt":           true,
 		"math":          true,
@@ -168,7 +169,7 @@ func (p *program) generateGo() (string, error) {
 			generator.imports[name] = true
 		}
 	}
-	if p.usesAsync {
+	if p.usesContext {
 		generator.imports["context"] = true
 	}
 	// Programs that use std.env need os; it is already imported unconditionally
@@ -196,7 +197,7 @@ func (p *program) generateGo() (string, error) {
 		return "", err
 	}
 	callArguments := make([]string, 0, 2)
-	if p.usesAsync {
+	if p.usesContext {
 		callArguments = append(callArguments, "context.Background()")
 	}
 	if acceptsArguments {
@@ -240,7 +241,7 @@ func (g *goGenerator) emitRuntime() {
 	g.line(`type slickContinue struct{}`)
 	g.line(`func (*slickContinue) Error() string { return "continue" }`)
 	g.line(`func slickIsControl(err error) bool {`)
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		g.line(`var returned *slickReturn; var broken *slickBreak; var continued *slickContinue`)
 		g.line(`return errors.As(err, &returned) || errors.As(err, &broken) || errors.As(err, &continued)`)
 	} else {
@@ -248,12 +249,13 @@ func (g *goGenerator) emitRuntime() {
 		g.line(`return false`)
 	}
 	g.line(`}`)
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		g.emitTaskRuntime()
 	}
 	if g.program.usesUsing {
 		g.emitUsingRuntime()
 	}
+	g.emitStdFSContextRuntime()
 	if g.program.usesStdIO {
 		g.emitStdIORuntime()
 	}
@@ -529,7 +531,7 @@ func (g *goGenerator) emitDeclarations() error {
 			if err != nil {
 				return err
 			}
-			if g.program.usesAsync {
+			if g.program.usesContext {
 				parameters = append([]string{"context.Context"}, parameters...)
 			}
 			g.line("%s(%s) (%s, error)", goMethodName(method.name), strings.Join(parameters, ", "), g.goType(result))
@@ -677,7 +679,7 @@ func (g *goGenerator) emitFunction(function *functionDecl, receiver string) erro
 	}
 	scope := &goScope{function: function, locals: make(map[string]goBinding, len(function.params)+1), pending: make(map[string]string)}
 	parameters := make([]string, 0, len(function.params)+1)
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		parameters = append(parameters, "slickContext context.Context")
 	}
 	for _, parameter := range function.params {
@@ -712,7 +714,7 @@ func (g *goGenerator) emitFunction(function *functionDecl, receiver string) erro
 // itself, and the early-return unwrap. A lambda emits the same shape as a named
 // function, so a return inside a lambda leaves the lambda and nothing else.
 func (g *goGenerator) emitCallableBody(out *strings.Builder, function *functionDecl, scope *goScope, resultType string) error {
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		fmt.Fprintf(out, "if err := slickCheckCancellation(slickContext); err != nil { return %s, err }\n", g.zero(resultType))
 	}
 	body, err := g.blockExpression(function.ast, scope, resultType, "")
@@ -989,7 +991,7 @@ func (g *goGenerator) emitFor(body *strings.Builder, node *forStatement, scope *
 	index := g.unique("index")
 	label := g.unique("loop")
 	fmt.Fprintf(body, "%s: for %s := 0; %s < %s.Len(); %s++ {\n", label, index, index, sequence, index)
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		fmt.Fprintf(body, "if err := slickCheckCancellation(slickContext); err != nil { return %s, err }\n", g.zero(resultType))
 	}
 	loopScope := scope.clone()
@@ -1317,7 +1319,7 @@ func (g *goGenerator) emitUsingExpression(body *strings.Builder, node *usingExpr
 		return err
 	}
 	closeArguments := ""
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		closeArguments = "context.WithoutCancel(slickContext)"
 	}
 	fmt.Fprintf(body, "return slickUsing(%s, func() error { _, err := %s.%s(%s); return err })\n",
@@ -1349,7 +1351,7 @@ func (g *goGenerator) emitLambdaExpression(body *strings.Builder, node *lambdaEx
 		lambdaScope.locals[name] = newGoBinding(captured, binding.typ)
 	}
 	parameters := make([]string, 0, len(node.params)+1)
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		parameters = append(parameters, "slickContext context.Context")
 	}
 	for _, param := range node.params {
@@ -1376,7 +1378,7 @@ func (g *goGenerator) emitLambdaExpression(body *strings.Builder, node *lambdaEx
 // emitCallableCall invokes a callable value. The callee is evaluated once and
 // before any argument, matching the interpreter's order exactly.
 func (g *goGenerator) emitCallableCall(body *strings.Builder, node *callExpression, scope *goScope, resultType string) error {
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		fmt.Fprintf(body, "if err := slickCheckCancellation(slickContext); err != nil { return %s, err }\n", g.zero(resultType))
 	}
 	callee, err := g.evalExpression(body, node.callee, scope, "callee", resultType)
@@ -1384,7 +1386,7 @@ func (g *goGenerator) emitCallableCall(body *strings.Builder, node *callExpressi
 		return err
 	}
 	arguments := make([]string, 0, len(node.args)+1)
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		arguments = append(arguments, "slickContext")
 	}
 	for index, argument := range node.args {
@@ -1413,7 +1415,7 @@ func (g *goGenerator) emitCallExpression(body *strings.Builder, node *callExpres
 	if !ok {
 		return fmt.Errorf("generated call target is not a name")
 	}
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		fmt.Fprintf(body, "if err := slickCheckCancellation(slickContext); err != nil { return %s, err }\n", g.zero(resultType))
 	}
 	arguments := make([]string, 0, len(node.args))
@@ -1524,7 +1526,7 @@ func (g *goGenerator) emitCallExpression(body *strings.Builder, node *callExpres
 		}
 		arguments[index] = g.convert(arguments[index], argumentTypes[index], declared)
 	}
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		arguments = append([]string{"slickContext"}, arguments...)
 	}
 	fmt.Fprintf(body, "return %s(%s)\n", call, strings.Join(arguments, ", "))
@@ -2044,7 +2046,7 @@ func (g *goGenerator) goType(typ string) string {
 	// generated function has, so a named function is already one.
 	if params, result, _, _, callable := callableTypeParts(typ); callable {
 		types := make([]string, 0, len(params)+1)
-		if g.program.usesAsync {
+		if g.program.usesContext {
 			types = append(types, "context.Context")
 		}
 		for _, param := range params {

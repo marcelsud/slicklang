@@ -1,11 +1,94 @@
 package compiler
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+var errFilesystemCancelled = fmt.Errorf("operation cancelled")
+
+func filesystemPathMode(path string, allowMissing bool) (os.FileMode, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if allowMissing && os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	mode := info.Mode()
+	if mode.IsRegular() || mode&os.ModeNamedPipe != 0 {
+		return mode, nil
+	}
+	return 0, fmt.Errorf("non-regular files are not supported")
+}
+
+func unblockFilesystemPipe(path string, writing bool) {
+	flag := os.O_WRONLY
+	if writing {
+		flag = os.O_RDONLY
+	}
+	file, err := os.OpenFile(path, flag, 0)
+	if err == nil {
+		_ = file.Close()
+	}
+}
+
+func filesystemCallContext[T any](ctx context.Context, path string, pipe, writing bool, call func() (T, error)) (T, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var zero T
+	if ctx.Err() != nil {
+		return zero, errFilesystemCancelled
+	}
+	if ctx.Done() == nil {
+		return call()
+	}
+	result := make(chan struct {
+		value T
+		err   error
+	}, 1)
+	go func() {
+		value, err := call()
+		result <- struct {
+			value T
+			err   error
+		}{value: value, err: err}
+	}()
+	select {
+	case completed := <-result:
+		return completed.value, completed.err
+	case <-ctx.Done():
+		if pipe {
+			go unblockFilesystemPipe(path, writing)
+		}
+		return zero, errFilesystemCancelled
+	}
+}
+
+func readTextFileContext(ctx context.Context, path string) ([]byte, error) {
+	mode, err := filesystemPathMode(path, false)
+	if err != nil {
+		return nil, err
+	}
+	return filesystemCallContext(ctx, path, mode&os.ModeNamedPipe != 0, false, func() ([]byte, error) {
+		return os.ReadFile(path)
+	})
+}
+
+func writeTextFileContext(ctx context.Context, path, contents string) error {
+	mode, err := filesystemPathMode(path, true)
+	if err != nil {
+		return err
+	}
+	_, err = filesystemCallContext(ctx, path, mode&os.ModeNamedPipe != 0, true, func() (struct{}, error) {
+		return struct{}{}, os.WriteFile(path, []byte(contents), 0o666)
+	})
+	return err
+}
 
 // nativeTemporaryDirectory owns exactly one created directory. Close removes
 // that directory and nothing else, so a TemporaryDirectory built from an
@@ -155,6 +238,44 @@ func (g *goGenerator) emitNativeStdFSFunction(function *functionDecl, resultType
 		g.line("return %s{ok: true, value: %s{%s: path, slickResource: &slickFSTemporary{path: path}}}, nil",
 			g.goType(resultType), goClassName(stdFSTemporaryDirectoryName), goFieldName("Path"))
 	}
+}
+
+// emitStdFSContextRuntime emits whole-file helpers for every generated program
+// because the core std.fs declarations are always present.
+func (g *goGenerator) emitStdFSContextRuntime() {
+	g.line(`var slickFSCancelled = errors.New("operation cancelled")`)
+	g.line(`func slickFSPathMode(path string, allowMissing bool) (os.FileMode, error) {`)
+	g.line(`info, err := os.Stat(path)`)
+	g.line(`if err != nil { if allowMissing && os.IsNotExist(err) { return 0, nil }; return 0, err }`)
+	g.line(`mode := info.Mode()`)
+	g.line(`if mode.IsRegular() || mode&os.ModeNamedPipe != 0 { return mode, nil }`)
+	g.line(`return 0, errors.New("non-regular files are not supported")`)
+	g.line(`}`)
+	g.line(`func slickFSUnblockPipe(path string, writing bool) {`)
+	g.line(`flag := os.O_WRONLY; if writing { flag = os.O_RDONLY }`)
+	g.line(`file, err := os.OpenFile(path, flag, 0); if err == nil { _ = file.Close() }`)
+	g.line(`}`)
+	g.line(`func slickFSCallContext[T any](ctx context.Context, path string, pipe, writing bool, call func() (T, error)) (T, error) {`)
+	g.line(`var zero T`)
+	g.line(`if ctx.Err() != nil { return zero, slickFSCancelled }`)
+	g.line(`if ctx.Done() == nil { return call() }`)
+	g.line(`result := make(chan struct { value T; err error }, 1)`)
+	g.line(`go func() { value, err := call(); result <- struct { value T; err error }{value: value, err: err} }()`)
+	g.line(`select {`)
+	g.line(`case completed := <-result: return completed.value, completed.err`)
+	g.line(`case <-ctx.Done(): if pipe { go slickFSUnblockPipe(path, writing) }; return zero, slickFSCancelled`)
+	g.line(`}`)
+	g.line(`}`)
+	g.line(`func slickFSReadText(ctx context.Context, path string) ([]byte, error) {`)
+	g.line(`mode, err := slickFSPathMode(path, false); if err != nil { return nil, err }`)
+	g.line(`return slickFSCallContext(ctx, path, mode&os.ModeNamedPipe != 0, false, func() ([]byte, error) { return os.ReadFile(path) })`)
+	g.line(`}`)
+	g.line(`func slickFSWriteText(ctx context.Context, path, contents string) error {`)
+	g.line(`mode, err := slickFSPathMode(path, true); if err != nil { return err }`)
+	g.line(`_, err = slickFSCallContext(ctx, path, mode&os.ModeNamedPipe != 0, true, func() (struct{}, error) { return struct{}{}, os.WriteFile(path, []byte(contents), 0o666) })`)
+	g.line(`return err`)
+	g.line(`}`)
+	g.line("")
 }
 
 // emitStdFSRuntime emits the temporary-workspace helpers. It runs only for

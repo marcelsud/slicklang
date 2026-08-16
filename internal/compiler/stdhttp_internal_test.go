@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"context"
 	"go/format"
 	"net/http"
 	"strings"
@@ -121,5 +122,19 @@ func TestStdHTTPResponseHeadersAreCanonicalAndSorted(t *testing.T) {
 	}
 	if got := strings.Join(converted[0].values, ","); got != "a=1,b=2" {
 		t.Fatalf("Set-Cookie values = %q", got)
+	}
+}
+
+func TestStdHTTPContextCancellationIsTyped(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, failure := performHTTPRequestContext(ctx, httpRequestData{
+		method:           http.MethodGet,
+		url:              "http://127.0.0.1:1",
+		timeoutMillis:    30_000,
+		maxResponseBytes: 1024,
+	})
+	if failure == nil || failure.kind != "Cancelled" || failure.message != "HTTP request cancelled" {
+		t.Fatalf("cancelled HTTP request = %+v", failure)
 	}
 }

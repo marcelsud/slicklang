@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -170,13 +171,13 @@ func processFailure(operation, program, message string) *processFailureData {
 }
 
 // runProcess executes program directly with the exact argument vector. It never
-// consults a shell, always waits for the child, and returns Completed for any
-// exit status the child reported.
-func runProcess(program string, arguments []string, workingDirectory string, hasWorkingDirectory bool, maxOutputBytes int64) (processCompletedData, *processFailureData) {
+// consults a shell, always waits for the child, and signals and reaps the child
+// when ctx is cancelled.
+func runProcess(ctx context.Context, program string, arguments []string, workingDirectory string, hasWorkingDirectory bool, maxOutputBytes int64) (processCompletedData, *processFailureData) {
 	if maxOutputBytes < 0 {
 		return processCompletedData{}, processFailure("OutputLimit", program, "MaxOutputBytes must not be negative")
 	}
-	command := exec.Command(program, arguments...)
+	command := exec.CommandContext(ctx, program, arguments...)
 	if hasWorkingDirectory {
 		info, err := os.Stat(workingDirectory)
 		if err != nil || !info.IsDir() {
@@ -192,6 +193,9 @@ func runProcess(program string, arguments []string, workingDirectory string, has
 	}
 	capture.arm(command.Process)
 	waitError := command.Wait()
+	if ctx.Err() != nil {
+		return processCompletedData{}, processFailure("Cancelled", program, "operation cancelled; child process was signalled")
+	}
 	if capture.overflowed() {
 		return processCompletedData{}, processFailure("OutputLimit", program, fmt.Sprintf("captured output exceeds %d bytes", maxOutputBytes))
 	}
@@ -245,7 +249,7 @@ func (p *program) callNativeStdProcess(function *functionDecl, frame *runtimeFra
 	if hasDirectory {
 		directory = present.scalar.(string)
 	}
-	completed, failure := runProcess(programName, arguments, directory, hasDirectory, frame.locals["MaxOutputBytes"].scalar.(int64))
+	completed, failure := runProcess(frame.ctx, programName, arguments, directory, hasDirectory, frame.locals["MaxOutputBytes"].scalar.(int64))
 	if failure != nil {
 		return runtimeProcessFailure(resultType, failure), nil, true
 	}
@@ -286,9 +290,9 @@ func (g *goGenerator) emitProcessRuntimeSupport() {
 	g.line(`type slickProcessWriter struct { capture *slickProcessCapture; isError bool }`)
 	g.line(`func (writer *slickProcessWriter) Write(data []byte) (int, error) { return writer.capture.write(data, writer.isError) }`)
 	g.line(`func slickProcessFailure(operation, program, message string) *slickProcessFailureData { return &slickProcessFailureData{operation: operation, program: program, message: message} }`)
-	g.line(`func slickProcessPerform(program string, arguments []string, workingDirectory string, hasWorkingDirectory bool, maxOutputBytes int64) (slickProcessCompletedData, *slickProcessFailureData) {`)
+	g.line(`func slickProcessPerform(ctx context.Context, program string, arguments []string, workingDirectory string, hasWorkingDirectory bool, maxOutputBytes int64) (slickProcessCompletedData, *slickProcessFailureData) {`)
 	g.line(`if maxOutputBytes < 0 { return slickProcessCompletedData{}, slickProcessFailure("OutputLimit", program, "MaxOutputBytes must not be negative") }`)
-	g.line(`command := exec.Command(program, arguments...)`)
+	g.line(`command := exec.CommandContext(ctx, program, arguments...)`)
 	g.line(`if hasWorkingDirectory {`)
 	g.line(`info, err := os.Stat(workingDirectory)`)
 	g.line(`if err != nil || !info.IsDir() { return slickProcessCompletedData{}, slickProcessFailure("WorkingDirectory", program, "working directory is not an existing directory") }`)
@@ -300,6 +304,7 @@ func (g *goGenerator) emitProcessRuntimeSupport() {
 	g.line(`if err := command.Start(); err != nil { return slickProcessCompletedData{}, slickProcessFailure("Spawn", program, err.Error()) }`)
 	g.line(`capture.arm(command.Process)`)
 	g.line(`waitError := command.Wait()`)
+	g.line(`if ctx.Err() != nil { return slickProcessCompletedData{}, slickProcessFailure("Cancelled", program, "operation cancelled; child process was signalled") }`)
 	g.line(`if capture.overflowed() { return slickProcessCompletedData{}, slickProcessFailure("OutputLimit", program, fmt.Sprintf("captured output exceeds %%d bytes", maxOutputBytes)) }`)
 	g.line(`if waitError != nil {`)
 	g.line(`var exitError *exec.ExitError`)
@@ -308,8 +313,8 @@ func (g *goGenerator) emitProcessRuntimeSupport() {
 	g.line(`}`)
 	g.line(`return slickProcessCompletedData{exitCode: int64(command.ProcessState.ExitCode()), output: slickBytes(capture.output), errorOutput: slickBytes(capture.errorOutput)}, nil`)
 	g.line(`}`)
-	g.line("func slickProcessRun(program string, arguments []string, workingDirectory slickOptional[string], maxOutputBytes int64) (%s, error) {", resultType)
-	g.line(`completed, failure := slickProcessPerform(program, arguments, workingDirectory.value, workingDirectory.present, maxOutputBytes)`)
+	g.line("func slickProcessRun(ctx context.Context, program string, arguments []string, workingDirectory slickOptional[string], maxOutputBytes int64) (%s, error) {", resultType)
+	g.line(`completed, failure := slickProcessPerform(ctx, program, arguments, workingDirectory.value, workingDirectory.present, maxOutputBytes)`)
 	g.line("if failure != nil { return %s{failure: &%s{%s: failure.operation, %s: failure.program, %s: failure.message}}, nil }",
 		resultType, failureClass,
 		goFieldName("Operation"), goFieldName("Program"), goFieldName("Message"))

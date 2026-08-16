@@ -43,6 +43,11 @@ func TestProcessHelperProgram(t *testing.T) {
 				os.Exit(121)
 			}
 			os.Stdout.WriteString(directory)
+		case strings.HasPrefix(directive, "pid="):
+			path := strings.TrimPrefix(directive, "pid=")
+			if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+				os.Exit(123)
+			}
 		case directive == "block":
 			// Sleeps rather than parking forever: a parked goroutine trips Go's
 			// deadlock detector and the child would exit on its own, which would
