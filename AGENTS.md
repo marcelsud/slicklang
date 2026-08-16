@@ -52,6 +52,20 @@ because quality calls the private `p.lint()` rather than public `Lint`.
 - Limits are fixed constants with no configuration, baseline, or suppression:
   every example project must pass `slick quality --check`.
 
+## The published agent skills are tested, not prose
+
+`skills/slick-cli` and `skills/slick-language`, shipped with `plugin.json`, are
+what an agent reads instead of this codebase, so `cmd/slick/skills_test.go` holds
+them to the toolchain: every fenced block marked ```` ```slk program ```` must
+compile, format, and pass `slick quality --check`; every `SLKxxx` cited must be
+registered; the command table and the `reportUsageTo` usage text must name the
+same commands; and the standard-library sentence must list every `std` child
+`slick describe std` reports.
+
+A new command, `std` namespace, authority effect, or operator therefore updates a
+skill in the same change. Unmarked ```` ```slk ```` blocks are fragments and are
+not compiled, so prefer marking an example complete when it can stand alone.
+
 ## User-defined generics
 
 `internal/compiler/generics.go` monomorphizes them: an open declaration lives only in `program.genericClasses`, `genericInterfaces`, `genericFunctions`, or `genericMethodImpls`, and every concrete instantiation a program mentions is registered in the ordinary maps under its canonical name (`root.Box<int>`). Downstream code therefore needs no generic awareness — `goEncodedName` already hex-encodes the whole name, and `p.classes[...]` lookups find instances for free. Two consequences worth knowing before touching this:
