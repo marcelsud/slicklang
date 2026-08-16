@@ -56,7 +56,7 @@ func openFilesystemContext(ctx context.Context, path string, flag int, mode os.F
 	case completed := <-result:
 		return completed.file, completed.err
 	case <-ctx.Done():
-		go unblockFilesystemPipe(path, writing)
+		unblockFilesystemPipe(path, writing)
 		completed := <-result
 		if completed.file != nil {
 			_ = completed.file.Close()
@@ -99,6 +99,9 @@ func filesystemCallContext[T any](ctx context.Context, interrupt func(), call fu
 }
 
 func readTextFileContext(ctx context.Context, path string) ([]byte, error) {
+	if ctx == nil || ctx.Done() == nil {
+		return os.ReadFile(path)
+	}
 	mode, err := filesystemPathMode(path, false)
 	if err != nil {
 		return nil, err
@@ -114,6 +117,9 @@ func readTextFileContext(ctx context.Context, path string) ([]byte, error) {
 }
 
 func writeTextFileContext(ctx context.Context, path, contents string) error {
+	if ctx == nil || ctx.Done() == nil {
+		return os.WriteFile(path, []byte(contents), 0o666)
+	}
 	mode, err := filesystemPathMode(path, true)
 	if err != nil {
 		return err
@@ -301,7 +307,7 @@ func (g *goGenerator) emitStdFSContextRuntime() {
 	g.line(`go func() { file, err := os.OpenFile(path, flag, mode); result <- struct { file *os.File; err error }{file: file, err: err} }()`)
 	g.line(`select {`)
 	g.line(`case completed := <-result: return completed.file, completed.err`)
-	g.line(`case <-ctx.Done(): go slickFSUnblockPipe(path, writing); completed := <-result; if completed.file != nil { _ = completed.file.Close() }; return nil, slickFSCancelled`)
+	g.line(`case <-ctx.Done(): slickFSUnblockPipe(path, writing); completed := <-result; if completed.file != nil { _ = completed.file.Close() }; return nil, slickFSCancelled`)
 	g.line(`}`)
 	g.line(`}`)
 	g.line(`func slickFSCallContext[T any](ctx context.Context, interrupt func(), call func() (T, error)) (T, error) {`)

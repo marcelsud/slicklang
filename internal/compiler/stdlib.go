@@ -2252,11 +2252,11 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 		g.emitNativeEnvMutation(resultType, "Unset", arguments[0], fmt.Sprintf("os.Unsetenv(%s)", arguments[0]))
 	case nativeStdFSReadText:
 		result := g.goType(resultType)
-		callContext := "context.Background()"
 		if g.program.usesContext {
-			callContext = "slickContext"
+			g.line("contents, err := slickFSReadText(slickContext, %s)", arguments[0])
+		} else {
+			g.line("contents, err := os.ReadFile(%s)", arguments[0])
 		}
-		g.line("contents, err := slickFSReadText(%s, %s)", callContext, arguments[0])
 		g.line("if err != nil {")
 		g.emitNativeFSFailure(resultType, "ReadText", arguments[0], "err")
 		g.line("}")
@@ -2265,11 +2265,11 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 		g.line("}")
 		g.line("return %s{ok: true, value: string(contents)}, nil", result)
 	case nativeStdFSWriteText:
-		callContext := "context.Background()"
 		if g.program.usesContext {
-			callContext = "slickContext"
+			g.emitNativeFSResult(resultType, "WriteText", arguments[0], fmt.Sprintf("slickFSWriteText(slickContext, %s, %s)", arguments[0], arguments[1]))
+		} else {
+			g.emitNativeFSResult(resultType, "WriteText", arguments[0], fmt.Sprintf("os.WriteFile(%s, []byte(%s), 0o666)", arguments[0], arguments[1]))
 		}
-		g.emitNativeFSResult(resultType, "WriteText", arguments[0], fmt.Sprintf("slickFSWriteText(%s, %s, %s)", callContext, arguments[0], arguments[1]))
 	case nativeStdFSExists:
 		result := g.goType(resultType)
 		g.line("_, err := os.Stat(%s)", arguments[0])

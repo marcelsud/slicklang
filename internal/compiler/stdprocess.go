@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sync"
-	"time"
 )
 
 const (
@@ -182,7 +182,6 @@ func runProcess(ctx context.Context, program string, arguments []string, working
 		return processCompletedData{}, processFailure("Cancelled", program, "operation cancelled before child start")
 	}
 	command := exec.CommandContext(ctx, program, arguments...)
-	command.WaitDelay = time.Millisecond
 	if hasWorkingDirectory {
 		info, err := os.Stat(workingDirectory)
 		if err != nil || !info.IsDir() {
@@ -193,17 +192,62 @@ func runProcess(ctx context.Context, program string, arguments []string, working
 	if ctx.Err() != nil {
 		return processCompletedData{}, processFailure("Cancelled", program, "operation cancelled before child start")
 	}
+	stdoutRead, stdoutWrite, err := os.Pipe()
+	if err != nil {
+		return processCompletedData{}, processFailure("Spawn", program, err.Error())
+	}
+	stderrRead, stderrWrite, err := os.Pipe()
+	if err != nil {
+		_ = stdoutRead.Close()
+		_ = stdoutWrite.Close()
+		return processCompletedData{}, processFailure("Spawn", program, err.Error())
+	}
+	closePipes := func() {
+		_ = stdoutRead.Close()
+		_ = stdoutWrite.Close()
+		_ = stderrRead.Close()
+		_ = stderrWrite.Close()
+	}
 	capture := &processCapture{limit: maxOutputBytes}
-	command.Stdout = &processWriter{capture: capture}
-	command.Stderr = &processWriter{capture: capture, isError: true}
+	command.Stdout = stdoutWrite
+	command.Stderr = stderrWrite
 	if err := command.Start(); err != nil {
+		closePipes()
 		if ctx.Err() != nil {
 			return processCompletedData{}, processFailure("Cancelled", program, "operation cancelled before child start")
 		}
 		return processCompletedData{}, processFailure("Spawn", program, err.Error())
 	}
+	_ = stdoutWrite.Close()
+	_ = stderrWrite.Close()
 	capture.arm(command.Process)
-	waitError := command.Wait()
+	var copies sync.WaitGroup
+	copies.Add(2)
+	go func() {
+		defer copies.Done()
+		_, _ = io.Copy(&processWriter{capture: capture}, stdoutRead)
+	}()
+	go func() {
+		defer copies.Done()
+		_, _ = io.Copy(&processWriter{capture: capture, isError: true}, stderrRead)
+	}()
+	waited := make(chan error, 1)
+	go func() { waited <- command.Wait() }()
+	var waitError error
+	select {
+	case waitError = <-waited:
+	case <-ctx.Done():
+		_ = stdoutRead.Close()
+		_ = stderrRead.Close()
+		waitError = <-waited
+	}
+	if ctx.Err() != nil {
+		_ = stdoutRead.Close()
+		_ = stderrRead.Close()
+	}
+	copies.Wait()
+	_ = stdoutRead.Close()
+	_ = stderrRead.Close()
 	if ctx.Err() != nil {
 		return processCompletedData{}, processFailure("Cancelled", program, "operation cancelled; child process was signalled")
 	}
@@ -305,19 +349,32 @@ func (g *goGenerator) emitProcessRuntimeSupport() {
 	g.line(`if maxOutputBytes < 0 { return slickProcessCompletedData{}, slickProcessFailure("OutputLimit", program, "MaxOutputBytes must not be negative") }`)
 	g.line(`if ctx.Err() != nil { return slickProcessCompletedData{}, slickProcessFailure("Cancelled", program, "operation cancelled before child start") }`)
 	g.line(`command := exec.CommandContext(ctx, program, arguments...)`)
-	g.line(`command.WaitDelay = time.Millisecond`)
+	g.line(``)
 	g.line(`if hasWorkingDirectory {`)
 	g.line(`info, err := os.Stat(workingDirectory)`)
 	g.line(`if err != nil || !info.IsDir() { return slickProcessCompletedData{}, slickProcessFailure("WorkingDirectory", program, "working directory is not an existing directory") }`)
 	g.line(`command.Dir = workingDirectory`)
 	g.line(`}`)
 	g.line(`if ctx.Err() != nil { return slickProcessCompletedData{}, slickProcessFailure("Cancelled", program, "operation cancelled before child start") }`)
+	g.line(`stdoutRead, stdoutWrite, err := os.Pipe()`)
+	g.line(`if err != nil { return slickProcessCompletedData{}, slickProcessFailure("Spawn", program, err.Error()) }`)
+	g.line(`stderrRead, stderrWrite, err := os.Pipe()`)
+	g.line(`if err != nil { _ = stdoutRead.Close(); _ = stdoutWrite.Close(); return slickProcessCompletedData{}, slickProcessFailure("Spawn", program, err.Error()) }`)
+	g.line(`closePipes := func() { _ = stdoutRead.Close(); _ = stdoutWrite.Close(); _ = stderrRead.Close(); _ = stderrWrite.Close() }`)
 	g.line(`capture := &slickProcessCapture{limit: maxOutputBytes}`)
-	g.line(`command.Stdout = &slickProcessWriter{capture: capture}`)
-	g.line(`command.Stderr = &slickProcessWriter{capture: capture, isError: true}`)
-	g.line(`if err := command.Start(); err != nil { if ctx.Err() != nil { return slickProcessCompletedData{}, slickProcessFailure("Cancelled", program, "operation cancelled before child start") }; return slickProcessCompletedData{}, slickProcessFailure("Spawn", program, err.Error()) }`)
+	g.line(`command.Stdout = stdoutWrite`)
+	g.line(`command.Stderr = stderrWrite`)
+	g.line(`if err := command.Start(); err != nil { closePipes(); if ctx.Err() != nil { return slickProcessCompletedData{}, slickProcessFailure("Cancelled", program, "operation cancelled before child start") }; return slickProcessCompletedData{}, slickProcessFailure("Spawn", program, err.Error()) }`)
+	g.line(`_ = stdoutWrite.Close(); _ = stderrWrite.Close()`)
 	g.line(`capture.arm(command.Process)`)
-	g.line(`waitError := command.Wait()`)
+	g.line(`var copies sync.WaitGroup; copies.Add(2)`)
+	g.line(`go func() { defer copies.Done(); _, _ = io.Copy(&slickProcessWriter{capture: capture}, stdoutRead) }()`)
+	g.line(`go func() { defer copies.Done(); _, _ = io.Copy(&slickProcessWriter{capture: capture, isError: true}, stderrRead) }()`)
+	g.line(`waited := make(chan error, 1); go func() { waited <- command.Wait() }()`)
+	g.line(`var waitError error`)
+	g.line(`select { case waitError = <-waited: case <-ctx.Done(): _ = stdoutRead.Close(); _ = stderrRead.Close(); waitError = <-waited }`)
+	g.line(`if ctx.Err() != nil { _ = stdoutRead.Close(); _ = stderrRead.Close() }`)
+	g.line(`copies.Wait(); _ = stdoutRead.Close(); _ = stderrRead.Close()`)
 	g.line(`if ctx.Err() != nil { return slickProcessCompletedData{}, slickProcessFailure("Cancelled", program, "operation cancelled; child process was signalled") }`)
 	g.line(`if capture.overflowed() { return slickProcessCompletedData{}, slickProcessFailure("OutputLimit", program, fmt.Sprintf("captured output exceeds %%d bytes", maxOutputBytes)) }`)
 	g.line(`if waitError != nil {`)

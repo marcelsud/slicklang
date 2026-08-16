@@ -119,10 +119,8 @@ func (p *program) generateGo() (string, error) {
 		p.usesStdProcess = true
 	}
 	generator := &goGenerator{program: p, imports: map[string]bool{
-		"context":       true,
 		"errors":        true,
 		"fmt":           true,
-		"io":            true,
 		"math":          true,
 		"os":            true,
 		"path/filepath": true,
@@ -164,15 +162,17 @@ func (p *program) generateGo() (string, error) {
 	if p.usesStdProcess {
 		generator.imports["os/exec"] = true
 		generator.imports["sync"] = true
-		generator.imports["time"] = true
+		generator.imports["io"] = true
+		generator.imports["context"] = true
 	}
 	if p.usesStdSQLite {
-		for _, name := range []string{"database/sql", "errors", "fmt", "math", "modernc.org/sqlite", "os", "path/filepath", "strings", "sync", "sync/atomic", "unicode/utf8"} {
+		for _, name := range []string{"context", "database/sql", "errors", "fmt", "math", "modernc.org/sqlite", "os", "path/filepath", "strings", "sync", "sync/atomic", "unicode/utf8"} {
 			generator.imports[name] = true
 		}
 	}
 	if p.usesContext {
 		generator.imports["context"] = true
+		generator.imports["io"] = true
 	}
 	// Programs that use std.env need os; it is already imported unconditionally
 	// because the shared runtime prints through os.Stdout/Stderr.
@@ -253,11 +253,11 @@ func (g *goGenerator) emitRuntime() {
 	g.line(`}`)
 	if g.program.usesContext {
 		g.emitTaskRuntime()
+		g.emitStdFSContextRuntime()
 	}
 	if g.program.usesUsing {
 		g.emitUsingRuntime()
 	}
-	g.emitStdFSContextRuntime()
 	if g.program.usesStdIO {
 		g.emitStdIORuntime()
 	}
