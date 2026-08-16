@@ -33,7 +33,7 @@ const (
 func markUsesStdHTTP(p *program, name string) {
 	if strings.Contains(name, "std.http.server.") || strings.Contains(name, "std.http.server") {
 		p.usesStdHTTPServer = true
-		p.usesAsync = true
+		p.usesContext = true
 		return
 	}
 	if strings.Contains(name, "std.http.") || name == "std.http" {
@@ -45,7 +45,7 @@ func markUsesStdHTTPNamespace(p *program, namespace string) {
 	switch namespace {
 	case "std.http.server":
 		p.usesStdHTTPServer = true
-		p.usesAsync = true
+		p.usesContext = true
 	case "std.http":
 		p.usesStdHTTP = true
 	}
@@ -493,8 +493,13 @@ func (p *program) serveHTTP(ctx context.Context, config httpServerConfigData, ha
 		return httpServerFailure("Bind", config.address, "failed to bind listen address")
 	}
 	defer listener.Close()
+	handlerContext, cancelHandlers := context.WithCancel(ctx)
+	defer cancelHandlers()
 
 	server := &http.Server{
+		BaseContext: func(net.Listener) context.Context {
+			return handlerContext
+		},
 		MaxHeaderBytes:    int(config.maxHeaderBytes),
 		ReadHeaderTimeout: httpServerTimeoutDuration(config.readHeaderTimeoutMillis),
 		ReadTimeout:       httpServerTimeoutDuration(config.readTimeoutMillis),
@@ -537,6 +542,7 @@ func (p *program) serveHTTP(ctx context.Context, config httpServerConfigData, ha
 	case <-signals:
 	case <-ctx.Done():
 	}
+	cancelHandlers()
 
 	shutdownContext, cancel := context.WithTimeout(context.Background(), httpServerTimeoutDuration(config.shutdownTimeoutMillis))
 	defer cancel()
@@ -681,14 +687,14 @@ func (g *goGenerator) emitHTTPServerRuntimeSupport() {
 	g.line(`return data`)
 	g.line(`}`)
 	contextParameter, contextCheck := "", ""
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		contextParameter = "slickContext context.Context, "
 		contextCheck = "if err := slickCheckCancellation(slickContext); err != nil { return " + resultType + "{}, err }\n\t"
 	} else {
 		contextParameter = ""
 	}
 	parentContext := "context.Background()"
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		parentContext = "slickContext"
 	}
 	g.line("func slickHTTPServerServe(%sconfig %s, application %s) (%s, error) {", contextParameter, configClass, handlerInterface, resultType)
@@ -716,12 +722,15 @@ func (g *goGenerator) emitHTTPServerRuntimeSupport() {
 	g.line("if err != nil { return %s{failure: &%s{%s: %q, %s: data.address, %s: %q}}, nil }",
 		resultType, failureClass, operationField, "Bind", addressField, messageField, "failed to bind listen address")
 	g.line(`defer listener.Close()`)
+	g.line(`handlerContext, cancelHandlers := context.WithCancel(%s)`, parentContext)
+	g.line(`defer cancelHandlers()`)
 	handleMethod := goMethodName("Handle")
 	handleCallArgs := "slickRequest"
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		handleCallArgs = "request.Context(), slickRequest"
 	}
 	g.line(`server := &http.Server{`)
+	g.line(`BaseContext: func(net.Listener) context.Context { return handlerContext },`)
 	g.line(`MaxHeaderBytes: int(data.maxHeaderBytes),`)
 	g.line(`ReadHeaderTimeout: slickHTTPServerTimeoutDuration(data.readHeaderTimeoutMillis),`)
 	g.line(`ReadTimeout: slickHTTPServerTimeoutDuration(data.readTimeoutMillis),`)
@@ -752,6 +761,7 @@ func (g *goGenerator) emitHTTPServerRuntimeSupport() {
 	g.line(`case <-signals:`)
 	g.line("case <-%s.Done():", parentContext)
 	g.line(`}`)
+	g.line(`cancelHandlers()`)
 	g.line(`shutdownContext, cancel := context.WithTimeout(context.Background(), slickHTTPServerTimeoutDuration(data.shutdownTimeoutMillis))`)
 	g.line(`defer cancel()`)
 	g.line(`if err := server.Shutdown(shutdownContext); err != nil {`)

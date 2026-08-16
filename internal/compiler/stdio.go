@@ -342,7 +342,7 @@ func (g *goGenerator) emitNativeMethod(function *functionDecl, receiverType stri
 	receiver := g.unique("self")
 	arguments := make([]string, 0, len(function.params))
 	parameters := make([]string, 0, len(function.params)+1)
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		parameters = append(parameters, "slickContext context.Context")
 	}
 	for _, parameter := range function.params {
@@ -354,9 +354,13 @@ func (g *goGenerator) emitNativeMethod(function *functionDecl, receiverType stri
 		arguments = append(arguments, argument)
 		parameters = append(parameters, argument+" "+g.goType(typ))
 	}
+	callContext := "context.Background()"
+	if g.program.usesContext {
+		callContext = "slickContext"
+	}
 	g.line("func (%s %s) %s(%s) (%s, error) {",
 		receiver, goClassName(receiverType), goMethodName(function.name), strings.Join(parameters, ", "), g.goType(resultType))
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		g.line("if err := slickCheckCancellation(slickContext); err != nil { return %s, err }", g.zero(resultType))
 	}
 	switch function.native {
@@ -373,21 +377,21 @@ func (g *goGenerator) emitNativeMethod(function *functionDecl, receiverType stri
 	case nativeStdFSTemporaryDirectoryClose:
 		g.line("return struct{}{}, slickFSClose(%s.slickResource, %s.%s)", receiver, receiver, goFieldName("Path"))
 	case nativeStdSQLiteDatabaseExecute:
-		g.line("return slickSQLiteDBExecute(%s.slickResource, %s), nil", receiver, arguments[0])
+		g.line("return slickSQLiteDBExecute(%s, %s.slickResource, %s), nil", callContext, receiver, arguments[0])
 	case nativeStdSQLiteDatabaseQuery:
-		g.line("return slickSQLiteDBQuery(%s.slickResource, %s), nil", receiver, arguments[0])
+		g.line("return slickSQLiteDBQuery(%s, %s.slickResource, %s), nil", callContext, receiver, arguments[0])
 	case nativeStdSQLiteDatabaseBegin:
-		g.line("return slickSQLiteDBBegin(%s.slickResource), nil", receiver)
+		g.line("return slickSQLiteDBBegin(%s, %s.slickResource), nil", callContext, receiver)
 	case nativeStdSQLiteDatabaseClose:
 		g.line("return struct{}{}, slickSQLiteDBClose(%s.slickResource)", receiver)
 	case nativeStdSQLiteTransactionExecute:
-		g.line("return slickSQLiteTxExecute(%s.slickResource, %s), nil", receiver, arguments[0])
+		g.line("return slickSQLiteTxExecute(%s, %s.slickResource, %s), nil", callContext, receiver, arguments[0])
 	case nativeStdSQLiteTransactionQuery:
-		g.line("return slickSQLiteTxQuery(%s.slickResource, %s), nil", receiver, arguments[0])
+		g.line("return slickSQLiteTxQuery(%s, %s.slickResource, %s), nil", callContext, receiver, arguments[0])
 	case nativeStdSQLiteTransactionCommit:
-		g.line("return slickSQLiteTxCommit(%s.slickResource), nil", receiver)
+		g.line("return slickSQLiteTxCommit(%s, %s.slickResource), nil", callContext, receiver)
 	case nativeStdSQLiteTransactionRollback:
-		g.line("return slickSQLiteTxRollback(%s.slickResource), nil", receiver)
+		g.line("return slickSQLiteTxRollback(%s, %s.slickResource), nil", callContext, receiver)
 	case nativeStdSQLiteTransactionClose:
 		g.line("return struct{}{}, slickSQLiteTxClose(%s.slickResource)", receiver)
 	default:
@@ -478,14 +482,14 @@ func (g *goGenerator) emitStdIORuntime() {
 	g.line("return %d", stdioChunkSize)
 	g.line(`}`)
 	contextParameter, contextArgument := "", ""
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		contextParameter, contextArgument = "slickContext context.Context, ", "slickContext, "
 	}
 	g.line("func slickIOReadAll(%sreader %s, maxBytes int64) (%s, error) {", contextParameter, readerInterface, readAllResult)
 	g.line("if maxBytes < 0 { return %s{failure: slickIOFailure(%q, %q)}, nil }", readAllResult, "ReadAll", "MaxBytes must not be negative")
 	g.line(`output := make(slickBytes, 0)`)
 	g.line(`for {`)
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		g.line("if err := slickCheckCancellation(slickContext); err != nil { return %s{}, err }", readAllResult)
 	}
 	g.line(`request := slickIOReadSize(maxBytes - int64(len(output)))`)
@@ -504,7 +508,7 @@ func (g *goGenerator) emitStdIORuntime() {
 	g.line("if maxBytes < 0 { return %s{failure: slickIOFailure(%q, %q)}, nil }", copyResult, "Copy", "MaxBytes must not be negative")
 	g.line(`var total int64`)
 	g.line(`for {`)
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		g.line("if err := slickCheckCancellation(slickContext); err != nil { return %s{}, err }", copyResult)
 	}
 	g.line(`request := slickIOReadSize(maxBytes - total)`)

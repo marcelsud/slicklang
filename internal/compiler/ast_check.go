@@ -286,7 +286,7 @@ func (p *program) checkASTStatement(statement statementNode, scope *astScope, ex
 		}
 		return expressionInfo{typ: "null", effects: info.effects}
 	case *asyncLetStatement:
-		p.usesAsync = true
+		p.usesContext = true
 		if scope.currentBlock != nil {
 			scope.currentBlock.hasAsync = true
 		}

@@ -43,6 +43,19 @@ func TestProcessHelperProgram(t *testing.T) {
 				os.Exit(121)
 			}
 			os.Stdout.WriteString(directory)
+		case strings.HasPrefix(directive, "pid="):
+			path := strings.TrimPrefix(directive, "pid=")
+			if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+				os.Exit(123)
+			}
+		case strings.HasPrefix(directive, "spawn="):
+			marker := strings.TrimPrefix(directive, "spawn=")
+			child := exec.Command(os.Args[0], "-test.run=^TestProcessHelperProgram$", processHelperSentinel, "pid="+marker, "block")
+			child.Stdout = os.Stdout
+			child.Stderr = os.Stderr
+			if err := child.Start(); err != nil {
+				os.Exit(124)
+			}
 		case directive == "block":
 			// Sleeps rather than parking forever: a parked goroutine trips Go's
 			// deadlock detector and the child would exit on its own, which would

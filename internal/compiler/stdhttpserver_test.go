@@ -24,7 +24,7 @@ import (
 
 const httpServerEchoHandler = `
 class Echo implements std.http.server.Handler {
-    function Handle(Request: std.http.server.Request) -> std.http.server.Response effects { environment, network } {
+    function Handle(Request: std.http.server.Request) -> std.http.server.Response effects { environment, filesystem, network, process } {
         if (Request.Path == "/bad-status") {
             return std.http.server.Response {
                 Status: 0
@@ -100,6 +100,34 @@ class Echo implements std.http.server.Handler {
             return std.http.server.Response {
                 Status: 200
                 Body: std.bytes.FromUtf8("slow")
+            }
+        }
+        if (Request.Path == "/filesystem") {
+            let Path = std.env.Get("SLICK_FS_BLOCK_PATH")
+            if (Path != null) {
+                let Result = std.fs.ReadText(Path)
+            }
+            return std.http.server.Response {
+                Status: 200
+                Body: std.bytes.FromUtf8("filesystem")
+            }
+        }
+        if (Request.Path == "/process") {
+            let Program = std.env.Get("SLICK_PROCESS_BLOCK_PROGRAM")
+            let Marker = std.env.Get("SLICK_PROCESS_BLOCK_MARKER")
+            if (Program != null) {
+                if (Marker != null) {
+                    let Result = std.process.Run(Program, [
+                        "-test.run=^TestProcessHelperProgram$",
+                        "slick-process-helper",
+                        "pid=" + Marker,
+                        "block",
+                    ], null, 1024)
+                }
+            }
+            return std.http.server.Response {
+                Status: 200
+                Body: std.bytes.FromUtf8("process")
             }
         }
         let Query = Request.Query
@@ -192,6 +220,26 @@ func startHTTPServerBinary(t *testing.T, binary, address string, env ...string) 
 	command.Stderr = &output
 	if err := command.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
+	}
+	t.Cleanup(func() {
+		if command.Process != nil {
+			_ = command.Process.Signal(syscall.SIGTERM)
+			_, _ = command.Process.Wait()
+		}
+	})
+	return command, &output
+}
+
+func startHTTPServerInterpreter(t *testing.T, slick, source, address string, env ...string) (*exec.Cmd, *strings.Builder) {
+	t.Helper()
+	command := exec.Command(slick, "run", source)
+	command.Env = append(os.Environ(), env...)
+	command.Env = append(command.Env, "SLICK_HTTP_SERVER_ADDR="+address)
+	var output strings.Builder
+	command.Stdout = &output
+	command.Stderr = &output
+	if err := command.Start(); err != nil {
+		t.Fatalf("start interpreter server: %v", err)
 	}
 	t.Cleanup(func() {
 		if command.Process != nil {
@@ -350,6 +398,42 @@ func assertShutdownDeadlineSucceeds(t *testing.T, command *exec.Cmd, base string
 	case <-requestDone:
 	case <-time.After(time.Second):
 		t.Fatal("slow request did not finish")
+	}
+}
+
+func assertBlockingNativeShutdown(t *testing.T, command *exec.Cmd, base, path string, ready func(), output *strings.Builder) {
+	t.Helper()
+	requestDone := make(chan struct{})
+	go func() {
+		defer close(requestDone)
+		response, err := http.Get(base + path)
+		if err == nil {
+			response.Body.Close()
+		}
+	}()
+	ready()
+	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal server: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("server exit after native cancellation: %v output=%q", err, output.String())
+		}
+		if got := strings.TrimSpace(output.String()); got != "Ok()" {
+			t.Fatalf("native cancellation result %q, want Ok()", got)
+		}
+	case <-time.After(2 * time.Second):
+		_ = command.Process.Kill()
+		t.Fatalf("server did not promptly cancel native call: %q", output.String())
+	}
+	command.Process = nil
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled native request did not finish")
 	}
 }
 
@@ -727,6 +811,124 @@ function main() -> Result<null, std.http.server.Failure> effects { database, env
 	}
 
 	assertShutdownDeadlineSucceeds(t, command, base, blockerStarted, &output)
+}
+
+func TestStdHTTPServerCancelsBlockingNativeCalls(t *testing.T) {
+	source := httpServerEchoHandler + `
+function main() -> Result<null, std.http.server.Failure> effects { database, environment, filesystem, io, network, process, random, state, time } {
+    let Address = std.env.Get("SLICK_HTTP_SERVER_ADDR")
+    if (Address == null) {
+        Err(std.http.server.Failure { Operation: "Config" Address: "" Message: "missing address" })
+    } else {
+        std.http.server.Serve(std.http.server.Config {
+            Address: Address
+            ShutdownTimeoutMilliseconds: 5000
+        }, Echo {})
+    }
+}
+`
+	native := buildHTTPServerBinary(t, source)
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "main.slk")
+	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
+		t.Fatalf("write cancellation server: %v", err)
+	}
+	slick := buildSlickTool(t)
+	backends := []struct {
+		name  string
+		start func(*testing.T, string, ...string) (*exec.Cmd, *strings.Builder)
+	}{
+		{name: "native", start: func(t *testing.T, address string, env ...string) (*exec.Cmd, *strings.Builder) {
+			return startHTTPServerBinary(t, native, address, env...)
+		}},
+		{name: "interpreter", start: func(t *testing.T, address string, env ...string) (*exec.Cmd, *strings.Builder) {
+			return startHTTPServerInterpreter(t, slick, sourcePath, address, env...)
+		}},
+	}
+	for _, backend := range backends {
+		t.Run(backend.name, func(t *testing.T) {
+			for _, kind := range []string{"filesystem", "process", "http"} {
+				t.Run(kind, func(t *testing.T) {
+					path := "/" + kind
+					var env []string
+					ready := func() {}
+					verify := func() {}
+					var fifoWriter *os.File
+					switch kind {
+					case "filesystem":
+						fifo := filepath.Join(t.TempDir(), "block.fifo")
+						if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+							t.Fatalf("create FIFO: %v", err)
+						}
+						env = []string{"SLICK_FS_BLOCK_PATH=" + fifo}
+						ready = func() {
+							deadline := time.Now().Add(5 * time.Second)
+							for time.Now().Before(deadline) {
+								fd, err := syscall.Open(fifo, syscall.O_WRONLY|syscall.O_NONBLOCK, 0)
+								if err == nil {
+									fifoWriter = os.NewFile(uintptr(fd), fifo)
+									return
+								}
+								time.Sleep(10 * time.Millisecond)
+							}
+							t.Fatal("filesystem call did not open FIFO")
+						}
+					case "process":
+						marker := filepath.Join(t.TempDir(), "child.pid")
+						env = []string{
+							"SLICK_PROCESS_BLOCK_PROGRAM=" + helperProgram(t),
+							"SLICK_PROCESS_BLOCK_MARKER=" + marker,
+						}
+						var childPID int
+						ready = func() {
+							deadline := time.Now().Add(5 * time.Second)
+							for time.Now().Before(deadline) {
+								data, err := os.ReadFile(marker)
+								if err == nil {
+									childPID, err = strconv.Atoi(string(data))
+									if err != nil {
+										t.Fatalf("parse child PID: %v", err)
+									}
+									return
+								}
+								time.Sleep(10 * time.Millisecond)
+							}
+							t.Fatal("process call did not start child")
+						}
+						verify = func() {
+							process, err := os.FindProcess(childPID)
+							if err != nil {
+								return
+							}
+							if err := process.Signal(syscall.Signal(0)); err == nil {
+								t.Fatalf("cancelled child %d remained alive", childPID)
+							}
+						}
+					case "http":
+						blockURL, started := shutdownBlocker(t)
+						env = []string{"SLICK_HTTP_BLOCK_URL=" + blockURL}
+						path = "/slow"
+						ready = func() {
+							select {
+							case <-started:
+							case <-time.After(5 * time.Second):
+								t.Fatal("outbound HTTP call did not start")
+							}
+						}
+					}
+					address := freeLoopbackAddress(t)
+					command, output := backend.start(t, address, env...)
+					base := "http://" + address
+					waitForHTTP(t, base+"/count")
+					assertBlockingNativeShutdown(t, command, base, path, ready, output)
+					if fifoWriter != nil {
+						_ = fifoWriter.Close()
+					}
+					verify()
+				})
+			}
+		})
+	}
 }
 
 func buildSlickTool(t *testing.T) string {

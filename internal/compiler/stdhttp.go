@@ -252,6 +252,8 @@ func performHTTPRequestContext(parent context.Context, request httpRequestData) 
 			}
 		}
 		switch {
+		case parent.Err() != nil:
+			return httpResponseData{}, &httpFailureData{kind: "Cancelled", url: failureURL, status: status, message: "HTTP request cancelled"}
 		case errors.Is(err, errHTTPRedirect) || (request.followRedirects && response != nil):
 			return httpResponseData{}, &httpFailureData{kind: "Redirect", url: failureURL, status: status, message: "HTTP redirect failed"}
 		case errors.Is(err, context.DeadlineExceeded) || isHTTPTimeout(err):
@@ -270,6 +272,9 @@ func performHTTPRequestContext(parent context.Context, request httpRequestData) 
 	failureURL := sanitizedHTTPURL(response.Request.URL.String())
 	status := int64(response.StatusCode)
 	if err != nil {
+		if parent.Err() != nil {
+			return httpResponseData{}, &httpFailureData{kind: "Cancelled", url: failureURL, status: &status, message: "HTTP request cancelled"}
+		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) || isHTTPTimeout(err) {
 			return httpResponseData{}, &httpFailureData{kind: "Timeout", url: failureURL, status: &status, message: "HTTP request timed out"}
 		}
@@ -362,9 +367,6 @@ func (p *program) callNativeStdHTTP(function *functionDecl, frame *runtimeFrame)
 	switch function.native {
 	case nativeStdHTTPFetch:
 		response, failure := performHTTPRequestContext(frame.ctx, runtimeHTTPRequest(frame.locals["Request"]))
-		if err := checkTaskCancellation(frame.ctx); err != nil {
-			return runtimeValue{}, err, true
-		}
 		if failure != nil {
 			return runtimeHTTPFailure(resultType, failure), nil, true
 		}
@@ -445,15 +447,9 @@ func (g *goGenerator) emitHTTPRuntimeSupport() {
 	g.line(`names := make([]string, 0, len(merged)); for name := range merged { names = append(names, name) }; sort.Strings(names)`)
 	g.line(`result := make([]slickHTTPHeader, len(names)); for index, name := range names { result[index] = slickHTTPHeader{name: name, values: merged[name]} }; return result`)
 	g.line(`}`)
-	performContextParameter, performContext := "", "context.Background()"
-	fetchContextParameter, fetchContextArgument := "", ""
-	if g.program.usesAsync {
-		performContextParameter, performContext = "slickContext context.Context, ", "slickContext"
-		fetchContextParameter, fetchContextArgument = "slickContext context.Context, ", "slickContext, "
-	}
-	g.line(`func slickHTTPPerform(%srequest slickHTTPRequestData) (slickHTTPResponseData, *slickHTTPFailureData) {`, performContextParameter)
+	g.line(`func slickHTTPPerform(parent context.Context, request slickHTTPRequestData) (slickHTTPResponseData, *slickHTTPFailureData) {`)
 	g.line(`parsed, headers, failure := slickHTTPValidate(request); if failure != nil { return slickHTTPResponseData{}, failure }`)
-	g.line(`ctx, cancel := context.WithTimeout(%s, slickHTTPTimeoutDuration(request.timeoutMillis)); defer cancel()`, performContext)
+	g.line(`ctx, cancel := context.WithTimeout(parent, slickHTTPTimeoutDuration(request.timeoutMillis)); defer cancel()`)
 	g.line(`var body io.Reader; if request.bodyPresent { body = struct{ io.Reader }{bytes.NewReader(request.body)} }`)
 	g.line(`nativeRequest, err := http.NewRequestWithContext(ctx, request.method, parsed.String(), body); if err != nil { return slickHTTPResponseData{}, slickHTTPInvalid(request.url, "method or URL is invalid") }`)
 	g.line(`if request.bodyPresent { nativeRequest.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(request.body)), nil } }`)
@@ -464,6 +460,7 @@ func (g *goGenerator) emitHTTPRuntimeSupport() {
 	g.line(`if err != nil {`)
 	g.line(`failureURL := slickHTTPSanitizedURL(request.url); var status *int64`)
 	g.line(`if response != nil { value := int64(response.StatusCode); status = &value; if response.Request != nil && response.Request.URL != nil { failureURL = slickHTTPSanitizedURL(response.Request.URL.String()) } }`)
+	g.line(`if parent.Err() != nil { return slickHTTPResponseData{}, &slickHTTPFailureData{kind: "Cancelled", url: failureURL, status: status, message: "HTTP request cancelled"} }`)
 	g.line(`if errors.Is(err, slickHTTPRedirectError) || (request.followRedirects && response != nil) { return slickHTTPResponseData{}, &slickHTTPFailureData{kind: "Redirect", url: failureURL, status: status, message: "HTTP redirect failed"} }`)
 	g.line(`if errors.Is(err, context.DeadlineExceeded) || slickHTTPIsTimeout(err) { return slickHTTPResponseData{}, &slickHTTPFailureData{kind: "Timeout", url: failureURL, status: status, message: "HTTP request timed out"} }`)
 	g.line(`return slickHTTPResponseData{}, &slickHTTPFailureData{kind: "Transport", url: failureURL, status: status, message: "HTTP transport failed"}`)
@@ -471,21 +468,18 @@ func (g *goGenerator) emitHTTPRuntimeSupport() {
 	g.line(`defer response.Body.Close()`)
 	g.line(`limit := request.maxResponseBytes; if limit < math.MaxInt64 { limit++ }`)
 	g.line(`contents, err := io.ReadAll(io.LimitReader(response.Body, limit)); failureURL := slickHTTPSanitizedURL(response.Request.URL.String()); status := int64(response.StatusCode)`)
-	g.line(`if err != nil { if errors.Is(ctx.Err(), context.DeadlineExceeded) || slickHTTPIsTimeout(err) { return slickHTTPResponseData{}, &slickHTTPFailureData{kind: "Timeout", url: failureURL, status: &status, message: "HTTP request timed out"} }; return slickHTTPResponseData{}, &slickHTTPFailureData{kind: "BodyRead", url: failureURL, status: &status, message: "failed to read response body"} }`)
+	g.line(`if err != nil { if parent.Err() != nil { return slickHTTPResponseData{}, &slickHTTPFailureData{kind: "Cancelled", url: failureURL, status: &status, message: "HTTP request cancelled"} }; if errors.Is(ctx.Err(), context.DeadlineExceeded) || slickHTTPIsTimeout(err) { return slickHTTPResponseData{}, &slickHTTPFailureData{kind: "Timeout", url: failureURL, status: &status, message: "HTTP request timed out"} }; return slickHTTPResponseData{}, &slickHTTPFailureData{kind: "BodyRead", url: failureURL, status: &status, message: "failed to read response body"} }`)
 	g.line(`if int64(len(contents)) > request.maxResponseBytes { return slickHTTPResponseData{}, &slickHTTPFailureData{kind: "BodyTooLarge", url: failureURL, status: &status, message: fmt.Sprintf("response body exceeds %%d bytes", request.maxResponseBytes)} }`)
 	g.line(`return slickHTTPResponseData{status: status, url: response.Request.URL.String(), headers: slickHTTPResponseHeaders(response.Header), body: slickBytes(contents)}, nil`)
 	g.line(`}`)
-	g.line("func slickHTTPFetch(%srequest %s) (%s, error) {", fetchContextParameter, requestClass, resultType)
+	g.line("func slickHTTPFetch(ctx context.Context, request %s) (%s, error) {", requestClass, resultType)
 	g.line(`data := slickHTTPRequestData{method: request.%s, url: request.%s, timeoutMillis: %d, maxResponseBytes: %d}`, goFieldName("Method"), goFieldName("URL"), defaultHTTPTimeoutMilliseconds, defaultHTTPMaxResponseBytes)
 	g.line(`if request.%s.present { data.headers = make([]slickHTTPHeader, len(request.%s.value.entries)); for index, entry := range request.%s.value.entries { data.headers[index] = slickHTTPHeader{name: entry.key, values: entry.value} } }`, goFieldName("Headers"), goFieldName("Headers"), goFieldName("Headers"))
 	g.line(`if request.%s.present { data.bodyPresent = true; data.body = request.%s.value }`, goFieldName("Body"), goFieldName("Body"))
 	g.line(`if request.%s.present { data.timeoutMillis = request.%s.value }`, goFieldName("TimeoutMilliseconds"), goFieldName("TimeoutMilliseconds"))
 	g.line(`if request.%s.present { data.maxResponseBytes = request.%s.value }`, goFieldName("MaxResponseBytes"), goFieldName("MaxResponseBytes"))
 	g.line(`if request.%s.present { data.followRedirects = request.%s.value }`, goFieldName("FollowRedirects"), goFieldName("FollowRedirects"))
-	g.line(`response, failure := slickHTTPPerform(%sdata)`, fetchContextArgument)
-	if g.program.usesAsync {
-		g.line("if err := slickCheckCancellation(slickContext); err != nil { return %s{}, err }", resultType)
-	}
+	g.line(`response, failure := slickHTTPPerform(ctx, data)`)
 	g.line(`if failure != nil { status := slickNone[int64](); if failure.status != nil { status = slickSome(*failure.status) }; return %s{failure: &%s{%s: failure.kind, %s: failure.url, %s: status, %s: failure.message}}, nil`, resultType, failureClass, goFieldName("Kind"), goFieldName("URL"), goFieldName("Status"), goFieldName("Message"))
 	g.line(`}`)
 	g.line(`entries := make([]slickMapEntry[string, []string], len(response.headers)); for index, header := range response.headers { entries[index] = slickMapEntry[string, []string]{key: header.name, value: header.values} }`)

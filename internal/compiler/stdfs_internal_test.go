@@ -1,10 +1,13 @@
 package compiler
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func generateStdFSProgram(t *testing.T, text string) string {
@@ -166,5 +169,56 @@ func TestNativeTemporaryDirectoryCloseRemovesOnlyItsOwnTreeOnce(t *testing.T) {
 	dangerous := &nativeTemporaryDirectory{path: string(filepath.Separator)}
 	if err := dangerous.close(); err == nil {
 		t.Fatal("closing a root-equivalent target succeeded")
+	}
+}
+
+func TestWholeFileCallsReturnTypedCancellationForNamedPipes(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		call func(context.Context, string) error
+	}{
+		{name: "read", call: func(ctx context.Context, path string) error {
+			_, err := readTextFileContext(ctx, path)
+			return err
+		}},
+		{name: "write", call: func(ctx context.Context, path string) error {
+			return writeTextFileContext(ctx, path, "contents")
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "blocked.fifo")
+			if err := syscall.Mkfifo(path, 0o600); err != nil {
+				t.Fatalf("create FIFO: %v", err)
+			}
+			peer, err := os.OpenFile(path, os.O_RDWR|syscall.O_NONBLOCK, 0)
+			if err != nil {
+				t.Fatalf("open FIFO peer: %v", err)
+			}
+			defer peer.Close()
+			if test.name == "write" {
+				chunk := make([]byte, 4096)
+				for {
+					if _, err := syscall.Write(int(peer.Fd()), chunk); err != nil {
+						if err != syscall.EAGAIN {
+							t.Fatalf("fill FIFO: %v", err)
+						}
+						break
+					}
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- test.call(ctx, path) }()
+			time.Sleep(20 * time.Millisecond)
+			cancel()
+			select {
+			case err := <-done:
+				if err != errFilesystemCancelled {
+					t.Fatalf("cancelled %s = %v, want %v", test.name, err, errFilesystemCancelled)
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("cancelled %s remained blocked", test.name)
+			}
+		})
 	}
 }

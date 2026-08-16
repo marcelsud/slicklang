@@ -176,24 +176,24 @@ var standardLibraryRegistry = struct {
 	interfaces []standardInterfaceDecl
 }{
 	namespaces: []standardNamespaceDecl{
-		{canonical: "std", documentation: "Provides compiler-owned portable standard-library components."},
+		{canonical: "std", documentation: "Provides compiler-owned portable components whose blocking calls inherit the active handler or task cancellation scope and return their module's typed Failure."},
 		{canonical: "std.bytes", documentation: "Converts and inspects immutable binary byte values."},
 		{canonical: "std.buffer", documentation: "Builds mutable sequences that freeze into immutable array snapshots."},
 		{canonical: "std.collections", documentation: "Defines failures shared by compiler-owned collection operations."},
 		{canonical: "std.convert", documentation: "Converts primitive values with explicit parse failures."},
 		{canonical: "std.math", documentation: "Provides checked integer arithmetic that returns typed Result failures."},
 		{canonical: "std.env", documentation: "Reads and updates the process environment without exposing values in failures."},
-		{canonical: "std.fs", documentation: "Performs bounded whole-file and directory operations on platform paths."},
+		{canonical: "std.fs", documentation: "Performs cancellation-aware bounded whole-file and directory operations on platform paths; whole-file calls accept regular files and named pipes."},
 		{canonical: "std.json", documentation: "Encodes and decodes supported Slick values as JSON."},
-		{canonical: "std.http", documentation: "Performs synchronous fully buffered HTTP requests with typed failures."},
+		{canonical: "std.http", documentation: "Performs cancellation-aware synchronous fully buffered HTTP requests with typed failures."},
 		{canonical: "std.http.server", documentation: "Serves bounded inbound HTTP requests through one typed Handler with graceful shutdown."},
 		{canonical: "std.path", documentation: "Manipulates platform-dependent filesystem path strings without accessing the filesystem."},
-		{canonical: "std.process", documentation: "Runs child programs directly without a shell and describes command-line results."},
+		{canonical: "std.process", documentation: "Runs cancellation-aware child programs directly without a shell and describes command-line results."},
 		{canonical: "std.text", documentation: "Provides deterministic Unicode-aware and substring text operations."},
 		{canonical: "std.io", documentation: "Provides bounded resource-safe byte readers, writers, and transfer helpers."},
 		{canonical: "std.utf8", documentation: "Decodes Unicode scalar values from immutable UTF-8 bytes."},
 		{canonical: "std.unicode", documentation: "Classifies Unicode scalar values using the toolchain's pinned tables."},
-		{canonical: "std.sqlite", documentation: "Provides resource-safe access to persistent and in-memory SQLite databases."},
+		{canonical: "std.sqlite", documentation: "Provides cancellation-aware resource-safe access to persistent and in-memory SQLite databases."},
 	},
 	functions: []standardFunctionDecl{
 		{
@@ -452,7 +452,7 @@ var standardLibraryRegistry = struct {
 			canonical:     string(nativeStdProcessRun),
 			namespace:     "std.process",
 			name:          "Run",
-			documentation: "Runs Program directly with Arguments, never through a shell, and captures at most MaxOutputBytes of combined output.",
+			documentation: "Runs Program directly with Arguments, never through a shell, captures at most MaxOutputBytes of combined output, and signals and reaps the child on cancellation.",
 			params: []paramDecl{
 				{name: "Program", typ: typeRef{name: "string"}},
 				{name: "Arguments", typ: typeRef{name: "string[]"}},
@@ -500,7 +500,7 @@ var standardLibraryRegistry = struct {
 			canonical:     string(nativeStdFSReadText),
 			namespace:     "std.fs",
 			name:          "ReadText",
-			documentation: "Reads Path completely as UTF-8 text or returns Failure for I/O or invalid UTF-8.",
+			documentation: "Reads Path completely as UTF-8 text, returns typed cancellation or I/O Failure, and rejects non-regular inputs other than named pipes.",
 			params:        []paramDecl{{name: "Path", typ: typeRef{name: "string"}}},
 			result:        typeRef{name: "Result<string,std.fs.Failure>"},
 			effects:       []string{effectFilesystem},
@@ -510,7 +510,7 @@ var standardLibraryRegistry = struct {
 			canonical:     string(nativeStdFSWriteText),
 			namespace:     "std.fs",
 			name:          "WriteText",
-			documentation: "Writes Contents to Path, replacing the file, or returns Failure.",
+			documentation: "Writes Contents to Path or returns typed cancellation or I/O Failure; cancellation may leave Path truncated or partially written, and non-regular inputs other than named pipes are rejected.",
 			params: []paramDecl{
 				{name: "Path", typ: typeRef{name: "string"}},
 				{name: "Contents", typ: typeRef{name: "string"}},
@@ -593,7 +593,7 @@ var standardLibraryRegistry = struct {
 			canonical:     string(nativeStdHTTPFetch),
 			namespace:     "std.http",
 			name:          "Fetch",
-			documentation: "Executes Request and returns a fully buffered Response or typed Failure.",
+			documentation: "Executes Request and returns a fully buffered Response or typed Failure with Kind Cancelled when its inherited scope is cancelled.",
 			params:        []paramDecl{{name: "Request", typ: typeRef{name: stdHTTPRequestName}}},
 			result:        typeRef{name: "Result<" + stdHTTPResponseName + "," + stdHTTPFailureName + ">"},
 			effects:       []string{effectNetwork},
@@ -961,7 +961,7 @@ var standardLibraryRegistry = struct {
 			documentation: "Describes a child process that never produced an exit code.",
 			isError:       true,
 			fields: []standardFieldDecl{
-				{name: "Operation", typ: typeRef{name: "string"}, documentation: "Names the failing step: Spawn, WorkingDirectory, Wait, Signal, or OutputLimit."},
+				{name: "Operation", typ: typeRef{name: "string"}, documentation: "Names the failing step: Spawn, WorkingDirectory, Wait, Signal, OutputLimit, or Cancelled."},
 				{name: "Program", typ: typeRef{name: "string"}, documentation: "Identifies the program that was asked to run."},
 				{name: "Message", typ: typeRef{name: "string"}, documentation: "Explains the failure without exposing environment values or captured output."},
 			},
@@ -1824,7 +1824,7 @@ func (p *program) callNativeFunction(function *functionDecl, frame *runtimeFrame
 		return runtimeEnvMutationResult(resultType, "Unset", name, os.Unsetenv(name)), nil
 	case nativeStdFSReadText:
 		path := frame.locals["Path"].scalar.(string)
-		contents, err := os.ReadFile(path)
+		contents, err := readTextFileContext(frame.ctx, path)
 		if err != nil {
 			return runtimeFSFailure(resultType, "ReadText", path, err), nil
 		}
@@ -1834,7 +1834,7 @@ func (p *program) callNativeFunction(function *functionDecl, frame *runtimeFrame
 		return runtimeResultValue(resultType, true, runtimeValue{typ: "string", scalar: string(contents)}), nil
 	case nativeStdFSWriteText:
 		path := frame.locals["Path"].scalar.(string)
-		err := os.WriteFile(path, []byte(frame.locals["Contents"].scalar.(string)), 0o666)
+		err := writeTextFileContext(frame.ctx, path, frame.locals["Contents"].scalar.(string))
 		return runtimeFSResult(resultType, "WriteText", path, err), nil
 	case nativeStdFSExists:
 		path := frame.locals["Path"].scalar.(string)
@@ -2071,7 +2071,7 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 	}
 	arguments := make([]string, 0, len(function.params))
 	parameters := make([]string, 0, len(function.params)+1)
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		parameters = append(parameters, "slickContext context.Context")
 	}
 	for _, parameter := range function.params {
@@ -2084,7 +2084,7 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 		parameters = append(parameters, argument+" "+g.goType(typ))
 	}
 	g.line("func %s(%s) (%s, error) {", goFunctionName(function.qualified), strings.Join(parameters, ", "), g.goType(resultType))
-	if g.program.usesAsync {
+	if g.program.usesContext {
 		g.line("if err := slickCheckCancellation(slickContext); err != nil { return %s, err }", g.zero(resultType))
 	}
 	switch function.native {
@@ -2252,7 +2252,11 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 		g.emitNativeEnvMutation(resultType, "Unset", arguments[0], fmt.Sprintf("os.Unsetenv(%s)", arguments[0]))
 	case nativeStdFSReadText:
 		result := g.goType(resultType)
-		g.line("contents, err := os.ReadFile(%s)", arguments[0])
+		if g.program.usesContext {
+			g.line("contents, err := slickFSReadText(slickContext, %s)", arguments[0])
+		} else {
+			g.line("contents, err := os.ReadFile(%s)", arguments[0])
+		}
 		g.line("if err != nil {")
 		g.emitNativeFSFailure(resultType, "ReadText", arguments[0], "err")
 		g.line("}")
@@ -2261,7 +2265,11 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 		g.line("}")
 		g.line("return %s{ok: true, value: string(contents)}, nil", result)
 	case nativeStdFSWriteText:
-		g.emitNativeFSResult(resultType, "WriteText", arguments[0], fmt.Sprintf("os.WriteFile(%s, []byte(%s), 0o666)", arguments[0], arguments[1]))
+		if g.program.usesContext {
+			g.emitNativeFSResult(resultType, "WriteText", arguments[0], fmt.Sprintf("slickFSWriteText(slickContext, %s, %s)", arguments[0], arguments[1]))
+		} else {
+			g.emitNativeFSResult(resultType, "WriteText", arguments[0], fmt.Sprintf("os.WriteFile(%s, []byte(%s), 0o666)", arguments[0], arguments[1]))
+		}
 	case nativeStdFSExists:
 		result := g.goType(resultType)
 		g.line("_, err := os.Stat(%s)", arguments[0])
@@ -2313,37 +2321,45 @@ func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
 	case nativeStdIOWriterToBytes:
 		g.line("return %s{slickResource: slickIONewWriter()}, nil", goClassName(stdIOBytesWriterName))
 	case nativeStdIOReadAll:
-		if g.program.usesAsync {
+		if g.program.usesContext {
 			g.line("return slickIOReadAll(slickContext, %s, %s)", arguments[0], arguments[1])
 		} else {
 			g.line("return slickIOReadAll(%s, %s)", arguments[0], arguments[1])
 		}
 	case nativeStdIOCopy:
-		if g.program.usesAsync {
+		if g.program.usesContext {
 			g.line("return slickIOCopy(slickContext, %s, %s, %s)", arguments[0], arguments[1], arguments[2])
 		} else {
 			g.line("return slickIOCopy(%s, %s, %s)", arguments[0], arguments[1], arguments[2])
 		}
 	case nativeStdHTTPFetch:
-		if g.program.usesAsync {
-			g.line("return slickHTTPFetch(slickContext, %s)", arguments[0])
-		} else {
-			g.line("return slickHTTPFetch(%s)", arguments[0])
+		callContext := "context.Background()"
+		if g.program.usesContext {
+			callContext = "slickContext"
 		}
+		g.line("return slickHTTPFetch(%s, %s)", callContext, arguments[0])
 	case nativeStdHTTPServerServe:
-		if g.program.usesAsync {
+		if g.program.usesContext {
 			g.line("return slickHTTPServerServe(slickContext, %s, %s)", arguments[0], arguments[1])
 		} else {
 			g.line("return slickHTTPServerServe(%s, %s)", arguments[0], arguments[1])
 		}
 	case nativeStdProcessRun:
-		g.line("return slickProcessRun(%s, %s, %s, %s)", arguments[0], arguments[1], arguments[2], arguments[3])
+		callContext := "context.Background()"
+		if g.program.usesContext {
+			callContext = "slickContext"
+		}
+		g.line("return slickProcessRun(%s, %s, %s, %s, %s)", callContext, arguments[0], arguments[1], arguments[2], arguments[3])
 	case nativeStdHTTPHeaderValues:
 		g.line("return slickHTTPHeaderValues(%s, %s), nil", arguments[0], arguments[1])
 	case nativeStdHTTPStatusText:
 		g.line("return slickHTTPStatusText(%s), nil", arguments[0])
 	case nativeStdSQLiteOpen:
-		g.line("return slickSQLiteOpen(%s)", arguments[0])
+		callContext := "context.Background()"
+		if g.program.usesContext {
+			callContext = "slickContext"
+		}
+		g.line("return slickSQLiteOpen(%s, %s)", callContext, arguments[0])
 	default:
 		return fmt.Errorf("unknown native Slick function %s", function.native)
 	}

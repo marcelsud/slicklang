@@ -162,7 +162,7 @@ func TestDescribeHumanBudgetContract(t *testing.T) {
 Kind: namespace
 Visibility: public
 Documentation:
-Provides compiler-owned portable standard-library components.
+Provides compiler-owned portable components whose blocking calls inherit the active handler or task cancellation scope and return their module's typed Failure.
 
 Children:
   … 16 more entries (re-run with a higher ` + "`--budget`" + `; use ` + "`--budget 23`" + ` for full output)
@@ -196,7 +196,7 @@ func TestDescribeJSONBudgetContract(t *testing.T) {
     "canonical_name": "std",
     "kind": "namespace",
     "visibility": "public",
-    "documentation": "Provides compiler-owned portable standard-library components.",
+    "documentation": "Provides compiler-owned portable components whose blocking calls inherit the active handler or task cancellation scope and return their module's typed Failure.",
     "annotations": [],
     "type": "",
     "type_callable": null,
