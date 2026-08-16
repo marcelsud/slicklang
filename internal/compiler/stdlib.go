@@ -961,7 +961,7 @@ var standardLibraryRegistry = struct {
 			documentation: "Describes a child process that never produced an exit code.",
 			isError:       true,
 			fields: []standardFieldDecl{
-				{name: "Operation", typ: typeRef{name: "string"}, documentation: "Names the failing step: Spawn, WorkingDirectory, Wait, Signal, or OutputLimit."},
+				{name: "Operation", typ: typeRef{name: "string"}, documentation: "Names the failing step: Spawn, WorkingDirectory, Wait, Signal, OutputLimit, or Cancelled."},
 				{name: "Program", typ: typeRef{name: "string"}, documentation: "Identifies the program that was asked to run."},
 				{name: "Message", typ: typeRef{name: "string"}, documentation: "Explains the failure without exposing environment values or captured output."},
 			},

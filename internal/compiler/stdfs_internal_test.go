@@ -190,6 +190,22 @@ func TestWholeFileCallsReturnTypedCancellationForNamedPipes(t *testing.T) {
 			if err := syscall.Mkfifo(path, 0o600); err != nil {
 				t.Fatalf("create FIFO: %v", err)
 			}
+			peer, err := os.OpenFile(path, os.O_RDWR|syscall.O_NONBLOCK, 0)
+			if err != nil {
+				t.Fatalf("open FIFO peer: %v", err)
+			}
+			defer peer.Close()
+			if test.name == "write" {
+				chunk := make([]byte, 4096)
+				for {
+					if _, err := syscall.Write(int(peer.Fd()), chunk); err != nil {
+						if err != syscall.EAGAIN {
+							t.Fatalf("fill FIFO: %v", err)
+						}
+						break
+					}
+				}
+			}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
 			go func() { done <- test.call(ctx, path) }()

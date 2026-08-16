@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 const (
@@ -177,7 +178,11 @@ func runProcess(ctx context.Context, program string, arguments []string, working
 	if maxOutputBytes < 0 {
 		return processCompletedData{}, processFailure("OutputLimit", program, "MaxOutputBytes must not be negative")
 	}
+	if ctx.Err() != nil {
+		return processCompletedData{}, processFailure("Cancelled", program, "operation cancelled before child start")
+	}
 	command := exec.CommandContext(ctx, program, arguments...)
+	command.WaitDelay = time.Millisecond
 	if hasWorkingDirectory {
 		info, err := os.Stat(workingDirectory)
 		if err != nil || !info.IsDir() {
@@ -185,10 +190,16 @@ func runProcess(ctx context.Context, program string, arguments []string, working
 		}
 		command.Dir = workingDirectory
 	}
+	if ctx.Err() != nil {
+		return processCompletedData{}, processFailure("Cancelled", program, "operation cancelled before child start")
+	}
 	capture := &processCapture{limit: maxOutputBytes}
 	command.Stdout = &processWriter{capture: capture}
 	command.Stderr = &processWriter{capture: capture, isError: true}
 	if err := command.Start(); err != nil {
+		if ctx.Err() != nil {
+			return processCompletedData{}, processFailure("Cancelled", program, "operation cancelled before child start")
+		}
 		return processCompletedData{}, processFailure("Spawn", program, err.Error())
 	}
 	capture.arm(command.Process)
@@ -292,16 +303,19 @@ func (g *goGenerator) emitProcessRuntimeSupport() {
 	g.line(`func slickProcessFailure(operation, program, message string) *slickProcessFailureData { return &slickProcessFailureData{operation: operation, program: program, message: message} }`)
 	g.line(`func slickProcessPerform(ctx context.Context, program string, arguments []string, workingDirectory string, hasWorkingDirectory bool, maxOutputBytes int64) (slickProcessCompletedData, *slickProcessFailureData) {`)
 	g.line(`if maxOutputBytes < 0 { return slickProcessCompletedData{}, slickProcessFailure("OutputLimit", program, "MaxOutputBytes must not be negative") }`)
+	g.line(`if ctx.Err() != nil { return slickProcessCompletedData{}, slickProcessFailure("Cancelled", program, "operation cancelled before child start") }`)
 	g.line(`command := exec.CommandContext(ctx, program, arguments...)`)
+	g.line(`command.WaitDelay = time.Millisecond`)
 	g.line(`if hasWorkingDirectory {`)
 	g.line(`info, err := os.Stat(workingDirectory)`)
 	g.line(`if err != nil || !info.IsDir() { return slickProcessCompletedData{}, slickProcessFailure("WorkingDirectory", program, "working directory is not an existing directory") }`)
 	g.line(`command.Dir = workingDirectory`)
 	g.line(`}`)
+	g.line(`if ctx.Err() != nil { return slickProcessCompletedData{}, slickProcessFailure("Cancelled", program, "operation cancelled before child start") }`)
 	g.line(`capture := &slickProcessCapture{limit: maxOutputBytes}`)
 	g.line(`command.Stdout = &slickProcessWriter{capture: capture}`)
 	g.line(`command.Stderr = &slickProcessWriter{capture: capture, isError: true}`)
-	g.line(`if err := command.Start(); err != nil { return slickProcessCompletedData{}, slickProcessFailure("Spawn", program, err.Error()) }`)
+	g.line(`if err := command.Start(); err != nil { if ctx.Err() != nil { return slickProcessCompletedData{}, slickProcessFailure("Cancelled", program, "operation cancelled before child start") }; return slickProcessCompletedData{}, slickProcessFailure("Spawn", program, err.Error()) }`)
 	g.line(`capture.arm(command.Process)`)
 	g.line(`waitError := command.Wait()`)
 	g.line(`if ctx.Err() != nil { return slickProcessCompletedData{}, slickProcessFailure("Cancelled", program, "operation cancelled; child process was signalled") }`)

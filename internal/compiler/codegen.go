@@ -122,6 +122,7 @@ func (p *program) generateGo() (string, error) {
 		"context":       true,
 		"errors":        true,
 		"fmt":           true,
+		"io":            true,
 		"math":          true,
 		"os":            true,
 		"path/filepath": true,
@@ -163,6 +164,7 @@ func (p *program) generateGo() (string, error) {
 	if p.usesStdProcess {
 		generator.imports["os/exec"] = true
 		generator.imports["sync"] = true
+		generator.imports["time"] = true
 	}
 	if p.usesStdSQLite {
 		for _, name := range []string{"database/sql", "errors", "fmt", "math", "modernc.org/sqlite", "os", "path/filepath", "strings", "sync", "sync/atomic", "unicode/utf8"} {
