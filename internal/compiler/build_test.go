@@ -84,6 +84,29 @@ func TestInterpreterMatchesExampleOutput(t *testing.T) {
 	}
 }
 
+func TestLLVMMatchesExampleOutput(t *testing.T) {
+	for project, expected := range exampleOutputs {
+		t.Run(project, func(t *testing.T) {
+			binary := filepath.Join(t.TempDir(), "app")
+			diagnostics, err := compiler.BuildPathBackend(examplePath(project), binary, compiler.BackendLLVM)
+			if err != nil {
+				if strings.Contains(err.Error(), "LLVM") && strings.Contains(err.Error(), "not found") {
+					t.Skip(err.Error())
+				}
+				t.Fatalf("build llvm binary: %v", err)
+			}
+			assertNoDiagnostics(t, diagnostics)
+			output, err := exec.Command(binary).CombinedOutput()
+			if err != nil {
+				t.Fatalf("run llvm binary: %v: %s", err, output)
+			}
+			if string(output) != expected+"\n" {
+				t.Fatalf("expected %q, found %q", expected+"\n", output)
+			}
+		})
+	}
+}
+
 func TestBuildPathStopsBeforeGoBuildOnSlickDiagnostics(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "main.slk")

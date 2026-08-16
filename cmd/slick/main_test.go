@@ -5,21 +5,33 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"slick/internal/compiler"
 )
 
 func TestParseBuildArgsAcceptsOutputAfterProject(t *testing.T) {
-	path, output, err := parseBuildArgs([]string{"examples/hello", "-o", "bin/hello"})
+	path, output, backend, err := parseBuildArgs([]string{"examples/hello", "-o", "bin/hello"})
 	if err != nil {
 		t.Fatalf("parse build arguments: %v", err)
 	}
-	if path != "examples/hello" || output != "bin/hello" {
-		t.Fatalf("unexpected build arguments: path=%q output=%q", path, output)
+	if path != "examples/hello" || output != "bin/hello" || backend != compiler.BackendGo {
+		t.Fatalf("unexpected build arguments: path=%q output=%q backend=%q", path, output, backend)
 	}
 }
 
 func TestParseBuildArgsRequiresOutput(t *testing.T) {
-	if _, _, err := parseBuildArgs([]string{"examples/hello"}); err == nil {
+	if _, _, _, err := parseBuildArgs([]string{"examples/hello"}); err == nil {
 		t.Fatal("build arguments accepted a missing output")
+	}
+}
+
+func TestParseBuildArgsAcceptsLLVMBackend(t *testing.T) {
+	_, _, backend, err := parseBuildArgs([]string{"examples/hello", "-o", "bin/hello", "--backend=llvm"})
+	if err != nil {
+		t.Fatalf("parse llvm backend: %v", err)
+	}
+	if backend != compiler.BackendLLVM {
+		t.Fatalf("expected llvm backend, found %q", backend)
 	}
 }
 

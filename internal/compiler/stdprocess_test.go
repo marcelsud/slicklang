@@ -226,14 +226,18 @@ func interpretProgram(t *testing.T, source string, arguments []string) programRe
 	}
 }
 
-func buildProgram(t *testing.T, source string) string {
+func buildProgram(t *testing.T, source string, backends ...compiler.Backend) string {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "main.slk"), []byte(source), 0o644); err != nil {
 		t.Fatalf("write Slick source: %v", err)
 	}
 	binary := filepath.Join(root, "app")
-	diagnostics, err := compiler.BuildPath(root, binary)
+	backend := compiler.BackendGo
+	if len(backends) > 0 {
+		backend = backends[0]
+	}
+	diagnostics, err := compiler.BuildPathBackend(root, binary, backend)
 	if err != nil {
 		t.Fatalf("build Slick binary: %v", err)
 	}
@@ -472,6 +476,15 @@ func TestInterpretedCLIStatusReportsArgumentsBytesAndExitCode(t *testing.T) {
 
 func TestNativeCLIStatusMatchesTheInterpreter(t *testing.T) {
 	binary := buildProgram(t, processCLISource)
+	for name, arguments := range cliArguments {
+		t.Run(name, func(t *testing.T) {
+			assertCLIResult(t, arguments, executeProgram(t, binary, arguments))
+		})
+	}
+}
+
+func TestLLVMCLIStatusMatchesTheInterpreter(t *testing.T) {
+	binary := buildProgram(t, processCLISource, compiler.BackendLLVM)
 	for name, arguments := range cliArguments {
 		t.Run(name, func(t *testing.T) {
 			assertCLIResult(t, arguments, executeProgram(t, binary, arguments))

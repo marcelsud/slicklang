@@ -194,7 +194,7 @@ func waitForHTTP(t *testing.T, url string) {
 	t.Fatalf("server at %s did not become ready", url)
 }
 
-func buildHTTPServerBinary(t *testing.T, source string) string {
+func buildHTTPServerBinary(t *testing.T, source string, backends ...compiler.Backend) string {
 	t.Helper()
 	root := t.TempDir()
 	path := filepath.Join(root, "main.slk")
@@ -202,7 +202,13 @@ func buildHTTPServerBinary(t *testing.T, source string) string {
 		t.Fatalf("write source: %v", err)
 	}
 	binary := filepath.Join(root, "server")
-	diagnostics, err := compiler.BuildPath(path, binary)
+	backend := compiler.BackendGo
+	if len(backends) > 0 {
+		backend = backends[0]
+	} else if strings.HasSuffix(t.Name(), "/llvm") {
+		backend = compiler.BackendLLVM
+	}
+	diagnostics, err := compiler.BuildPathBackend(path, binary, backend)
 	if err != nil {
 		t.Fatalf("build server: %v", err)
 	}
@@ -489,6 +495,11 @@ function main() -> string effects { database, environment, filesystem, io, netwo
 }
 
 func TestStdHTTPServerServeContractsNative(t *testing.T) {
+	t.Run("go", testStdHTTPServerServeContractsNative)
+	t.Run("llvm", testStdHTTPServerServeContractsNative)
+}
+
+func testStdHTTPServerServeContractsNative(t *testing.T) {
 	address := freeLoopbackAddress(t)
 	source := httpServerEchoHandler + `
 function main() -> Result<null, std.http.server.Failure> effects { database, environment, filesystem, io, network, process, random, state, time } {
@@ -694,6 +705,41 @@ function main() -> Result<null, std.http.server.Failure> effects { database, env
 	assertShutdownDeadlineSucceeds(t, command, base, blockerStarted, output)
 }
 
+func TestTodoAPIExampleServesAndCleansUpUnderLLVM(t *testing.T) {
+	address := freeLoopbackAddress(t)
+	binary := filepath.Join(t.TempDir(), "todo-api")
+	diagnostics, err := compiler.BuildPathBackend(examplePath("todo-api"), binary, compiler.BackendLLVM)
+	if err != nil {
+		t.Fatalf("build Todo API: %v", err)
+	}
+	assertNoDiagnostics(t, diagnostics)
+	database := filepath.Join(t.TempDir(), "todos.db")
+	command, output := startHTTPServerBinary(t, binary, address,
+		"TODO_API_DATABASE="+database,
+		"TODO_API_ADDRESS="+address,
+	)
+	base := "http://" + address
+	waitForHTTP(t, base+"/health")
+	response, err := http.Get(base + "/health")
+	if err != nil {
+		t.Fatalf("Todo API health request: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("Todo API health status %d", response.StatusCode)
+	}
+	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal Todo API: %v", err)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatalf("Todo API shutdown: %v output=%q", err, output.String())
+	}
+	command.Process = nil
+	if got := strings.TrimSpace(output.String()); got != "" {
+		t.Fatalf("Todo API output %q, want empty", got)
+	}
+}
+
 func TestStdHTTPServerServeContractsInterpreter(t *testing.T) {
 	address := freeLoopbackAddress(t)
 	source := httpServerEchoHandler + `
@@ -827,7 +873,8 @@ function main() -> Result<null, std.http.server.Failure> effects { database, env
     }
 }
 `
-	native := buildHTTPServerBinary(t, source)
+	nativeGo := buildHTTPServerBinary(t, source, compiler.BackendGo)
+	nativeLLVM := buildHTTPServerBinary(t, source, compiler.BackendLLVM)
 	root := t.TempDir()
 	sourcePath := filepath.Join(root, "main.slk")
 	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
@@ -838,8 +885,11 @@ function main() -> Result<null, std.http.server.Failure> effects { database, env
 		name  string
 		start func(*testing.T, string, ...string) (*exec.Cmd, *strings.Builder)
 	}{
-		{name: "native", start: func(t *testing.T, address string, env ...string) (*exec.Cmd, *strings.Builder) {
-			return startHTTPServerBinary(t, native, address, env...)
+		{name: "go", start: func(t *testing.T, address string, env ...string) (*exec.Cmd, *strings.Builder) {
+			return startHTTPServerBinary(t, nativeGo, address, env...)
+		}},
+		{name: "llvm", start: func(t *testing.T, address string, env ...string) (*exec.Cmd, *strings.Builder) {
+			return startHTTPServerBinary(t, nativeLLVM, address, env...)
 		}},
 		{name: "interpreter", start: func(t *testing.T, address string, env ...string) (*exec.Cmd, *strings.Builder) {
 			return startHTTPServerInterpreter(t, slick, sourcePath, address, env...)
