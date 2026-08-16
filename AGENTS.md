@@ -31,6 +31,27 @@ Native resource classes set `nativeResource` to the Go pointer type of their run
 5. the surfaces: `describe.go` with `cmd/slick/describe.go`, `isTopDeclaration` and `collectBreaks` (`format.go`), `highlightKeywords` (`highlight.go`);
 6. diagnostics in `diagnostics.go`, whose definitions must stay sorted by code, and an example project pinned in `exampleOutputs`.
 
+## Adding a lint or quality rule
+
+`slick lint` and `slick quality` report warnings about programs that already
+compile. `internal/compiler/lint.go` owns the three lint rules, `complexity.go`
+the two complexity metrics, and `quality.go` the aggregation both the gate and
+`cmd/slick/quality.go` render from; neither command compiles a project twice,
+because quality calls the private `p.lint()` rather than public `Lint`.
+
+- A new code goes in `diagnosticDefinitions` sorted by code, in phase `lint` or
+  `quality` and marked `asWarning()`. The registry rejects either half alone:
+  those two phases are warnings by construction, every other phase is an error.
+- Both walkers iterate `p.authoredCallables()`, which skips natives and
+  monomorphized clones, so a mistake in a generic is reported once.
+- A new statement or expression node must be classified in `complexity.go`, or
+  `TestComplexityWalkerClassifiesEveryASTNode` fails and the walker's fallback
+  turns the analysis into an error rather than a silent zero.
+- Per-callable measurement needs the source extent, so `callableTail.end` and
+  `blockNode.end` carry the closing brace the parser matched.
+- Limits are fixed constants with no configuration, baseline, or suppression:
+  every example project must pass `slick quality --check`.
+
 ## User-defined generics
 
 `internal/compiler/generics.go` monomorphizes them: an open declaration lives only in `program.genericClasses`, `genericInterfaces`, `genericFunctions`, or `genericMethodImpls`, and every concrete instantiation a program mentions is registered in the ordinary maps under its canonical name (`root.Box<int>`). Downstream code therefore needs no generic awareness — `goEncodedName` already hex-encodes the whole name, and `p.classes[...]` lookups find instances for free. Two consequences worth knowing before touching this:

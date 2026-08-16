@@ -111,7 +111,9 @@ func TestDescribeUsageErrorsStayOnStderr(t *testing.T) {
 		"usage: slick check [path]\n       slick run [path] [arguments...]\n" +
 		"       slick build [path] -o <output>\n" +
 		"       slick describe [--json] [--budget <lines>] <symbol|diagnostic-code> [path]\n" +
-		"       slick fmt [--check] [path]\n"
+		"       slick fmt [--check] [path]\n" +
+		"       slick lint [path]\n" +
+		"       slick quality [--check] [path]\n"
 	if stderr.String() != want {
 		t.Fatalf("usage stderr=%q, want %q", stderr.String(), want)
 	}

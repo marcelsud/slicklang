@@ -3,8 +3,43 @@ function InitializeSchema(Database: std.sqlite.Database) -> Result<null, std.sql
         SQL: "CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)))"
         Parameters: []
     }
-    let Exec = Database.Execute(Stmt)?
+    Database.Execute(Stmt)?
     Ok(null)
+}
+
+function TodoIdOf(Value: std.sqlite.Value) -> int {
+    match Value {
+        std.sqlite.Value.Integer(N) => N
+        _ => 0
+    }
+}
+
+function TodoTitleOf(Value: std.sqlite.Value) -> string {
+    match Value {
+        std.sqlite.Value.Text(T) => T
+        _ => ""
+    }
+}
+
+function TodoCompletedOf(Value: std.sqlite.Value) -> bool {
+    match Value {
+        std.sqlite.Value.Integer(C) => C == 1
+        _ => false
+    }
+}
+
+function BuildTodo(IdVal: std.sqlite.Value, TitleVal: std.sqlite.Value, CompletedVal: std.sqlite.Value) -> Todo? {
+    let Id = TodoIdOf(IdVal)
+    let Title = TodoTitleOf(TitleVal)
+    if (Id <= 0 || Title == "") {
+        null
+    } else {
+        Todo {
+            Id: Id
+            Title: Title
+            Completed: TodoCompletedOf(CompletedVal)
+        }
+    }
 }
 
 function ExtractTodo(Row: std.sqlite.Row) -> Todo? {
@@ -14,36 +49,12 @@ function ExtractTodo(Row: std.sqlite.Row) -> Todo? {
     let CompletedVal = Values.Get("completed")
     if (IdVal == null) {
         null
+    } else if (TitleVal == null) {
+        null
+    } else if (CompletedVal == null) {
+        null
     } else {
-        if (TitleVal == null) {
-            null
-        } else {
-            if (CompletedVal == null) {
-                null
-            } else {
-                let Id = match IdVal {
-                    std.sqlite.Value.Integer(N) => N
-                    _ => 0
-                }
-                let Title = match TitleVal {
-                    std.sqlite.Value.Text(T) => T
-                    _ => ""
-                }
-                let Completed = match CompletedVal {
-                    std.sqlite.Value.Integer(C) => C == 1
-                    _ => false
-                }
-                if (Id <= 0 || Title == "") {
-                    null
-                } else {
-                    Todo {
-                        Id: Id
-                        Title: Title
-                        Completed: Completed
-                    }
-                }
-            }
-        }
+        BuildTodo(IdVal, TitleVal, CompletedVal)
     }
 }
 
@@ -54,7 +65,7 @@ function CheckHealth(Database: std.sqlite.Database) -> Result<bool, std.sqlite.F
         MaxRows: 1
         MaxBytes: 1024
     }
-    let Rows = Database.Query(Query)?
+    Database.Query(Query)?
     Ok(true)
 }
 
@@ -125,7 +136,7 @@ function UpdateTodoInTx(Database: std.sqlite.Database, Id: int, Title: string, C
         }
         let Exec = Tx.Execute(UpdateStmt)?
         if (Exec.RowsAffected == 0) {
-            let RolledBack = Tx.Rollback()?
+            Tx.Rollback()?
             Ok(null)
         } else {
             let ReadQuery = std.sqlite.Query {
@@ -137,11 +148,11 @@ function UpdateTodoInTx(Database: std.sqlite.Database, Id: int, Title: string, C
             let Rows = Tx.Query(ReadQuery)?
             let First = Rows.Get(0)
             if (First == null) {
-                let RolledBack = Tx.Rollback()?
+                Tx.Rollback()?
                 Ok(null)
             } else {
                 let Item = ExtractTodo(First)
-                let Committed = Tx.Commit()?
+                Tx.Commit()?
                 Ok(Item)
             }
         }

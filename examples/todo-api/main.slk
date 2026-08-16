@@ -43,7 +43,7 @@ function StartServer(Database: std.sqlite.Database, Address: string) -> Result<n
 
 function RunWithDatabase(DatabasePath: string, Address: string) -> Result<null, std.sqlite.Failure> throws std.sqlite.Failure effects { database, environment, filesystem, io, network, process, random, state, time } {
     using Database = std.sqlite.Open(DatabasePath)? {
-        let SchemaResult = InitializeSchema(Database)?
+        InitializeSchema(Database)?
         StartServer(Database, Address)
     }
 }

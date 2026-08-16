@@ -207,39 +207,47 @@ function DispatchTodoItem(Database: std.sqlite.Database, Method: string, IdText:
     }
 }
 
+function DispatchHealth(Database: std.sqlite.Database, Method: string) -> std.http.server.Response effects { database } {
+    if (Method == "GET") {
+        HandleHealth(Database)
+    } else {
+        MethodNotAllowed("GET")
+    }
+}
+
+function DispatchTodoCollection(Database: std.sqlite.Database, Method: string, Body: bytes) -> std.http.server.Response effects { database, state } {
+    if (Method == "GET") {
+        HandleListTodos(Database)
+    } else if (Method == "POST") {
+        HandleCreateTodo(Database, Body)
+    } else {
+        MethodNotAllowed("GET, POST")
+    }
+}
+
+function DispatchTodoPath(Database: std.sqlite.Database, Request: std.http.server.Request) -> std.http.server.Response effects { database } {
+    let CutResult = std.text.Cut(Request.Path, "/todos/")
+    if (CutResult == null) {
+        ErrorResponseJson(404, "not found")
+    } else {
+        let (Prefix, IdText) = CutResult
+        if (Prefix == "" && !std.text.Contains(IdText, "/")) {
+            DispatchTodoItem(Database, Request.Method, IdText, Request.Body)
+        } else {
+            ErrorResponseJson(404, "not found")
+        }
+    }
+}
+
 class TodoAPI implements std.http.server.Handler {
     Database: std.sqlite.Database
     function Handle(Request: std.http.server.Request) -> std.http.server.Response effects { database, state } {
         if (Request.Path == "/health") {
-            if (Request.Method == "GET") {
-                HandleHealth(self.Database)
-            } else {
-                MethodNotAllowed("GET")
-            }
+            DispatchHealth(self.Database, Request.Method)
+        } else if (Request.Path == "/todos") {
+            DispatchTodoCollection(self.Database, Request.Method, Request.Body)
         } else {
-            if (Request.Path == "/todos") {
-                if (Request.Method == "GET") {
-                    HandleListTodos(self.Database)
-                } else {
-                    if (Request.Method == "POST") {
-                        HandleCreateTodo(self.Database, Request.Body)
-                    } else {
-                        MethodNotAllowed("GET, POST")
-                    }
-                }
-            } else {
-                let CutResult = std.text.Cut(Request.Path, "/todos/")
-                if (CutResult != null) {
-                    let (Prefix, IdText) = CutResult
-                    if (Prefix == "" && !std.text.Contains(IdText, "/")) {
-                        DispatchTodoItem(self.Database, Request.Method, IdText, Request.Body)
-                    } else {
-                        ErrorResponseJson(404, "not found")
-                    }
-                } else {
-                    ErrorResponseJson(404, "not found")
-                }
-            }
+            DispatchTodoPath(self.Database, Request)
         }
     }
 }

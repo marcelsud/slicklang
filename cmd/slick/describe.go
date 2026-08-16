@@ -99,7 +99,7 @@ func runDescribe(args []string, stdout, stderr io.Writer) int {
 			})
 		} else {
 			for _, diagnostic := range diagnostics {
-				fmt.Fprintf(stdout, "%s:%d:%d: error[%s]: %s\n", diagnostic.File, diagnostic.Line, diagnostic.Column, diagnostic.Code, diagnostic.Message)
+				fmt.Fprintln(stdout, formatDiagnostic(diagnostic))
 			}
 		}
 		return 1
@@ -198,6 +198,8 @@ func reportUsageTo(stderr io.Writer) int {
 	fmt.Fprintln(stderr, "       slick build [path] -o <output>")
 	fmt.Fprintln(stderr, "       slick describe [--json] [--budget <lines>] <symbol|diagnostic-code> [path]")
 	fmt.Fprintln(stderr, "       slick fmt [--check] [path]")
+	fmt.Fprintln(stderr, "       slick lint [path]")
+	fmt.Fprintln(stderr, "       slick quality [--check] [path]")
 	return 2
 }
 

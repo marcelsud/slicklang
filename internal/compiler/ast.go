@@ -6,9 +6,14 @@ import (
 	"text/scanner"
 )
 
+// blockNode is one brace-delimited sequence of statements. end is the position
+// of the closing brace, which the quality analyzer needs in order to measure a
+// callable's source extent; a synthesized block has no closing brace and leaves
+// it zero.
 type blockNode struct {
 	statements []statementNode
 	pos        position
+	end        position
 	hasAsync   bool
 }
 
@@ -371,25 +376,29 @@ func (p *program) parseBodies() {
 		if function.native != "" {
 			continue
 		}
-		function.ast = p.parseBody(function.body, function.pos)
+		function.ast = p.parseBody(function.body, function.pos, function.end)
 	}
 	for _, function := range p.genericFunctions {
-		function.ast = p.parseBody(function.body, function.pos)
+		function.ast = p.parseBody(function.body, function.pos, function.end)
 	}
 	for _, implementation := range p.methodImpls {
 		if implementation.native != "" {
 			continue
 		}
-		implementation.ast = p.parseBody(implementation.body, implementation.pos)
+		implementation.ast = p.parseBody(implementation.body, implementation.pos, implementation.end)
 	}
 	for _, implementation := range p.genericMethodImpls {
-		implementation.ast = p.parseBody(implementation.body, implementation.pos)
+		implementation.ast = p.parseBody(implementation.body, implementation.pos, implementation.end)
 	}
 }
 
-func (p *program) parseBody(tokens []token, pos position) *blockNode {
+// parseBody parses a declared body, whose braces the declaration already
+// consumed, so end is the closing brace the caller matched.
+func (p *program) parseBody(tokens []token, pos, end position) *blockNode {
 	parser := &bodyParser{program: p, tokens: tokens}
-	return parser.parseBlock(false, pos)
+	block := parser.parseBlock(false, pos)
+	block.end = end
+	return block
 }
 
 func (p *bodyParser) parseBlock(expectClose bool, pos position) *blockNode {
@@ -409,8 +418,12 @@ func (p *bodyParser) parseBlock(expectClose bool, pos position) *blockNode {
 			p.index++
 		}
 	}
-	if expectClose && !p.accept("}") {
-		p.error(pos, "unterminated block")
+	if expectClose {
+		if p.accept("}") {
+			block.end = p.previous().pos
+		} else {
+			p.error(pos, "unterminated block")
+		}
 	}
 	return block
 }

@@ -23,6 +23,12 @@ func run(args []string) int {
 	if args[0] == "fmt" {
 		return runFmt(args[1:], os.Stdout, os.Stderr)
 	}
+	if args[0] == "lint" {
+		return runLint(args[1:], os.Stdout, os.Stderr)
+	}
+	if args[0] == "quality" {
+		return runQuality(args[1:], os.Stdout, os.Stderr)
+	}
 	if args[0] == "build" {
 		path, output, err := parseBuildArgs(args[1:])
 		if err != nil {
@@ -129,9 +135,16 @@ func reportDiagnostics(diagnostics []compiler.Diagnostic) bool {
 
 func reportDiagnosticsTo(stdout io.Writer, diagnostics []compiler.Diagnostic) bool {
 	for _, diagnostic := range diagnostics {
-		fmt.Fprintf(stdout, "%s:%d:%d: error[%s]: %s\n", diagnostic.File, diagnostic.Line, diagnostic.Column, diagnostic.Code, diagnostic.Message)
+		fmt.Fprintln(stdout, formatDiagnostic(diagnostic))
 	}
 	return len(diagnostics) > 0
+}
+
+// formatDiagnostic is the one line every command prints for one diagnostic. The
+// registered severity of the code decides whether it reads error or warning.
+func formatDiagnostic(diagnostic compiler.Diagnostic) string {
+	return fmt.Sprintf("%s:%d:%d: %s[%s]: %s",
+		diagnostic.File, diagnostic.Line, diagnostic.Column, diagnostic.Severity, diagnostic.Code, diagnostic.Message)
 }
 
 func reportError(command string, err error) int {

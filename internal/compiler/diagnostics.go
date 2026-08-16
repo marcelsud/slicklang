@@ -3,6 +3,7 @@ package compiler
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -10,7 +11,13 @@ type diagnosticCode string
 
 type DiagnosticSeverity string
 
-const DiagnosticSeverityError DiagnosticSeverity = "error"
+const (
+	// DiagnosticSeverityError marks a fact that makes a program invalid.
+	DiagnosticSeverityError DiagnosticSeverity = "error"
+	// DiagnosticSeverityWarning marks a fact about a valid program: the source
+	// compiles, and an explicit lint or quality gate still rejects it.
+	DiagnosticSeverityWarning DiagnosticSeverity = "warning"
+)
 
 type DiagnosticPhase string
 
@@ -23,6 +30,8 @@ const (
 	DiagnosticPhaseVisibilityCheck DiagnosticPhase = "visibility-check"
 	DiagnosticPhaseResourceCheck   DiagnosticPhase = "resource-check"
 	DiagnosticPhaseDocumentation   DiagnosticPhase = "documentation"
+	DiagnosticPhaseLint            DiagnosticPhase = "lint"
+	DiagnosticPhaseQuality         DiagnosticPhase = "quality"
 )
 
 const (
@@ -111,6 +120,11 @@ const (
 	diagnosticCodeAnnotationArgument       diagnosticCode = "SLK417"
 	diagnosticCodeAnnotationCycle          diagnosticCode = "SLK418"
 	diagnosticCodeUnwrapValue              diagnosticCode = "SLK419"
+	diagnosticCodeUnreadBinding            diagnosticCode = "SLK500"
+	diagnosticCodeDiscardedExpression      diagnosticCode = "SLK501"
+	diagnosticCodeUnreachableStatement     diagnosticCode = "SLK502"
+	diagnosticCodeCyclomaticComplexity     diagnosticCode = "SLK503"
+	diagnosticCodeCognitiveComplexity      diagnosticCode = "SLK504"
 )
 
 var ErrUnknownDiagnostic = errors.New("unknown diagnostic")
@@ -151,6 +165,13 @@ func defineDiagnostic(code diagnosticCode, phase DiagnosticPhase, title, explana
 		Trigger:     trigger,
 		Fixes:       fixes,
 	}
+}
+
+// asWarning marks a definition reported about a valid program. A warning never
+// blocks compilation; the lint and quality gates decide what to do with it.
+func (definition diagnosticDefinition) asWarning() diagnosticDefinition {
+	definition.Severity = DiagnosticSeverityWarning
+	return definition
 }
 
 func (definition diagnosticDefinition) withExamples(invalid, valid string) diagnosticDefinition {
@@ -623,6 +644,53 @@ var diagnosticDefinitions = []diagnosticDefinition{
 		"The argument to unwrap is not a Result value.",
 		"Pass a Result<T, E> whose E implements Error.",
 		"Match the value, or compare an optional with null."),
+	defineDiagnostic(diagnosticCodeUnreadBinding, DiagnosticPhaseLint,
+		"Local binding is never read",
+		"A let binding names a value so a later expression can read it. A binding with no read states an intent the program never uses, which is dead source the compiler accepts.",
+		"A let binding's lexical identity has zero reads, counting reads through fields, methods, interpolation, nested branches, and lambda captures.",
+		"Remove the statement when the initializer is pure.",
+		"Keep the expression and drop the binding when the initializer has effects, such as Work()? instead of let Result = Work()?.",
+		"Bind _ in a destructuring pattern to state an explicit discard.").
+		withExamples("let Unused = Value + 1\nValue", "Value").
+		asWarning(),
+	defineDiagnostic(diagnosticCodeDiscardedExpression, DiagnosticPhaseLint,
+		"Pure expression result is discarded",
+		"Only a block's final expression is its value, so an earlier expression statement is evaluated for its effects. An expression proved free of effects has none, and the statement does nothing.",
+		"A non-final expression statement's tree is built only from literals, reads, lambdas, construction, and built-in operators over pure children.",
+		"Delete the statement.",
+		"Bind the value with let and read it.",
+		"Make the value the block's final expression.").
+		withExamples("\"discarded\"\n\"ok\"", "\"ok\"").
+		withRelated(diagnosticCodeUnreadBinding).
+		asWarning(),
+	defineDiagnostic(diagnosticCodeUnreachableStatement, DiagnosticPhaseLint,
+		"Statement is unreachable",
+		"return, throw, break, and continue leave their block, so a statement written after one in the same block never runs.",
+		"A statement directly follows return, throw, break, or continue inside one block.",
+		"Delete the statements after the terminator.",
+		"Move the terminator after the work it was meant to follow.").
+		withExamples("return 1\n2", "1").
+		asWarning(),
+	defineDiagnostic(diagnosticCodeCyclomaticComplexity, DiagnosticPhaseQuality,
+		"Cyclomatic complexity exceeds its limit",
+		"Cyclomatic complexity counts the independent decisions one callable makes. The score starts at 1 and adds 1 for each if, each for, each short-circuit && or ||, and each postfix ?, plus N-1 for a match with N arms and N for a catch with N arms. A lambda is scored separately from the callable that contains it.",
+		"An authored function, method, or lambda scores above 10.",
+		"Split independent decisions into separate callables that each own one alternative.",
+		"Flatten control flow with else if or an early return instead of nesting.",
+		"Replace a chain of short-circuit operators with one named predicate.").
+		withExamples("if (Ready && Allowed && !Expired && Fresh) {\n    1\n} else {\n    0\n}", "if (Accepted(Ready, Allowed, Expired, Fresh)) {\n    1\n} else {\n    0\n}").
+		withRelated(diagnosticCodeCognitiveComplexity).
+		asWarning(),
+	defineDiagnostic(diagnosticCodeCognitiveComplexity, DiagnosticPhaseQuality,
+		"Cognitive complexity exceeds its limit",
+		"Cognitive complexity counts nested mental context rather than length. if, for, match, and each catch arm cost 1 plus the current control-flow nesting; a source-level else if costs 1 without another nesting penalty; each maximal run of one short-circuit operator costs 1; postfix ? costs 1 for its implicit early exit. using is transparent, and a lambda starts its own score at nesting zero.",
+		"An authored function, method, or lambda scores above 15.",
+		"Extract a nested branch into a named callable, where it reads at nesting zero.",
+		"Replace a tower of nested if/else blocks with an else if chain.",
+		"Return early so the remaining work is not nested.").
+		withExamples("if (A) {\n    1\n} else {\n    if (B) {\n        2\n    } else {\n        3\n    }\n}", "if (A) {\n    1\n} else if (B) {\n    2\n} else {\n    3\n}").
+		withRelated(diagnosticCodeCyclomaticComplexity).
+		asWarning(),
 }
 
 var diagnosticRegistry = mustBuildDiagnosticRegistry(diagnosticDefinitions)
@@ -692,8 +760,11 @@ func buildDiagnosticRegistry(definitions []diagnosticDefinition) (map[diagnostic
 			return nil, fmt.Errorf("diagnostic definitions are not ordered by code: %s follows %s", definition.Code, previous)
 		}
 		previous = definition.Code
-		if definition.Severity != DiagnosticSeverityError {
+		if !validDiagnosticSeverity(definition.Severity) {
 			return nil, fmt.Errorf("diagnostic %s has invalid severity %q", definition.Code, definition.Severity)
+		}
+		if isWarningPhase(definition.Phase) != (definition.Severity == DiagnosticSeverityWarning) {
+			return nil, fmt.Errorf("diagnostic %s pairs phase %q with severity %q", definition.Code, definition.Phase, definition.Severity)
 		}
 		if !validDiagnosticPhase(definition.Phase) {
 			return nil, fmt.Errorf("diagnostic %s has invalid phase %q", definition.Code, definition.Phase)
@@ -739,22 +810,59 @@ func validDiagnosticPhase(phase DiagnosticPhase) bool {
 		DiagnosticPhaseMethodCheck,
 		DiagnosticPhaseVisibilityCheck,
 		DiagnosticPhaseResourceCheck,
-		DiagnosticPhaseDocumentation:
+		DiagnosticPhaseDocumentation,
+		DiagnosticPhaseLint,
+		DiagnosticPhaseQuality:
 		return true
 	default:
 		return false
 	}
 }
 
+func validDiagnosticSeverity(severity DiagnosticSeverity) bool {
+	switch severity {
+	case DiagnosticSeverityError, DiagnosticSeverityWarning:
+		return true
+	default:
+		return false
+	}
+}
+
+// isWarningPhase names the phases that examine an already valid program. Their
+// findings are warnings by construction: compilation has already succeeded.
+func isWarningPhase(phase DiagnosticPhase) bool {
+	return phase == DiagnosticPhaseLint || phase == DiagnosticPhaseQuality
+}
+
 func newDiagnostic(pos position, code diagnosticCode, format string, args ...any) Diagnostic {
-	if _, registered := diagnosticRegistry[code]; !registered {
+	definition, registered := diagnosticRegistry[code]
+	if !registered {
 		panic(fmt.Sprintf("unregistered diagnostic code %q", code))
 	}
 	return Diagnostic{
-		File:    pos.file,
-		Line:    pos.line,
-		Column:  pos.column,
-		Code:    string(code),
-		Message: fmt.Sprintf(format, args...),
+		File:     pos.file,
+		Line:     pos.line,
+		Column:   pos.column,
+		Code:     string(code),
+		Severity: definition.Severity,
+		Message:  fmt.Sprintf(format, args...),
 	}
+}
+
+// sortDiagnostics puts diagnostics in the one total order every gate reports:
+// file, line, column, then code.
+func sortDiagnostics(diagnostics []Diagnostic) {
+	sort.SliceStable(diagnostics, func(first, second int) bool {
+		left, right := diagnostics[first], diagnostics[second]
+		if left.File != right.File {
+			return left.File < right.File
+		}
+		if left.Line != right.Line {
+			return left.Line < right.Line
+		}
+		if left.Column != right.Column {
+			return left.Column < right.Column
+		}
+		return left.Code < right.Code
+	})
 }
