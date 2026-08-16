@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"slick/internal/compiler"
 )
@@ -18,7 +17,7 @@ type formattedFile struct {
 }
 
 func runFmt(args []string, stdout, stderr io.Writer) int {
-	path, check, err := parseFmtArgs(args)
+	path, check, err := parseCheckPathArgs("fmt", args)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return reportUsageTo(stderr)
@@ -50,7 +49,7 @@ func runFmt(args []string, stdout, stderr io.Writer) int {
 		if len(diagnostics) > 0 {
 			invalid = true
 			for _, diagnostic := range diagnostics {
-				fmt.Fprintf(stderr, "%s:%d:%d: error[%s]: %s\n", diagnostic.File, diagnostic.Line, diagnostic.Column, diagnostic.Code, diagnostic.Message)
+				fmt.Fprintln(stderr, formatDiagnostic(diagnostic))
 			}
 			continue
 		}
@@ -96,29 +95,6 @@ func runFmt(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	return 0
-}
-
-func parseFmtArgs(args []string) (path string, check bool, err error) {
-	path = "."
-	pathSet := false
-	for _, arg := range args {
-		switch {
-		case arg == "--check":
-			if check {
-				return "", false, errors.New("fmt --check may only be specified once")
-			}
-			check = true
-		case strings.HasPrefix(arg, "-"):
-			return "", false, fmt.Errorf("unknown fmt flag %q", arg)
-		default:
-			if pathSet {
-				return "", false, fmt.Errorf("unexpected fmt argument %q", arg)
-			}
-			path = arg
-			pathSet = true
-		}
-	}
-	return path, check, nil
 }
 
 func replaceFile(file formattedFile) (err error) {

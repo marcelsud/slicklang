@@ -20,12 +20,16 @@ type Source struct {
 	Text      string
 }
 
+// Diagnostic is one reported source fact. Severity comes from the registered
+// definition of Code: compiler diagnostics are errors, lint and quality
+// findings are warnings.
 type Diagnostic struct {
-	File    string
-	Line    int
-	Column  int
-	Code    string
-	Message string
+	File     string
+	Line     int
+	Column   int
+	Code     string
+	Severity DiagnosticSeverity
+	Message  string
 }
 
 type position struct {
@@ -154,6 +158,9 @@ type functionDecl struct {
 	annotations       []*annotationUse
 	documentation     *string
 	pos               position
+	// end is the closing brace of the declared body, which bounds the source
+	// extent quality analysis measures.
+	end position
 }
 
 type program struct {
@@ -666,10 +673,11 @@ func (p *parser) parseClassMethod(class *classDecl, registered bool) {
 	if !ok {
 		return
 	}
-	params, result, throws, operations, body, hasBody, ok := p.parseCallableTail()
-	if !ok {
+	tail := p.parseCallableTail()
+	if !tail.ok {
 		return
 	}
+	params, result, throws, operations := tail.params, tail.result, tail.throws, tail.operations
 	signature := &methodSignature{
 		name:           name.text,
 		namespace:      class.namespace,
@@ -689,7 +697,7 @@ func (p *parser) parseClassMethod(class *classDecl, registered bool) {
 		return
 	}
 	class.methods[name.text] = signature
-	if registered && hasBody {
+	if registered && tail.hasBody {
 		implementation := &functionDecl{
 			name:              name.text,
 			qualified:         class.qualified + "." + name.text,
@@ -700,13 +708,14 @@ func (p *parser) parseClassMethod(class *classDecl, registered bool) {
 			result:            result,
 			throws:            throws,
 			operations:        operations,
-			body:              body,
+			body:              tail.body,
 			receiver:          typeRef{name: class.qualified, pos: name.pos},
 			receiverCanonical: class.qualified,
 			inline:            true,
 			annotations:       signature.annotations,
 			documentation:     signature.documentation,
 			pos:               name.pos,
+			end:               tail.end,
 		}
 		if len(class.typeParams) > 0 {
 			p.prog.genericMethodImpls = append(p.prog.genericMethodImpls, implementation)
@@ -792,11 +801,12 @@ func (p *parser) parseInterface() {
 		if !ok {
 			continue
 		}
-		params, result, throws, operations, _, hasBody, ok := p.parseCallableTail()
-		if !ok {
+		tail := p.parseCallableTail()
+		if !tail.ok {
 			continue
 		}
-		if hasBody {
+		params, result, throws, operations := tail.params, tail.result, tail.throws, tail.operations
+		if tail.hasBody {
 			p.error(methodName.pos, "interface method %s must not have a body", methodName.text)
 		}
 		signature := &methodSignature{
@@ -851,11 +861,12 @@ func (p *parser) parseFunction() {
 		genericReceiver = ref.name
 		ref = qualifiedRef{name: ref.name + "." + method.text, pos: ref.pos}
 	}
-	params, result, throws, operations, body, hasBody, ok := p.parseCallableTail()
-	if !ok {
+	tail := p.parseCallableTail()
+	if !tail.ok {
 		return
 	}
-	if !hasBody {
+	params, result, throws, operations := tail.params, tail.result, tail.throws, tail.operations
+	if !tail.hasBody {
 		p.error(ref.pos, "function %s must have a body", ref.name)
 		return
 	}
@@ -891,10 +902,11 @@ func (p *parser) parseFunction() {
 			result:        result,
 			throws:        throws,
 			operations:    operations,
-			body:          body,
+			body:          tail.body,
 			annotations:   p.consumeAnnotations(),
 			documentation: p.consumeDocumentation(),
 			pos:           ref.pos,
+			end:           tail.end,
 		}
 		if len(typeParams) > 0 {
 			p.prog.genericFunctions[qualified] = declaration
@@ -919,11 +931,12 @@ func (p *parser) parseFunction() {
 		result:        result,
 		throws:        throws,
 		operations:    operations,
-		body:          body,
+		body:          tail.body,
 		annotations:   p.consumeAnnotations(),
 		receiver:      typeRef{name: receiverName, pos: ref.pos},
 		documentation: p.consumeDocumentation(),
 		pos:           ref.pos,
+		end:           tail.end,
 	}
 	if len(typeParams) > 0 {
 		p.prog.genericMethodImpls = append(p.prog.genericMethodImpls, implementation)
@@ -932,26 +945,41 @@ func (p *parser) parseFunction() {
 	p.prog.methodImpls = append(p.prog.methodImpls, implementation)
 }
 
-func (p *parser) parseCallableTail() ([]paramDecl, typeRef, []typeRef, []operationEffectRef, []token, bool, bool) {
+// callableTail is everything a declaration's signature and body contribute.
+// end is the closing brace of body, which per-callable source measurement needs
+// and only the parser knows.
+type callableTail struct {
+	params     []paramDecl
+	result     typeRef
+	throws     []typeRef
+	operations []operationEffectRef
+	body       []token
+	end        position
+	hasBody    bool
+	ok         bool
+}
+
+func (p *parser) parseCallableTail() callableTail {
 	params, ok := p.parseParams()
 	if !ok {
-		return nil, typeRef{}, nil, nil, nil, false, false
+		return callableTail{}
 	}
 	if !p.accept("-") || !p.accept(">") {
 		p.error(p.current().pos, "expected '->' and a return type")
-		return nil, typeRef{}, nil, nil, nil, false, false
+		return callableTail{}
 	}
 	// The declaration owns the throws and effects clauses, so a returned
 	// callable that declares either is parenthesized.
 	result, ok := p.parseTypeAllowing(false)
 	if !ok {
-		return nil, typeRef{}, nil, nil, nil, false, false
+		return callableTail{}
 	}
 	throws := p.parseThrows()
 	operations := p.parseEffects()
+	tail := callableTail{params: params, result: result, throws: throws, operations: operations, ok: true}
 	if !p.accept("{") {
 		p.accept(";")
-		return params, result, throws, operations, nil, false, true
+		return tail
 	}
 	bodyStart := p.index
 	p.skipBlock()
@@ -959,7 +987,10 @@ func (p *parser) parseCallableTail() ([]paramDecl, typeRef, []typeRef, []operati
 	if bodyEnd < bodyStart {
 		bodyEnd = bodyStart
 	}
-	return params, result, throws, operations, p.tokens[bodyStart:bodyEnd], true, true
+	tail.body = p.tokens[bodyStart:bodyEnd]
+	tail.end = p.tokens[min(bodyEnd, len(p.tokens)-1)].pos
+	tail.hasBody = true
+	return tail
 }
 
 func (p *parser) parseParams() ([]paramDecl, bool) {
