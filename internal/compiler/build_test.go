@@ -53,6 +53,51 @@ var exampleOutputs = map[string]string{
 	"visibility":          "Ada:[private]; Ada: 1500 cents",
 }
 
+func isolateExampleEnvironment(t *testing.T) {
+	t.Helper()
+	for _, assignment := range os.Environ() {
+		name, _, _ := strings.Cut(assignment, "=")
+		isRuntimeConfig := strings.HasPrefix(name, "MODULAR_EFFECTS_") ||
+			strings.HasPrefix(name, "TODO_API_") ||
+			strings.HasPrefix(name, "SLICK_") &&
+				name != "SLICK_LLVM_BIN" &&
+				name != "SLICK_JANSSON_ROOT"
+		if !isRuntimeConfig {
+			continue
+		}
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatalf("unset example environment %s: %v", name, err)
+		}
+	}
+}
+
+func TestExampleMatrixIgnoresAmbientRuntimeConfiguration(t *testing.T) {
+	guard := filepath.Join(t.TempDir(), "guard.txt")
+	if err := os.WriteFile(guard, []byte("do not touch"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SLICK_STD_FS_EXAMPLE_PATH", guard)
+	t.Run("interpreter", func(t *testing.T) {
+		isolateExampleEnvironment(t)
+		output, diagnostics, err := compiler.RunPath(examplePath("std-fs"))
+		if err != nil {
+			t.Fatalf("run std-fs example: %v", err)
+		}
+		assertNoDiagnostics(t, diagnostics)
+		if output != exampleOutputs["std-fs"] {
+			t.Fatalf("std-fs output = %q, want pinned fallback", output)
+		}
+	})
+	contents, err := os.ReadFile(guard)
+	if err != nil {
+		t.Fatalf("ambient path was removed: %v", err)
+	}
+	if string(contents) != "do not touch" {
+		t.Fatalf("ambient path was changed to %q", contents)
+	}
+}
+
 func examplePath(project string) string {
 	return filepath.Join("..", "..", "examples", project)
 }
@@ -83,6 +128,7 @@ func TestEveryExampleHasLLVMExecutionContract(t *testing.T) {
 func TestBuildPathProducesStandaloneExampleBinaries(t *testing.T) {
 	for project, expected := range exampleOutputs {
 		t.Run(project, func(t *testing.T) {
+			isolateExampleEnvironment(t)
 			binary := filepath.Join(t.TempDir(), "app")
 			diagnostics, err := compiler.BuildPath(examplePath(project), binary)
 			if err != nil {
@@ -105,6 +151,7 @@ func TestBuildPathProducesStandaloneExampleBinaries(t *testing.T) {
 func TestInterpreterMatchesExampleOutput(t *testing.T) {
 	for project, expected := range exampleOutputs {
 		t.Run(project, func(t *testing.T) {
+			isolateExampleEnvironment(t)
 			output, diagnostics, err := compiler.RunPath(examplePath(project))
 			if err != nil {
 				t.Fatalf("run example: %v", err)
@@ -120,6 +167,7 @@ func TestInterpreterMatchesExampleOutput(t *testing.T) {
 func TestLLVMMatchesExampleOutput(t *testing.T) {
 	for project, expected := range exampleOutputs {
 		t.Run(project, func(t *testing.T) {
+			isolateExampleEnvironment(t)
 			binary := filepath.Join(t.TempDir(), "app")
 			diagnostics, err := compiler.BuildPathBackend(examplePath(project), binary, compiler.BackendLLVM)
 			if err != nil {
