@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.25.0
+      - name: Install LLVM 18 native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang-18 llvm-18 libcurl4-openssl-dev libjansson-dev libsqlite3-dev
+      - name: Test
+        env:
+          SLICK_LLVM_BIN: /usr/bin
+        run: go test -count=1 -timeout 1200s ./...
+      - name: Vet
+        env:
+          SLICK_LLVM_BIN: /usr/bin
+        run: go vet ./...

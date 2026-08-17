@@ -45,10 +45,14 @@ func checkResult(t *testing.T, source string) []compiler.Diagnostic {
 	return compiler.Check([]compiler.Source{{Name: "main.slk", Namespace: "root", Text: source}})
 }
 
-// buildAndRunResult compiles source to a standalone native binary and returns
-// its stdout with the trailing newline removed, so it is directly comparable
-// with the interpreter's return value.
+// buildAndRunResult compiles source with the generated-Go backend and returns
+// its stdout without the trailing newline.
 func buildAndRunResult(t *testing.T, source string) string {
+	t.Helper()
+	return buildAndRunResultBackend(t, source, compiler.BackendGo)
+}
+
+func buildAndRunResultBackend(t *testing.T, source string, backend compiler.Backend) string {
 	t.Helper()
 	root := t.TempDir()
 	path := filepath.Join(root, "main.slk")
@@ -56,26 +60,35 @@ func buildAndRunResult(t *testing.T, source string) string {
 		t.Fatalf("write Slick source: %v", err)
 	}
 	binary := filepath.Join(root, "app")
-	diagnostics, err := compiler.BuildPath(path, binary)
+	diagnostics, err := compiler.BuildPathBackend(path, binary, backend)
 	if err != nil {
-		t.Fatalf("build native binary: %v", err)
+		if backend == compiler.BackendLLVM && strings.Contains(err.Error(), "LLVM") && strings.Contains(err.Error(), "not found") {
+			t.Skip(err.Error())
+		}
+		t.Fatalf("build %s binary: %v", backend, err)
 	}
 	assertNoDiagnostics(t, diagnostics)
 	output, err := exec.Command(binary).CombinedOutput()
 	if err != nil {
-		t.Fatalf("run native binary: %v: %s", err, output)
+		t.Fatalf("run %s binary: %v: %s", backend, err, output)
 	}
 	return strings.TrimSuffix(string(output), "\n")
 }
 
-// runResultEverywhere asserts the interpreter and the native binary agree, and
-// returns the single observable output.
+// runResultEverywhere holds the interpreter, generated-Go, and LLVM backends
+// to one observable output.
 func runResultEverywhere(t *testing.T, source string) string {
 	t.Helper()
-	interpreted := runResult(t, source)
-	native := buildAndRunResult(t, source)
-	if interpreted != native {
-		t.Fatalf("interpreter produced %q, native binary produced %q", interpreted, native)
+	var interpreted string
+	t.Run("interpreter", func(t *testing.T) {
+		interpreted = runResult(t, source)
+	})
+	for _, backend := range []compiler.Backend{compiler.BackendGo, compiler.BackendLLVM} {
+		t.Run(string(backend), func(t *testing.T) {
+			if output := buildAndRunResultBackend(t, source, backend); output != interpreted {
+				t.Fatalf("interpreter produced %q, %s produced %q", interpreted, backend, output)
+			}
+		})
 	}
 	return interpreted
 }

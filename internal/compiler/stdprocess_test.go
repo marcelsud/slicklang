@@ -226,14 +226,18 @@ func interpretProgram(t *testing.T, source string, arguments []string) programRe
 	}
 }
 
-func buildProgram(t *testing.T, source string) string {
+func buildProgram(t *testing.T, source string, backends ...compiler.Backend) string {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "main.slk"), []byte(source), 0o644); err != nil {
 		t.Fatalf("write Slick source: %v", err)
 	}
 	binary := filepath.Join(root, "app")
-	diagnostics, err := compiler.BuildPath(root, binary)
+	backend := compiler.BackendGo
+	if len(backends) > 0 {
+		backend = backends[0]
+	}
+	diagnostics, err := compiler.BuildPathBackend(root, binary, backend)
 	if err != nil {
 		t.Fatalf("build Slick binary: %v", err)
 	}
@@ -454,6 +458,15 @@ func TestNativeProcessRunMatchesTheInterpreter(t *testing.T) {
 	}
 }
 
+func TestLLVMProcessRunMatchesTheInterpreter(t *testing.T) {
+	binary := buildProgram(t, processDriverSource, compiler.BackendLLVM)
+	for _, testCase := range processCases(t) {
+		t.Run(testCase.name, func(t *testing.T) {
+			testCase.assert(t, executeProgram(t, binary, testCase.arguments(t)))
+		})
+	}
+}
+
 // cliArguments exercises the argument vector itself: no arguments beyond the
 // exit code, empty strings, Unicode, and shell-looking text.
 var cliArguments = map[string][]string{
@@ -472,6 +485,15 @@ func TestInterpretedCLIStatusReportsArgumentsBytesAndExitCode(t *testing.T) {
 
 func TestNativeCLIStatusMatchesTheInterpreter(t *testing.T) {
 	binary := buildProgram(t, processCLISource)
+	for name, arguments := range cliArguments {
+		t.Run(name, func(t *testing.T) {
+			assertCLIResult(t, arguments, executeProgram(t, binary, arguments))
+		})
+	}
+}
+
+func TestLLVMCLIStatusMatchesTheInterpreter(t *testing.T) {
+	binary := buildProgram(t, processCLISource, compiler.BackendLLVM)
 	for name, arguments := range cliArguments {
 		t.Run(name, func(t *testing.T) {
 			assertCLIResult(t, arguments, executeProgram(t, binary, arguments))

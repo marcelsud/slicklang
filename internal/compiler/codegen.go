@@ -12,55 +12,39 @@ import (
 	"strings"
 )
 
-// BuildPath compiles a Slick file or project into a standalone native binary.
-func BuildPath(path, output string) ([]Diagnostic, error) {
-	sources, err := loadSources(path)
-	if err != nil {
-		return nil, err
-	}
-	program, diagnostics := compile(sources)
-	if len(diagnostics) > 0 {
-		return diagnostics, nil
-	}
+func buildGoBinary(program *program, output string) error {
 	generated, err := program.generateGo()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	formatted, err := format.Source([]byte(generated))
 	if err != nil {
-		return nil, fmt.Errorf("format generated Go: %w", err)
-	}
-	output, err = filepath.Abs(output)
-	if err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
-		return nil, err
+		return fmt.Errorf("format generated Go: %w", err)
 	}
 	temporary, err := os.MkdirTemp("", "slick-build-*")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer os.RemoveAll(temporary)
 	sourcePath := filepath.Join(temporary, "main.go")
 	if err := os.WriteFile(sourcePath, formatted, 0o644); err != nil {
-		return nil, err
+		return err
 	}
 	if program.usesStdSQLite {
 		if err := os.WriteFile(filepath.Join(temporary, "go.mod"), []byte(sqlitePinnedGoMod), 0o644); err != nil {
-			return nil, err
+			return err
 		}
 		if err := os.WriteFile(filepath.Join(temporary, "go.sum"), []byte(sqlitePinnedGoSum), 0o644); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	command := exec.Command("go", "build", "-buildvcs=false", "-trimpath", "-o", output, sourcePath)
 	command.Dir = temporary
 	buildOutput, err := command.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("go build: %w: %s", err, strings.TrimSpace(string(buildOutput)))
+		return fmt.Errorf("go build: %w: %s", err, strings.TrimSpace(string(buildOutput)))
 	}
-	return nil, nil
+	return nil
 }
 
 // goBinding is one Slick local in generated Go. name is what an expression

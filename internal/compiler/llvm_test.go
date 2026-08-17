@@ -1,0 +1,260 @@
+package compiler_test
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"slick/internal/compiler"
+)
+
+func TestLLVMBackendMatchesGoOnOperators(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "main.slk")
+	program := `
+function main() -> string {
+    let Value = 10
+    let Difference = Value - 3
+    let Product = Difference * 5 - 5
+    let Ordered = Difference < Product
+    let Logic = !false && (Difference <= Product || false)
+    let Negative = -Value
+    let Grouped = (Value - 3) * 2
+    ` + "`difference=${Difference}; product=${Product}; ordered=${Ordered}; logic=${Logic}; negative=${Negative}; grouped=${Grouped}`" + `
+}
+`
+	if err := os.WriteFile(src, []byte(program), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	goBin := filepath.Join(root, "goapp")
+	llvmBin := filepath.Join(root, "llvmapp")
+	if diags, err := compiler.BuildPathBackend(src, goBin, compiler.BackendGo); err != nil || len(diags) > 0 {
+		t.Fatalf("go build: %v %v", err, diags)
+	}
+	if diags, err := compiler.BuildPathBackend(src, llvmBin, compiler.BackendLLVM); err != nil || len(diags) > 0 {
+		t.Fatalf("llvm build: %v %v", err, diags)
+	}
+	goOut, err := exec.Command(goBin).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run go: %v: %s", err, goOut)
+	}
+	llvmOut, err := exec.Command(llvmBin).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run llvm: %v: %s", err, llvmOut)
+	}
+	if string(goOut) != string(llvmOut) {
+		t.Fatalf("go=%q llvm=%q", goOut, llvmOut)
+	}
+	if !strings.Contains(string(llvmOut), "difference=7") {
+		t.Fatalf("unexpected llvm output %q", llvmOut)
+	}
+}
+
+func TestLLVMBackendMatchesExampleProjects(t *testing.T) {
+	for _, project := range []string{"operators", "hello", "constants", "visibility", "optional", "result"} {
+		t.Run(project, func(t *testing.T) {
+			goBin := filepath.Join(t.TempDir(), "goapp")
+			llvmBin := filepath.Join(t.TempDir(), "llvmapp")
+			path := filepath.Join("..", "..", "examples", project)
+			if diags, err := compiler.BuildPathBackend(path, goBin, compiler.BackendGo); err != nil || len(diags) > 0 {
+				t.Fatalf("go build: %v %v", err, diags)
+			}
+			if diags, err := compiler.BuildPathBackend(path, llvmBin, compiler.BackendLLVM); err != nil || len(diags) > 0 {
+				t.Fatalf("llvm build: %v %v", err, diags)
+			}
+			goOut, err := exec.Command(goBin).CombinedOutput()
+			if err != nil {
+				t.Fatalf("run go: %v: %s", err, goOut)
+			}
+			llvmOut, err := exec.Command(llvmBin).CombinedOutput()
+			if err != nil {
+				t.Fatalf("run llvm: %v: %s", err, llvmOut)
+			}
+			if string(goOut) != string(llvmOut) {
+				t.Fatalf("go=%q llvm=%q", goOut, llvmOut)
+			}
+		})
+	}
+}
+
+func TestLLVMBackendRunsAsyncMethodAndCaughtFailure(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "main.slk")
+	program := `
+class Box {
+    Value: int
+    function Get() -> int { self.Value }
+}
+
+class ChildFailure implements Error { Message: string }
+
+function Fail() -> int throws ChildFailure {
+    throw ChildFailure { Message: "caught" }
+}
+
+function main() -> string {
+    let BoxValue = Box { Value: 42 }
+    async let MethodJob = BoxValue.Get()
+    async let FailureJob = Fail()
+    let MethodValue = await MethodJob
+    let FailureValue = await FailureJob catch {
+        ChildFailure as Failure => 0
+    }
+    let Total = MethodValue + FailureValue
+    ` + "`${Total}`" + `
+}
+`
+	if err := os.WriteFile(src, []byte(program), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(root, "app")
+	if diags, err := compiler.BuildPathBackend(src, binary, compiler.BackendLLVM); err != nil || len(diags) > 0 {
+		t.Fatalf("llvm build: %v %v", err, diags)
+	}
+	output, err := exec.Command(binary).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run llvm: %v: %s", err, output)
+	}
+	if string(output) != "42\n" {
+		t.Fatalf("unexpected llvm output %q", output)
+	}
+}
+
+func TestLLVMSelectionDoesNotChangeGoDefault(t *testing.T) {
+	if got, err := compiler.ParseBackend(""); err != nil || got != compiler.BackendGo {
+		t.Fatalf("empty backend: %q %v", got, err)
+	}
+	if _, err := compiler.ParseBackend("tinygo"); err == nil {
+		t.Fatal("accepted unknown backend")
+	}
+}
+
+func TestLLVMOptionalStorageAndEmptyInterfaceParity(t *testing.T) {
+	source := `
+interface Marker {}
+
+class Item implements Marker {
+    Name: string
+}
+
+function Maybe() -> Item? {
+    Item { Name: "Ada" }
+}
+
+function Promote(Value: Marker?) -> string {
+    if (Value == null) { "missing" } else { "present" }
+}
+
+function main() -> string {
+    let Value = Maybe()
+    let First = if (Value == null) { "missing" } else { Value.Name }
+    let Second = if (Value == null) { "missing" } else { Value.Name }
+    let Promoted = if (Value == null) { "missing" } else { Promote(Value) }
+    First + "|" + Second + "|" + Promoted
+}
+`
+	if output := runResultEverywhere(t, source); output != "Ada|Ada|present" {
+		t.Fatalf("optional/interface output = %q", output)
+	}
+}
+
+func TestLLVMWrappingIntegersAndShortestFloatsMatch(t *testing.T) {
+	source := `
+function main() -> string {
+    let Maximum = 9223372036854775807
+    let Minimum = Maximum + 1
+    let Negated = -Minimum
+    let Multiplied = Maximum * 2
+    let Fraction = 0.1
+    let Converted = std.convert.FloatToString(Fraction)
+    ` + "`${Minimum}|${Negated}|${Multiplied}|${Fraction}|${Converted}`" + `
+}
+`
+	if output := runResultEverywhere(t, source); output != "-9223372036854775808|-9223372036854775808|-2|0.1|0.1" {
+		t.Fatalf("numeric boundary output = %q", output)
+	}
+}
+
+func TestLLVMTextOperationsPreserveEmbeddedNULBytes(t *testing.T) {
+	source := `
+function main() -> string {
+    let Value = "a\u0000b\u0000c"
+    let Parts = std.text.Split(Value, "\u0000")
+    let Joined = std.text.Join(Parts, "\u0000")
+    let Cut = std.text.Cut(Value, "\u0000")
+    let After = if (Cut == null) {
+        "missing"
+    } else {
+        let (_, Suffix) = Cut
+        Suffix
+    }
+    let Contains = std.text.Contains(Value, "\u0000b")
+    let Starts = std.text.StartsWith(Value, "a\u0000")
+    let Ends = std.text.EndsWith(Value, "\u0000c")
+    let Equal = Joined == Value
+    let Length = Parts.Length()
+    let SuffixEqual = After == "b\u0000c"
+    ` + "`${Contains}|${Starts}|${Ends}|${Equal}|${Length}|${SuffixEqual}`" + `
+}
+`
+	if output := runResultEverywhere(t, source); output != "true|true|true|true|3|true" {
+		t.Fatalf("embedded-NUL text output = %q", output)
+	}
+}
+
+func TestLLVMAsyncArgumentsBeyondEightValuesMatch(t *testing.T) {
+	source := `
+function AddTen(A: int, B: int, C: int, D: int, E: int, F: int, G: int, H: int, I: int, J: int) -> int {
+    A + B + C + D + E + F + G + H + I + J
+}
+
+function main() -> string {
+    async let Work = AddTen(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+    let Total = await Work
+    ` + "`${Total}`" + `
+}
+`
+	if output := runResultEverywhere(t, source); output != "55" {
+		t.Fatalf("async argument output = %q", output)
+	}
+}
+
+func TestLLVMJanssonDependencyFollowsSemanticJSONUse(t *testing.T) {
+	t.Setenv("SLICK_JANSSON_ROOT", filepath.Join(t.TempDir(), "missing"))
+	root := t.TempDir()
+	plainSource := filepath.Join(root, "plain.slk")
+	if err := os.WriteFile(plainSource, []byte(`function main() -> string { "ok" }`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if diagnostics, err := compiler.BuildPathBackend(
+		plainSource, filepath.Join(root, "plain"), compiler.BackendLLVM,
+	); err != nil || len(diagnostics) != 0 {
+		t.Fatalf("non-JSON LLVM build required Jansson: diagnostics=%v err=%v", diagnostics, err)
+	}
+
+	jsonSource := filepath.Join(root, "json.slk")
+	if err := os.WriteFile(jsonSource, []byte(`
+function main() -> string {
+    match std.json.Encode<int>(1) {
+        Ok(Value) => Value
+        Err(Failure) => Failure.Message
+    }
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(root, "json")
+	if err := os.WriteFile(output, []byte("existing output"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := compiler.BuildPathBackend(jsonSource, output, compiler.BackendLLVM)
+	if err == nil || !strings.Contains(err.Error(), "libjansson") {
+		t.Fatalf("JSON LLVM build error = %v, want missing libjansson", err)
+	}
+	unchanged, readErr := os.ReadFile(output)
+	if readErr != nil || string(unchanged) != "existing output" {
+		t.Fatalf("failed LLVM build changed output: contents=%q err=%v", unchanged, readErr)
+	}
+}

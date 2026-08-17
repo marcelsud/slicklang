@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"slick/internal/compiler"
 )
@@ -30,12 +31,12 @@ func run(args []string) int {
 		return runQuality(args[1:], os.Stdout, os.Stderr)
 	}
 	if args[0] == "build" {
-		path, output, err := parseBuildArgs(args[1:])
+		path, output, backend, err := parseBuildArgs(args[1:])
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return reportUsage()
 		}
-		diagnostics, err := compiler.BuildPath(path, output)
+		diagnostics, err := compiler.BuildPathBackend(path, output, backend)
 		if err != nil {
 			return reportError("build", err)
 		}
@@ -99,30 +100,49 @@ func runProgram(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func parseBuildArgs(args []string) (string, string, error) {
+func parseBuildArgs(args []string) (string, string, compiler.Backend, error) {
 	path := "."
 	output := ""
+	backend := compiler.BackendGo
 	pathSet := false
 	for index := 0; index < len(args); index++ {
 		switch args[index] {
 		case "-o", "--output":
 			index++
 			if index >= len(args) {
-				return "", "", errors.New("build output path is missing")
+				return "", "", "", errors.New("build output path is missing")
 			}
 			output = args[index]
+		case "--backend":
+			index++
+			if index >= len(args) {
+				return "", "", "", errors.New("build backend is missing")
+			}
+			parsed, err := compiler.ParseBackend(args[index])
+			if err != nil {
+				return "", "", "", err
+			}
+			backend = parsed
 		default:
+			if strings.HasPrefix(args[index], "--backend=") {
+				parsed, err := compiler.ParseBackend(strings.TrimPrefix(args[index], "--backend="))
+				if err != nil {
+					return "", "", "", err
+				}
+				backend = parsed
+				continue
+			}
 			if pathSet {
-				return "", "", fmt.Errorf("unexpected build argument %q", args[index])
+				return "", "", "", fmt.Errorf("unexpected build argument %q", args[index])
 			}
 			path = args[index]
 			pathSet = true
 		}
 	}
 	if output == "" {
-		return "", "", errors.New("build requires -o <output>")
+		return "", "", "", errors.New("build requires -o <output>")
 	}
-	return path, output, nil
+	return path, output, backend, nil
 }
 
 func reportUsage() int {

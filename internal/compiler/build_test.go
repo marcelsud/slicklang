@@ -84,6 +84,29 @@ func TestInterpreterMatchesExampleOutput(t *testing.T) {
 	}
 }
 
+func TestLLVMMatchesExampleOutput(t *testing.T) {
+	for project, expected := range exampleOutputs {
+		t.Run(project, func(t *testing.T) {
+			binary := filepath.Join(t.TempDir(), "app")
+			diagnostics, err := compiler.BuildPathBackend(examplePath(project), binary, compiler.BackendLLVM)
+			if err != nil {
+				if strings.Contains(err.Error(), "LLVM") && strings.Contains(err.Error(), "not found") {
+					t.Skip(err.Error())
+				}
+				t.Fatalf("build llvm binary: %v", err)
+			}
+			assertNoDiagnostics(t, diagnostics)
+			output, err := exec.Command(binary).CombinedOutput()
+			if err != nil {
+				t.Fatalf("run llvm binary: %v: %s", err, output)
+			}
+			if string(output) != expected+"\n" {
+				t.Fatalf("expected %q, found %q", expected+"\n", output)
+			}
+		})
+	}
+}
+
 func TestBuildPathStopsBeforeGoBuildOnSlickDiagnostics(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "main.slk")
@@ -113,18 +136,22 @@ function main() -> string throws Failure {
 	if err := os.WriteFile(source, []byte(program), 0o644); err != nil {
 		t.Fatalf("write throwing Slick source: %v", err)
 	}
-	binary := filepath.Join(root, "app")
-	diagnostics, err := compiler.BuildPath(source, binary)
-	if err != nil {
-		t.Fatalf("build throwing Slick binary: %v", err)
-	}
-	assertNoDiagnostics(t, diagnostics)
-	output, err := exec.Command(binary).CombinedOutput()
-	if err == nil {
-		t.Fatalf("uncaught Slick error exited successfully")
-	}
-	if !strings.Contains(string(output), "root.Failure: boom") {
-		t.Fatalf("expected uncaught Slick error, found %q", output)
+	for _, backend := range []compiler.Backend{compiler.BackendGo, compiler.BackendLLVM} {
+		t.Run(string(backend), func(t *testing.T) {
+			binary := filepath.Join(root, "app-"+string(backend))
+			diagnostics, err := compiler.BuildPathBackend(source, binary, backend)
+			if err != nil {
+				t.Fatalf("build throwing Slick binary: %v", err)
+			}
+			assertNoDiagnostics(t, diagnostics)
+			output, err := exec.Command(binary).CombinedOutput()
+			if err == nil {
+				t.Fatalf("uncaught Slick error exited successfully")
+			}
+			if got, want := string(output), "root.Failure: boom\n"; got != want {
+				t.Fatalf("uncaught Slick error = %q, want %q", got, want)
+			}
+		})
 	}
 }
 

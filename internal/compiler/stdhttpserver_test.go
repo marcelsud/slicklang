@@ -92,10 +92,11 @@ class Echo implements std.http.server.Handler {
         if (Request.Path == "/slow") {
             let URL = std.env.Get("SLICK_HTTP_BLOCK_URL")
             if (URL != null) {
-                let Result = std.http.Fetch(std.http.Request {
+                async let Work = std.http.Fetch(std.http.Request {
                     Method: "GET"
                     URL: URL
                 })
+                let Result = await Work
             }
             return std.http.server.Response {
                 Status: 200
@@ -105,7 +106,8 @@ class Echo implements std.http.server.Handler {
         if (Request.Path == "/filesystem") {
             let Path = std.env.Get("SLICK_FS_BLOCK_PATH")
             if (Path != null) {
-                let Result = std.fs.ReadText(Path)
+                async let Work = std.fs.ReadText(Path)
+                let Result = await Work
             }
             return std.http.server.Response {
                 Status: 200
@@ -117,12 +119,13 @@ class Echo implements std.http.server.Handler {
             let Marker = std.env.Get("SLICK_PROCESS_BLOCK_MARKER")
             if (Program != null) {
                 if (Marker != null) {
-                    let Result = std.process.Run(Program, [
+                    async let Work = std.process.Run(Program, [
                         "-test.run=^TestProcessHelperProgram$",
                         "slick-process-helper",
                         "pid=" + Marker,
                         "block",
                     ], null, 1024)
+                    let Result = await Work
                 }
             }
             return std.http.server.Response {
@@ -194,7 +197,7 @@ func waitForHTTP(t *testing.T, url string) {
 	t.Fatalf("server at %s did not become ready", url)
 }
 
-func buildHTTPServerBinary(t *testing.T, source string) string {
+func buildHTTPServerBinary(t *testing.T, source string, backends ...compiler.Backend) string {
 	t.Helper()
 	root := t.TempDir()
 	path := filepath.Join(root, "main.slk")
@@ -202,7 +205,13 @@ func buildHTTPServerBinary(t *testing.T, source string) string {
 		t.Fatalf("write source: %v", err)
 	}
 	binary := filepath.Join(root, "server")
-	diagnostics, err := compiler.BuildPath(path, binary)
+	backend := compiler.BackendGo
+	if len(backends) > 0 {
+		backend = backends[0]
+	} else if strings.HasSuffix(t.Name(), "/llvm") {
+		backend = compiler.BackendLLVM
+	}
+	diagnostics, err := compiler.BuildPathBackend(path, binary, backend)
 	if err != nil {
 		t.Fatalf("build server: %v", err)
 	}
@@ -489,6 +498,14 @@ function main() -> string effects { database, environment, filesystem, io, netwo
 }
 
 func TestStdHTTPServerServeContractsNative(t *testing.T) {
+	for _, backend := range []compiler.Backend{compiler.BackendGo, compiler.BackendLLVM} {
+		t.Run(string(backend), func(t *testing.T) {
+			testStdHTTPServerServeContractsNative(t, backend)
+		})
+	}
+}
+
+func testStdHTTPServerServeContractsNative(t *testing.T, backend compiler.Backend) {
 	address := freeLoopbackAddress(t)
 	source := httpServerEchoHandler + `
 function main() -> Result<null, std.http.server.Failure> effects { database, environment, filesystem, io, network, process, random, state, time } {
@@ -513,7 +530,7 @@ function main() -> Result<null, std.http.server.Failure> effects { database, env
     }
 }
 `
-	binary := buildHTTPServerBinary(t, source)
+	binary := buildHTTPServerBinary(t, source, backend)
 	blockURL, blockerStarted := shutdownBlocker(t)
 	command, output := startHTTPServerBinary(t, binary, address, "SLICK_HTTP_BLOCK_URL="+blockURL)
 	base := "http://" + address
@@ -544,6 +561,26 @@ function main() -> Result<null, std.http.server.Failure> effects { database, env
 	}
 	if values := response.Header.Values("X-Multi"); strings.Join(values, ",") != "a,b" {
 		t.Fatalf("response multi headers = %v", values)
+	}
+
+	chunkedReader, chunkedWriter := io.Pipe()
+	go func() {
+		_, _ = chunkedWriter.Write([]byte("chunked"))
+		_ = chunkedWriter.Close()
+	}()
+	chunkedRequest, err := http.NewRequest(http.MethodPost, base+"/chunked", chunkedReader)
+	if err != nil {
+		t.Fatalf("build chunked request: %v", err)
+	}
+	chunkedResponse, err := http.DefaultClient.Do(chunkedRequest)
+	if err != nil {
+		t.Fatalf("chunked request: %v", err)
+	}
+	chunkedBody, _ := io.ReadAll(chunkedResponse.Body)
+	chunkedResponse.Body.Close()
+	if chunkedResponse.StatusCode != http.StatusOK ||
+		string(chunkedBody) != "POST|/chunked|||chunked|7" {
+		t.Fatalf("chunked status=%d body=%q", chunkedResponse.StatusCode, chunkedBody)
 	}
 	if value := response.Header.Get("X-Tab"); value != "left\tright" {
 		t.Fatalf("response tab header = %q", value)
@@ -694,6 +731,41 @@ function main() -> Result<null, std.http.server.Failure> effects { database, env
 	assertShutdownDeadlineSucceeds(t, command, base, blockerStarted, output)
 }
 
+func TestTodoAPIExampleServesAndCleansUpUnderLLVM(t *testing.T) {
+	address := freeLoopbackAddress(t)
+	binary := filepath.Join(t.TempDir(), "todo-api")
+	diagnostics, err := compiler.BuildPathBackend(examplePath("todo-api"), binary, compiler.BackendLLVM)
+	if err != nil {
+		t.Fatalf("build Todo API: %v", err)
+	}
+	assertNoDiagnostics(t, diagnostics)
+	database := filepath.Join(t.TempDir(), "todos.db")
+	command, output := startHTTPServerBinary(t, binary, address,
+		"TODO_API_DATABASE="+database,
+		"TODO_API_ADDRESS="+address,
+	)
+	base := "http://" + address
+	waitForHTTP(t, base+"/health")
+	response, err := http.Get(base + "/health")
+	if err != nil {
+		t.Fatalf("Todo API health request: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("Todo API health status %d", response.StatusCode)
+	}
+	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal Todo API: %v", err)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatalf("Todo API shutdown: %v output=%q", err, output.String())
+	}
+	command.Process = nil
+	if got := strings.TrimSpace(output.String()); got != "" {
+		t.Fatalf("Todo API output %q, want empty", got)
+	}
+}
+
 func TestStdHTTPServerServeContractsInterpreter(t *testing.T) {
 	address := freeLoopbackAddress(t)
 	source := httpServerEchoHandler + `
@@ -827,7 +899,8 @@ function main() -> Result<null, std.http.server.Failure> effects { database, env
     }
 }
 `
-	native := buildHTTPServerBinary(t, source)
+	nativeGo := buildHTTPServerBinary(t, source, compiler.BackendGo)
+	nativeLLVM := buildHTTPServerBinary(t, source, compiler.BackendLLVM)
 	root := t.TempDir()
 	sourcePath := filepath.Join(root, "main.slk")
 	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
@@ -838,8 +911,11 @@ function main() -> Result<null, std.http.server.Failure> effects { database, env
 		name  string
 		start func(*testing.T, string, ...string) (*exec.Cmd, *strings.Builder)
 	}{
-		{name: "native", start: func(t *testing.T, address string, env ...string) (*exec.Cmd, *strings.Builder) {
-			return startHTTPServerBinary(t, native, address, env...)
+		{name: "go", start: func(t *testing.T, address string, env ...string) (*exec.Cmd, *strings.Builder) {
+			return startHTTPServerBinary(t, nativeGo, address, env...)
+		}},
+		{name: "llvm", start: func(t *testing.T, address string, env ...string) (*exec.Cmd, *strings.Builder) {
+			return startHTTPServerBinary(t, nativeLLVM, address, env...)
 		}},
 		{name: "interpreter", start: func(t *testing.T, address string, env ...string) (*exec.Cmd, *strings.Builder) {
 			return startHTTPServerInterpreter(t, slick, sourcePath, address, env...)
@@ -1003,7 +1079,7 @@ function main() -> null effects { database, environment, filesystem, io, network
 func TestStdHTTPServerUnsafeHandlerCallableRejectedEverywhere(t *testing.T) {
 	source := `
 class Unsafe implements std.http.server.Handler {
-    State: Buffer<int>
+    State: (Buffer<int>, int)
     function Handle(Request: std.http.server.Request) -> std.http.server.Response {
         std.http.server.Response {
             Status: 200
@@ -1015,7 +1091,7 @@ class Unsafe implements std.http.server.Handler {
 function main() -> string effects { database, environment, filesystem, io, network, process, random, state, time } {
     let Start = std.http.server.Serve
 	let Config = std.http.server.Config { Address: "127.0.0.1:0" }
-	let Application = Unsafe { State: std.buffer.New<int>() }
+	let Application = Unsafe { State: (std.buffer.New<int>(), 0) }
 	let Started = Start(Config, Application)
     match Started {
         Ok(_) => "started"

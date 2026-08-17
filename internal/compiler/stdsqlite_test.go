@@ -20,26 +20,13 @@ func runSQLiteEverywhere(t *testing.T, source string) string {
 		t.Fatalf("interpreter error: %v", err)
 	}
 
-	root := t.TempDir()
-	sourcePath := filepath.Join(root, "main.slk")
-	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
-		t.Fatalf("write source: %v", err)
-	}
-	binary := filepath.Join(root, "app")
-	buildDiags, err := compiler.BuildPath(sourcePath, binary)
-	if err != nil {
-		t.Fatalf("build native binary: %v", err)
-	}
-	assertNoDiagnostics(t, buildDiags)
-
-	nativeOutput, err := exec.Command(binary).CombinedOutput()
-	if err != nil {
-		t.Fatalf("run native binary: %v: %s", err, nativeOutput)
-	}
-	native := strings.TrimSuffix(string(nativeOutput), "\n")
-
-	if interpreted != native {
-		t.Fatalf("interpreter produced %q, native binary produced %q", interpreted, native)
+	for _, backend := range []compiler.Backend{compiler.BackendGo, compiler.BackendLLVM} {
+		t.Run(string(backend), func(t *testing.T) {
+			native := buildAndRunResultBackend(t, source, backend)
+			if interpreted != native {
+				t.Fatalf("interpreter produced %q, %s produced %q", interpreted, backend, native)
+			}
+		})
 	}
 	return interpreted
 }
@@ -342,6 +329,41 @@ function main() -> string throws std.sqlite.Failure effects { database } {
 	readOut, err := exec.Command(readApp).CombinedOutput()
 	if err != nil || strings.TrimSpace(string(readOut)) != "persisted note" {
 		t.Fatalf("readApp run failed: out=%s err=%v", readOut, err)
+	}
+
+	dbFileLLVM := filepath.Join(t.TempDir(), "llvm.db")
+	llvmWriteSource := strings.Replace(sourceWriteNative,
+		strconv.Quote(dbFileNative), strconv.Quote(dbFileLLVM), 1)
+	llvmWritePath := filepath.Join(t.TempDir(), "write-llvm.slk")
+	if err := os.WriteFile(llvmWritePath, []byte(llvmWriteSource), 0o644); err != nil {
+		t.Fatalf("write LLVM writer source: %v", err)
+	}
+	llvmWriteApp := filepath.Join(t.TempDir(), "write-llvm")
+	buildDiags, err = compiler.BuildPathBackend(llvmWritePath, llvmWriteApp, compiler.BackendLLVM)
+	if err != nil {
+		t.Fatalf("build LLVM writer: %v", err)
+	}
+	assertNoDiagnostics(t, buildDiags)
+	writeOut, err = exec.Command(llvmWriteApp).CombinedOutput()
+	if err != nil || strings.TrimSpace(string(writeOut)) != "inserted=1" {
+		t.Fatalf("LLVM writer failed: out=%s err=%v", writeOut, err)
+	}
+
+	llvmReadSource := strings.Replace(sourceReadNative,
+		strconv.Quote(dbFileNative), strconv.Quote(dbFileLLVM), 1)
+	llvmReadPath := filepath.Join(t.TempDir(), "read-llvm.slk")
+	if err := os.WriteFile(llvmReadPath, []byte(llvmReadSource), 0o644); err != nil {
+		t.Fatalf("write LLVM reader source: %v", err)
+	}
+	llvmReadApp := filepath.Join(t.TempDir(), "read-llvm")
+	buildDiags, err = compiler.BuildPathBackend(llvmReadPath, llvmReadApp, compiler.BackendLLVM)
+	if err != nil {
+		t.Fatalf("build LLVM reader: %v", err)
+	}
+	assertNoDiagnostics(t, buildDiags)
+	readOut, err = exec.Command(llvmReadApp).CombinedOutput()
+	if err != nil || strings.TrimSpace(string(readOut)) != "persisted note" {
+		t.Fatalf("LLVM reader failed: out=%s err=%v", readOut, err)
 	}
 }
 
