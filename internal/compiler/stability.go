@@ -178,7 +178,15 @@ func (p *program) usedStandardSymbols() []string {
 	var collectExpression func(expressionNode, *functionDecl)
 	collectExpression = func(expression expressionNode, function *functionDecl) {
 		switch node := expression.(type) {
-		case nil, *invalidExpression, *literalExpression, *templateExpression, *nameExpression, *awaitExpression:
+		case nil, *invalidExpression, *literalExpression, *awaitExpression:
+		case *templateExpression:
+			for _, name := range node.resolvedStandards {
+				used[name] = struct{}{}
+			}
+		case *nameExpression:
+			if node.resolvedStandard != "" {
+				used[node.resolvedStandard] = struct{}{}
+			}
 		case *tupleExpression:
 			for _, element := range node.elements {
 				collectExpression(element, function)
@@ -207,6 +215,9 @@ func (p *program) usedStandardSymbols() []string {
 		case *objectExpression:
 			addType(function.namespace, function.aliases, node.typeName)
 			for _, field := range node.fields {
+				if field.resolvedStandard != "" {
+					used[field.resolvedStandard] = struct{}{}
+				}
 				collectExpression(field.value, function)
 			}
 		case *callExpression:

@@ -571,9 +571,11 @@ func cloneExpression(expression expressionNode) expressionNode {
 		return &clone
 	case *templateExpression:
 		clone := *node
+		clone.resolvedStandards = nil
 		return &clone
 	case *nameExpression:
 		clone := *node
+		clone.resolvedStandard = ""
 		return &clone
 	case *lambdaExpression:
 		clone := *node
@@ -590,6 +592,7 @@ func cloneExpression(expression expressionNode) expressionNode {
 		clone.fields = make([]objectFieldExpression, len(node.fields))
 		for index, field := range node.fields {
 			clone.fields[index] = field
+			clone.fields[index].resolvedStandard = ""
 			clone.fields[index].value = cloneExpression(field.value)
 		}
 		return &clone

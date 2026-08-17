@@ -152,15 +152,17 @@ type rangeExpression struct {
 func (n *rangeExpression) expressionPos() position { return n.pos }
 
 type templateExpression struct {
-	text string
-	pos  position
+	text              string
+	resolvedStandards []string
+	pos               position
 }
 
 func (n *templateExpression) expressionPos() position { return n.pos }
 
 type nameExpression struct {
-	name string
-	pos  position
+	name             string
+	resolvedStandard string
+	pos              position
 }
 
 func (n *nameExpression) expressionPos() position { return n.pos }
@@ -185,9 +187,10 @@ type lambdaExpression struct {
 func (n *lambdaExpression) expressionPos() position { return n.pos }
 
 type objectFieldExpression struct {
-	name  string
-	value expressionNode
-	pos   position
+	name             string
+	resolvedStandard string
+	value            expressionNode
+	pos              position
 }
 
 type objectExpression struct {

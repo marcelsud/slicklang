@@ -140,7 +140,10 @@ func TestAlphaUseRequiresOptInAndBackendCoverageBeforeEmission(t *testing.T) {
 	standardLibraryRegistry = registry
 	defer func() { standardLibraryRegistry = originalRegistry }()
 
-	source := Source{Name: "main.slk", Namespace: "root", Text: `function main() -> bytes { std.bytes.FromUtf8("ok") }`}
+	source := Source{Name: "main.slk", Namespace: "root", Text: `function main() -> bytes {
+    let Convert = std.bytes.FromUtf8
+    Convert("ok")
+}`}
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "main.slk"), []byte(source.Text), 0o644); err != nil {
 		t.Fatal(err)
@@ -178,5 +181,43 @@ func TestAlphaUseRequiresOptInAndBackendCoverageBeforeEmission(t *testing.T) {
 	}
 	if contents, err := os.ReadFile(output); err != nil || string(contents) != "sentinel" {
 		t.Fatalf("pre-emission backend failure changed output: %q, %v", contents, err)
+	}
+}
+
+func TestAlphaFieldsInObjectsAndTemplatesRequireOptIn(t *testing.T) {
+	original := standardLibraryRegistry
+	registry := original
+	registry.classes = append([]standardClassDecl(nil), original.classes...)
+	for index := range registry.classes {
+		if registry.classes[index].canonical != stdProcessStatusName {
+			continue
+		}
+		registry.classes[index].fields = append([]standardFieldDecl(nil), registry.classes[index].fields...)
+		for fieldIndex := range registry.classes[index].fields {
+			if registry.classes[index].fields[fieldIndex].name == "ExitCode" {
+				registry.classes[index].fields[fieldIndex].stability = StabilityAlpha
+			}
+		}
+	}
+	standardLibraryRegistry = registry
+	defer func() { standardLibraryRegistry = original }()
+
+	root := t.TempDir()
+	source := `function main() -> string {
+    let Status = std.process.Status {
+        ExitCode: 0
+        Output: std.bytes.FromUtf8("")
+        ErrorOutput: std.bytes.FromUtf8("")
+    }
+    "${Status.ExitCode}"
+}`
+	if err := os.WriteFile(filepath.Join(root, "main.slk"), []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CheckPath(root); err == nil || !strings.Contains(err.Error(), "std.process.Status.ExitCode is alpha") {
+		t.Fatalf("alpha field without opt-in error = %v", err)
+	}
+	if diagnostics, err := CheckPathWithOptions(root, CheckOptions{AllowAlpha: true}); err != nil || len(diagnostics) != 0 {
+		t.Fatalf("alpha field with opt-in = %v, %v", diagnostics, err)
 	}
 }
