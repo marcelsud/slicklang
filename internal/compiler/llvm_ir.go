@@ -59,16 +59,17 @@ func newLLVMBind(name, typ string) llvmBind {
 	return llvmBind{name: name, typ: typ, storage: name, declared: typ}
 }
 
-func (g *llvmGen) setLocal(scope *llvmScope, name, typ, value string) {
-	if bind, ok := scope.locals[name]; ok && bind.storage != "" {
-		g.emit("  store %%slick.val %s, ptr %s, align 8", value, bind.storage)
-		scope.locals[name] = llvmBind{name: bind.storage, typ: typ, storage: bind.storage, declared: typ}
-		return
-	}
+func (g *llvmGen) declareLocal(scope *llvmScope, name, typ, value string) {
 	slot := g.reg()
 	g.emit("  %s = alloca %%slick.val, align 8", slot)
 	g.emit("  store %%slick.val %s, ptr %s, align 8", value, slot)
 	scope.locals[name] = llvmBind{name: slot, typ: typ, storage: slot, declared: typ}
+}
+
+func (g *llvmGen) assignLocal(scope *llvmScope, name, typ, value string) {
+	bind := scope.locals[name]
+	g.emit("  store %%slick.val %s, ptr %s, align 8", value, bind.storage)
+	scope.locals[name] = llvmBind{name: bind.storage, typ: typ, storage: bind.storage, declared: typ}
 }
 
 func (g *llvmGen) loadBind(bind llvmBind) string {
@@ -459,12 +460,12 @@ func (g *llvmGen) emitFunction(fn *functionDecl, receiver string) error {
 	scope := &llvmScope{function: fn, locals: map[string]llvmBind{}, pending: map[string]string{}}
 	off := 0
 	if receiver != "" {
-		g.setLocal(scope, "self", receiver, g.loadArg(0))
+		g.declareLocal(scope, "self", receiver, g.loadArg(0))
 		off = 1
 	}
 	for i, param := range fn.params {
 		typ := g.program.resolveType(fn.namespace, fn.aliases, param.typ)
-		g.setLocal(scope, param.name, typ, g.loadArg(off+i))
+		g.declareLocal(scope, param.name, typ, g.loadArg(off+i))
 	}
 	result := g.program.resolveType(fn.namespace, fn.aliases, fn.result)
 	if err := g.emitCallableBody(fn, scope, result); err != nil {
@@ -687,7 +688,7 @@ func (g *llvmGen) emitStatement(stmt statementNode, scope *llvmScope, result str
 			return "", "", err
 		}
 		if len(node.names) == 1 {
-			g.setLocal(scope, node.names[0], typ, v)
+			g.declareLocal(scope, node.names[0], typ, v)
 		} else {
 			elems, _ := tupleElementTypes(typ)
 			for i, name := range node.names {
@@ -695,7 +696,7 @@ func (g *llvmGen) emitStatement(stmt statementNode, scope *llvmScope, result str
 					continue
 				}
 				item := g.ptrCall("slick_rt_array_index_p", []string{v}, fmt.Sprintf("i64 %d", i))
-				g.setLocal(scope, name, elems[i], item)
+				g.declareLocal(scope, name, elems[i], item)
 			}
 		}
 		if last {
@@ -716,7 +717,7 @@ func (g *llvmGen) emitStatement(stmt statementNode, scope *llvmScope, result str
 			return "", "", err
 		}
 		converted := g.convert(v, from, bind.declared)
-		g.setLocal(scope, node.name, bind.declared, converted)
+		g.assignLocal(scope, node.name, bind.declared, converted)
 		if last {
 			return g.statementResult(c, v, g.null()), c, nil
 		}
@@ -955,7 +956,7 @@ func (g *llvmGen) emitFor(node *forStatement, scope *llvmScope, result string) e
 		} else {
 			item = g.ptrCall("slick_rt_iter_at_p", []string{iter}, fmt.Sprintf("i64 %s, i32 %d", cur, i))
 		}
-		g.setLocal(loop, name, bindTypes[i], item)
+		g.declareLocal(loop, name, bindTypes[i], item)
 	}
 
 	bodyValue, code, err := g.emitBlock(node.body, loop, "null", "")
@@ -1372,11 +1373,11 @@ func (g *llvmGen) emitLambda(node *lambdaExpression, scope *llvmScope) (string, 
 	lscope := &llvmScope{function: node.fn, locals: map[string]llvmBind{}, pending: map[string]string{}}
 	for i, name := range node.captures {
 		bind := scope.locals[name]
-		g.setLocal(lscope, name, bind.typ, g.loadArg(i))
+		g.declareLocal(lscope, name, bind.typ, g.loadArg(i))
 	}
 	for i, param := range node.params {
 		typ := g.program.resolveType(node.fn.namespace, node.fn.aliases, param.typ)
-		g.setLocal(lscope, param.name, typ, g.loadArg(len(node.captures)+i))
+		g.declareLocal(lscope, param.name, typ, g.loadArg(len(node.captures)+i))
 	}
 	result := g.program.resolveType(node.fn.namespace, node.fn.aliases, node.fn.result)
 	if err := g.emitCallableBody(node.fn, lscope, result); err != nil {
@@ -1881,7 +1882,7 @@ func (g *llvmGen) emitCatch(node *catchExpression, scope *llvmScope) (string, st
 		}
 		if errorType == "Error" {
 			if binding != "" {
-				g.setLocal(armScope, binding, "Error", v)
+				g.declareLocal(armScope, binding, "Error", v)
 			}
 			av, ac, err := g.emitExpr(arm.value, armScope)
 			if err != nil {
@@ -1906,7 +1907,7 @@ func (g *llvmGen) emitCatch(node *catchExpression, scope *llvmScope) (string, st
 		g.emit("  br i1 %s, label %%%s, label %%%s", eq, hit, miss)
 		g.emit("%s:", hit)
 		if binding != "" {
-			g.setLocal(armScope, binding, errorType, v)
+			g.declareLocal(armScope, binding, errorType, v)
 		}
 		av, ac, err := g.emitExpr(arm.value, armScope)
 		if err != nil {
@@ -1987,7 +1988,7 @@ func (g *llvmGen) emitUsing(node *usingExpression, scope *llvmScope) (string, st
 		return "", "", err
 	}
 	us := scope.clone()
-	g.setLocal(us, node.name, node.resolved, res)
+	g.declareLocal(us, node.name, node.resolved, res)
 	cleanup := llvmCleanup{resource: res, typ: node.resolved}
 	g.fn.cleanups = append(g.fn.cleanups, cleanup)
 	bodyV, bodyC, err := g.emitBlock(node.body, us, node.result, "")
@@ -2034,7 +2035,7 @@ func (g *llvmGen) emitMatch(node *matchExpression, scope *llvmScope) (string, st
 					}
 					declared := g.program.resolveType(union.namespace, union.aliases, variant.fields[i].typ)
 					val := g.ptrCall("slick_rt_union_field_p", []string{scrut}, fmt.Sprintf("i32 %d", i))
-					g.setLocal(armScope, b, declared, val)
+					g.declareLocal(armScope, b, declared, val)
 				}
 				av, ac, err := g.emitExpr(arm.value, armScope)
 				if err != nil {
@@ -2083,7 +2084,7 @@ func (g *llvmGen) emitMatch(node *matchExpression, scope *llvmScope) (string, st
 			g.emit("%s:", hit)
 			if arm.binding != "" {
 				val := g.ptrCall("slick_rt_result_payload_p", []string{scrut}, "")
-				g.setLocal(armScope, arm.binding, bindT, val)
+				g.declareLocal(armScope, arm.binding, bindT, val)
 			}
 			av, ac, err := g.emitExpr(arm.value, armScope)
 			if err != nil {

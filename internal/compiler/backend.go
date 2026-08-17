@@ -16,6 +16,8 @@ const (
 	BackendGo Backend = "go"
 	// BackendLLVM emits LLVM IR and links a standalone native executable.
 	BackendLLVM Backend = "llvm"
+	// BackendRust lowers allocation-free Core IR through a pinned Cargo toolchain.
+	BackendRust Backend = "rust"
 )
 
 type backendTargetRegistration struct {
@@ -67,13 +69,30 @@ var backendRegistry = []backendRegistration{
 		operations:          llvmRuntimeOperations,
 		driver:              backendDriverLLVM,
 	},
+	{
+		name:      BackendRust,
+		stability: StabilityAlpha,
+		targets: []backendTargetRegistration{{
+			name:         rustTargetTriple,
+			stability:    StabilityAlpha,
+			platform:     backendPlatform{operatingSystem: "linux", architecture: "x64"},
+			artifactKind: ArtifactNativeExecutable,
+			toolchain:    backendToolchainRegistration{name: "rust", version: rustToolchainVersion},
+		}},
+		runtimeCapabilities: []backendRuntimeCapability{backendCapabilityEmbeddedRuntime},
+		runtimeABI:          runtimeABIVersion,
+		operations:          rustRuntimeOperations,
+		driver:              backendDriverRust,
+	},
 }
 
 // BackendTargetDescription exposes one maintainer-declared backend target.
 type BackendTargetDescription struct {
-	Name      string    `json:"name"`
-	Stability Stability `json:"stability"`
-	Eligible  bool      `json:"eligible"`
+	Name             string    `json:"name"`
+	Stability        Stability `json:"stability"`
+	Eligible         bool      `json:"eligible"`
+	Toolchain        string    `json:"toolchain"`
+	ToolchainVersion string    `json:"toolchain_version"`
 }
 
 // BackendDescription separates maintainer-declared stability from computed
@@ -93,7 +112,11 @@ func Backends() []BackendDescription {
 		targets := make([]BackendTargetDescription, 0, len(declaration.targets))
 		for _, target := range declaration.targets {
 			targets = append(targets, BackendTargetDescription{
-				Name: target.name, Stability: target.stability, Eligible: eligible,
+				Name:             target.name,
+				Stability:        target.stability,
+				Eligible:         eligible,
+				Toolchain:        target.toolchain.name,
+				ToolchainVersion: target.toolchain.version,
 			})
 		}
 		descriptions = append(descriptions, BackendDescription{
