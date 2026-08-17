@@ -572,10 +572,17 @@ func cloneExpression(expression expressionNode) expressionNode {
 	case *templateExpression:
 		clone := *node
 		clone.resolvedStandards = nil
+		clone.resolvedNames = nil
+		clone.resolvedTypes = nil
+		clone.resolvedTargets = nil
+		clone.resolvedStorageTypes = nil
+		clone.resolvedConversions = nil
 		return &clone
 	case *nameExpression:
 		clone := *node
 		clone.resolvedStandard = ""
+		clone.resolvedDeclaration = ""
+		clone.storageType = ""
 		return &clone
 	case *lambdaExpression:
 		clone := *node
@@ -585,6 +592,7 @@ func cloneExpression(expression expressionNode) expressionNode {
 		clone.body = cloneBlock(node.body)
 		clone.fn = nil
 		clone.captures = nil
+		clone.captureTypes = nil
 		clone.resolved = ""
 		return &clone
 	case *objectExpression:
@@ -602,11 +610,13 @@ func cloneExpression(expression expressionNode) expressionNode {
 		clone.typeArgs = append([]typeRef(nil), node.typeArgs...)
 		clone.args = cloneExpressions(node.args)
 		clone.resolvedCallee = ""
+		clone.resolvedDeclaration = ""
 		clone.resolvedTypeArgs = nil
 		clone.resolvedParams = nil
 		clone.resolvedArgumentTypes = nil
 		clone.resolvedResult = ""
 		clone.resolvedReceiver = ""
+		clone.resolvedReceiverStorage = ""
 		clone.resolvedThrows = nil
 		clone.resolvedNative = ""
 		clone.resolvedCallable = false

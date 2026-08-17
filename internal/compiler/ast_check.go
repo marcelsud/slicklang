@@ -472,51 +472,53 @@ func (p *program) checkASTExpressionExpecting(expression expressionNode, scope *
 	if expression == nil {
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	}
+	var info expressionInfo
 	switch node := expression.(type) {
 	case *invalidExpression:
-		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
+		info = expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	case *literalExpression:
-		return expressionInfo{typ: literalType(node.value), effects: make(effectSet)}
+		info = expressionInfo{typ: literalType(node.value), effects: make(effectSet)}
 	case *tupleExpression:
-		return p.checkTupleExpression(node, scope, expected)
+		info = p.checkTupleExpression(node, scope, expected)
 	case *arrayExpression:
-		return p.checkArrayExpression(node, scope, expected)
-
+		info = p.checkArrayExpression(node, scope, expected)
 	case *mapExpression:
-		return p.checkMapExpression(node, scope, expected)
+		info = p.checkMapExpression(node, scope, expected)
 	case *rangeExpression:
-		return p.checkRangeExpression(node, scope)
+		info = p.checkRangeExpression(node, scope)
 	case *objectExpression:
-		return p.checkObjectExpression(node, scope)
+		info = p.checkObjectExpression(node, scope)
 	case *callExpression:
-		return p.checkCallExpression(node, scope)
+		info = p.checkCallExpression(node, scope)
 	case *templateExpression:
-		return p.checkTemplateExpression(node, scope)
+		info = p.checkTemplateExpression(node, scope)
 	case *nameExpression:
-		return p.checkNameExpression(node, scope)
+		info = p.checkNameExpression(node, scope)
 	case *lambdaExpression:
-		return p.checkLambdaExpression(node, scope)
+		info = p.checkLambdaExpression(node, scope)
 	case *awaitExpression:
-		return p.checkAwaitExpression(node, scope)
+		info = p.checkAwaitExpression(node, scope)
 	case *unaryExpression:
-		return p.checkUnaryExpression(node, scope)
+		info = p.checkUnaryExpression(node, scope)
 	case *binaryExpression:
-		return p.checkBinaryExpression(node, scope)
+		info = p.checkBinaryExpression(node, scope)
 	case *ifExpression:
-		return p.checkIfExpression(node, scope, expected)
+		info = p.checkIfExpression(node, scope, expected)
 	case *catchExpression:
-		return p.checkCatchExpression(node, scope, expected)
+		info = p.checkCatchExpression(node, scope, expected)
 	case *resultExpression:
-		return p.checkResultExpression(node, scope, expected)
+		info = p.checkResultExpression(node, scope, expected)
 	case *propagateExpression:
-		return p.checkPropagateExpression(node, scope)
+		info = p.checkPropagateExpression(node, scope)
 	case *usingExpression:
-		return p.checkUsingExpression(node, scope, expected)
+		info = p.checkUsingExpression(node, scope, expected)
 	case *matchExpression:
-		return p.checkMatchExpression(node, scope, expected)
+		info = p.checkMatchExpression(node, scope, expected)
 	default:
-		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
+		info = expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	}
+	p.expressionTypes[expression] = info.typ
+	return info
 }
 func (p *program) checkTupleExpression(node *tupleExpression, scope *astScope, expected string) expressionInfo {
 	info := expressionInfo{effects: make(effectSet)}
@@ -568,6 +570,11 @@ func (p *program) checkTupleExpression(node *tupleExpression, scope *astScope, e
 func (p *program) checkTemplateExpression(node *templateExpression, scope *astScope) expressionInfo {
 	info := expressionInfo{typ: "string", effects: make(effectSet)}
 	node.resolvedStandards = nil
+	node.resolvedNames = nil
+	node.resolvedTypes = nil
+	node.resolvedTargets = nil
+	node.resolvedStorageTypes = nil
+	node.resolvedConversions = nil
 	text := node.text
 	for {
 		start := strings.Index(text, "${")
@@ -581,7 +588,18 @@ func (p *program) checkTemplateExpression(node *templateExpression, scope *astSc
 		}
 		name := strings.TrimSpace(text[:end])
 		reference := &nameExpression{name: name, pos: node.pos}
-		mergeEffects(info.effects, p.checkNameExpression(reference, scope).effects)
+		referenceInfo := p.checkNameExpression(reference, scope)
+		mergeEffects(info.effects, referenceInfo.effects)
+		target := reference.resolvedDeclaration
+		node.resolvedNames = append(node.resolvedNames, name)
+		node.resolvedTypes = append(node.resolvedTypes, referenceInfo.typ)
+		node.resolvedTargets = append(node.resolvedTargets, target)
+		node.resolvedStorageTypes = append(node.resolvedStorageTypes, reference.storageType)
+		conversion := ""
+		if base, optional := optionalBase(reference.storageType); optional && base == referenceInfo.typ {
+			conversion = "optional_unwrap_proven"
+		}
+		node.resolvedConversions = append(node.resolvedConversions, conversion)
 		if reference.resolvedStandard != "" {
 			node.resolvedStandards = append(node.resolvedStandards, reference.resolvedStandard)
 		}
@@ -590,6 +608,48 @@ func (p *program) checkTemplateExpression(node *templateExpression, scope *astSc
 }
 
 func (p *program) checkNameExpression(node *nameExpression, scope *astScope) expressionInfo {
+	info := p.checkNameExpressionUnchecked(node, scope)
+	if parts := strings.Split(node.name, "."); len(parts) == 1 {
+		node.storageType = scope.locals[node.name]
+	}
+	p.expressionTypes[node] = info.typ
+	if info.typ != typeUnknown {
+		node.resolvedDeclaration = p.resolvedNameDeclaration(node, scope)
+	}
+	return info
+}
+
+func (p *program) resolvedNameDeclaration(node *nameExpression, scope *astScope) string {
+	if node.resolvedStandard != "" {
+		return node.resolvedStandard
+	}
+	parts := strings.Split(node.name, ".")
+	if _, pending := scope.pending[parts[0]]; pending {
+		return ""
+	}
+	if receiverType, local := scope.lookup(parts[0]); local {
+		if len(parts) == 2 {
+			if class := p.classes[receiverType]; class != nil {
+				if _, field := class.fields[parts[1]]; field {
+					return class.qualified + "." + parts[1]
+				}
+			}
+		}
+		return ""
+	}
+	if constant := p.constantFor(scope.function.namespace, scope.function.aliases, node.name); constant != nil {
+		return constant.qualified
+	}
+	if function := p.resolveFunction(scope.function, node.name); function != nil {
+		return function.qualified
+	}
+	if union, variant, named := p.resolveVariant(scope.function.namespace, scope.function.aliases, node.name); named && variant != nil {
+		return union.qualified + "." + variant.name
+	}
+	return ""
+}
+
+func (p *program) checkNameExpressionUnchecked(node *nameExpression, scope *astScope) expressionInfo {
 	parts := strings.Split(node.name, ".")
 	if len(parts) == 1 {
 		if pending, exists := scope.pending[node.name]; exists {
@@ -958,6 +1018,12 @@ func (p *program) checkCallExpression(node *callExpression, scope *astScope) exp
 }
 
 func (p *program) checkCallExpressionEffects(node *callExpression, scope *astScope, includeThrows bool) expressionInfo {
+	info := p.checkCallExpressionEffectsUnchecked(node, scope, includeThrows)
+	p.expressionTypes[node] = info.typ
+	return info
+}
+
+func (p *program) checkCallExpressionEffectsUnchecked(node *callExpression, scope *astScope, includeThrows bool) expressionInfo {
 	name, ok := node.callee.(*nameExpression)
 	if !ok {
 		// Any expression whose static type is callable may be invoked, so the
@@ -997,12 +1063,14 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 		return info
 	}
 	if info, builtin := p.checkIterableCall(node, scope, name); builtin {
+		node.resolvedDeclaration = "core." + name.name
 		if len(node.typeArgs) > 0 {
 			p.add(node.pos, diagnosticCodeTypeArguments, "%s does not take type arguments", name.name)
 		}
 		return info
 	}
 	if info, builtin := p.checkUnwrapCall(node, scope, name); builtin {
+		node.resolvedDeclaration = "core.unwrap"
 		return info
 	}
 	if _, shadowed := scope.lookup(parts[0]); !shadowed {
@@ -1014,6 +1082,7 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 		if className, isError := p.resolveErrorIn(scope.function.namespace, scope.function.aliases, name.name); isError && p.classes[className] != nil {
 			class := p.classes[className]
 			p.requireAccess(node.pos, scope.function.namespace, class.namespace, class.name, "error class")
+			node.resolvedDeclaration = className
 			info := expressionInfo{typ: className, effects: make(effectSet)}
 			if len(node.typeArgs) > 0 {
 				p.add(node.pos, diagnosticCodeTypeArguments, "%s does not take type arguments", name.name)
@@ -1029,6 +1098,7 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 	if len(parts) == 2 {
 		if receiver, exists := scope.lookup(parts[0]); exists {
 			node.resolvedReceiver = receiver
+			node.resolvedReceiverStorage = scope.locals[parts[0]]
 		}
 	}
 	if target == nil {
@@ -1055,6 +1125,15 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 		if _, _, standard := standardSymbolMetadata(candidate); standard {
 			name.resolvedStandard = candidate
 		}
+	}
+	if name.resolvedStandard != "" {
+		node.resolvedDeclaration = name.resolvedStandard
+	} else if node.resolvedCallee != "" {
+		node.resolvedDeclaration = node.resolvedCallee
+	} else if node.resolvedReceiver != "" {
+		node.resolvedDeclaration = node.resolvedReceiver + "." + parts[len(parts)-1]
+	} else if target.function != nil {
+		node.resolvedDeclaration = target.function.qualified
 	}
 
 	info := expressionInfo{

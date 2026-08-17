@@ -243,6 +243,9 @@ func BuildSourcesWithOptions(sources []Source, output string, options BuildOptio
 	if err := program.validateStandardUsage(backend, target, options.AllowAlpha, true); err != nil {
 		return nil, err
 	}
+	if _, err := program.lowerCore(); err != nil {
+		return nil, fmt.Errorf("lower Core IR: %w", err)
+	}
 	output, err := filepath.Abs(output)
 	if err != nil {
 		return nil, err
