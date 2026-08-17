@@ -136,6 +136,10 @@ func rustToolCommand(path string, arguments ...string) *exec.Cmd {
 }
 
 func emitRustWorkspace(core coreProgram, workspace string) (backendEmission, error) {
+	runtime, err := runtimeInputsForCore(core)
+	if err != nil {
+		return backendEmission{}, err
+	}
 	source, err := generateRust(core)
 	if err != nil {
 		return backendEmission{}, err
@@ -149,8 +153,8 @@ func emitRustWorkspace(core coreProgram, workspace string) (backendEmission, err
 		path string
 		data string
 	}{
-		{path: manifest, data: rustCargoManifest},
-		{path: filepath.Join(workspace, "Cargo.lock"), data: rustCargoLock},
+		{path: manifest, data: rustCargoManifestFor(runtime)},
+		{path: filepath.Join(workspace, "Cargo.lock"), data: rustCargoLockFor(runtime)},
 		{path: filepath.Join(sourceDirectory, "main.rs"), data: source},
 	}
 	for _, file := range files {
@@ -172,8 +176,32 @@ func buildRustEmission(input backendDriverInput, emission backendEmission, candi
 	if err := os.MkdirAll(cargoHome, 0o755); err != nil {
 		return fmt.Errorf("create compiler-owned Cargo home: %w", err)
 	}
-	command := exec.Command(input.toolchain.executables["cargo"],
-		"build", "--frozen", "--offline", "--release", "--target", rustTargetTriple, "--manifest-path", manifest)
+	dependencies := len(rustStdCrates(input.runtime)) > 0
+	if dependencies {
+		// A program that links a compiler-owned crate resolves it from the pinned
+		// lockfile before any output is installed, so a missing dependency fails
+		// the build instead of producing a partial artifact.
+		fetch := exec.Command(input.toolchain.executables["cargo"],
+			"fetch", "--locked", "--target", rustTargetTriple, "--manifest-path", manifest)
+		fetch.Dir = filepath.VolumeName(workspace) + string(filepath.Separator)
+		fetch.Env = rustBuildEnvironment(os.Environ(), map[string]string{
+			"CARGO_HOME":       cargoHome,
+			"CARGO_TARGET_DIR": targetDirectory,
+			"RUSTC":            input.toolchain.executables["rustc"],
+			"RUSTUP_TOOLCHAIN": rustToolchainName,
+		})
+		if output, err := fetch.CombinedOutput(); err != nil {
+			return fmt.Errorf("resolve compiler-owned Rust dependencies for target %s: %w: %s",
+				rustTargetTriple, err, strings.TrimSpace(string(output)))
+		}
+	}
+	arguments := []string{"build", "--locked", "--release", "--target", rustTargetTriple, "--manifest-path", manifest}
+	if !dependencies {
+		arguments = append([]string{"build", "--frozen", "--offline"}, arguments[1:]...)
+	}
+	command := exec.Command(input.toolchain.executables["cargo"], arguments...)
+	// The build runs from the filesystem root so a caller project's Cargo
+	// configuration can never reach the compiler-owned workspace.
 	command.Dir = filepath.VolumeName(workspace) + string(filepath.Separator)
 	rustFlags := strings.Join([]string{
 		"--remap-path-prefix=" + workspace + "=/slick",
@@ -182,11 +210,15 @@ func buildRustEmission(input backendDriverInput, emission backendEmission, candi
 		"-C", "codegen-units=1",
 		"-C", "metadata=slick_runtime_v1",
 	}, "\x1f")
+	offline := "true"
+	if dependencies {
+		offline = "false"
+	}
 	command.Env = rustBuildEnvironment(os.Environ(), map[string]string{
 		"CARGO_ENCODED_RUSTFLAGS": rustFlags,
 		"CARGO_HOME":              cargoHome,
 		"CARGO_INCREMENTAL":       "0",
-		"CARGO_NET_OFFLINE":       "true",
+		"CARGO_NET_OFFLINE":       offline,
 		"CARGO_TARGET_DIR":        targetDirectory,
 		"RUSTC":                   input.toolchain.executables["rustc"],
 		"RUSTUP_TOOLCHAIN":        rustToolchainName,

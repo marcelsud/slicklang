@@ -206,6 +206,34 @@ func TestRustBackendDiagnosesSourceBeforeToolchain(t *testing.T) {
 	}
 	requireRustSentinel(t, output)
 }
+
+// TestRustImplementsEveryRuntimeOperation is the coverage gate for issue #107:
+// every registry operation has exactly one Rust entry point, and the backend
+// advertises exactly that set.
+func TestRustImplementsEveryRuntimeOperation(t *testing.T) {
+	seen := make(map[string]runtimeOperationID, len(rustStdOperations))
+	for operation := range runtimeOperationRegistry {
+		function, ok := rustStdFunction(operation)
+		if !ok {
+			t.Fatalf("runtime operation %s has no Rust implementation", operation)
+		}
+		if previous, exists := seen[function]; exists {
+			t.Fatalf("Rust entry point %s implements both %s and %s", function, previous, operation)
+		}
+		seen[function] = operation
+		if !rustRuntimeOperations.implements(operation) {
+			t.Fatalf("Rust backend does not advertise runtime operation %s", operation)
+		}
+	}
+	if len(rustRuntimeOperations) != len(runtimeOperationRegistry) {
+		t.Fatalf("Rust advertises %d operations, registry declares %d",
+			len(rustRuntimeOperations), len(runtimeOperationRegistry))
+	}
+}
+
+// TestRustLoweringLocatesUnsupportedStandardOperations pins the pre-toolchain
+// gate itself: an operation a backend does not implement is reported with its
+// source location before any toolchain work.
 func TestRustLoweringLocatesUnsupportedStandardOperations(t *testing.T) {
 	core := rustCoreForTest(t, `function main() -> bool {
     std.text.Contains("slick", "ick")
@@ -214,29 +242,17 @@ func TestRustLoweringLocatesUnsupportedStandardOperations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = validateRustCore(core, runtime)
+	if err := validateRustCore(core, runtime); err != nil {
+		t.Fatalf("implemented operation rejected: %v", err)
+	}
+	err = validateLanguageCore(core, runtime, "Rust", func(operation runtimeOperationID) bool {
+		return operation != nativeStdTextContains
+	})
 	if err == nil ||
 		!strings.Contains(err.Error(), "Rust lowering main.slk:2:") ||
 		!strings.Contains(err.Error(), "standard-library operation std.text.Contains is not supported") {
 		t.Fatalf("error=%v", err)
 	}
-}
-
-func TestRustBackendRejectsUnsupportedCoreBeforeToolchain(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	output := rustSentinelOutput(t)
-	diagnostics, err := BuildSourcesWithOptions([]Source{{
-		Name: "main.slk", Namespace: "root", Text: `function main() -> bool {
-    std.text.Contains("slick", "ick")
-}`,
-	}}, output, BuildOptions{Backend: BackendRust, AllowAlpha: true})
-	if len(diagnostics) != 0 || err == nil || !strings.Contains(err.Error(), "standard-library operation std.text.Contains is not supported") {
-		t.Fatalf("diagnostics=%v error=%v", diagnostics, err)
-	}
-	if strings.Contains(err.Error(), "toolchain") {
-		t.Fatalf("unsupported Core reached toolchain validation: %v", err)
-	}
-	requireRustSentinel(t, output)
 }
 
 func TestRustBackendReportsMissingAndIncompatibleToolchains(t *testing.T) {
