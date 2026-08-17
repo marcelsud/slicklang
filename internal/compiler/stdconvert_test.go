@@ -1,13 +1,8 @@
 package compiler_test
 
 import (
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
-
-	"slick/internal/compiler"
 )
 
 func TestStdConvertExactAliasesAndResultPropagation(t *testing.T) {
@@ -120,26 +115,8 @@ function main() -> string {
 
 func TestStdConvertRejectsNonFiniteFormattingWithoutPanic(t *testing.T) {
 	source := `function main() -> string { std.convert.FloatToString(1e308 + 1e308) }`
-	_, diagnostics, err := compiler.Run([]compiler.Source{{Name: "main.slk", Namespace: "root", Text: source}})
-	assertNoDiagnostics(t, diagnostics)
-	if err == nil || !strings.Contains(err.Error(), "cannot format non-finite float") {
-		t.Fatalf("interpreted non-finite FloatToString error = %v", err)
-	}
-
-	root := t.TempDir()
-	path := filepath.Join(root, "main.slk")
-	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
-		t.Fatalf("write Slick source: %v", err)
-	}
-	binary := filepath.Join(root, "app")
-	diagnostics, err = compiler.BuildPath(path, binary)
-	if err != nil {
-		t.Fatalf("build native binary: %v", err)
-	}
-	assertNoDiagnostics(t, diagnostics)
-	output, err := exec.Command(binary).CombinedOutput()
-	if err == nil || !strings.Contains(string(output), "cannot format non-finite float") {
-		t.Fatalf("native non-finite FloatToString: err=%v output=%q", err, output)
+	if failure := runFailureEverywhere(t, source); !strings.Contains(failure, "cannot format non-finite float") {
+		t.Fatalf("non-finite FloatToString failure = %q", failure)
 	}
 }
 

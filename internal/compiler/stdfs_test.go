@@ -215,7 +215,7 @@ func TestStdFSCallableDiagnostics(t *testing.T) {
 }
 
 // stdFSDirectorySupport lists a directory into a deterministic ordered summary
-// so both backends can be compared on a single line of output.
+// so all three backends can be compared on one line of output.
 const stdFSDirectorySupport = `
 function Describe(Entries: std.fs.Entry[]) -> string effects { state } {
     let Buffer = std.buffer.New<string>()
@@ -576,7 +576,7 @@ function main() -> string throws BodyFailure | std.fs.Failure effects { filesyst
 }
 `
 	want := "root.BodyFailure: body (suppressed: std.fs.Failure: temporary directory is not owned by this resource)"
-	if got := runUsingFailureEverywhere(t, source); got != want {
+	if got := runFailureEverywhere(t, source); got != want {
 		t.Fatalf("cleanup precedence failure = %q, want %q", got, want)
 	}
 }

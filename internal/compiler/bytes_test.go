@@ -1,9 +1,6 @@
 package compiler_test
 
 import (
-	"os/exec"
-	"path/filepath"
-	"strings"
 	"testing"
 
 	"slick/internal/compiler"
@@ -37,16 +34,10 @@ function main() -> string {
     let Length = std.bytes.Length(Joined)
 ` + "    `${Text};${Length};${First};${Last};${Negative};${Past};${Equal};${PrefixUnchanged};${EmptyPresent};${MissingAbsent};${Joined}`\n" + `}
 `
-	output, diagnostics, err := compiler.Run([]compiler.Source{{Name: "main.slk", Namespace: "root", Text: source}})
-	if err != nil {
-		t.Fatalf("run bytes contracts: %v", err)
-	}
-	assertNoDiagnostics(t, diagnostics)
 	const expected = "Aé界;6;65;140;;;true;true;true;true;bytes[6]"
-	if output != expected {
-		t.Fatalf("expected %q, found %q", expected, output)
+	if output := runResultEverywhere(t, source); output != expected {
+		t.Fatalf("bytes contract produced %q, want %q", output, expected)
 	}
-	assertNativeOutput(t, source, expected)
 }
 
 func TestBytesHaveNoImplicitConversions(t *testing.T) {
@@ -79,24 +70,4 @@ function main() -> string { match Convert("ok") { Ok(Text) => Text Err(Failure) 
 `,
 	}})
 	assertNoDiagnostics(t, diagnostics)
-}
-
-func assertNativeOutput(t *testing.T, source, expected string) {
-	t.Helper()
-	root := t.TempDir()
-	sourcePath := filepath.Join(root, "main.slk")
-	writeSource(t, sourcePath, source)
-	binary := filepath.Join(root, "app")
-	diagnostics, err := compiler.BuildPath(sourcePath, binary)
-	if err != nil {
-		t.Fatalf("build native contract: %v", err)
-	}
-	assertNoDiagnostics(t, diagnostics)
-	output, err := exec.Command(binary).CombinedOutput()
-	if err != nil {
-		t.Fatalf("run native contract: %v: %s", err, output)
-	}
-	if actual := strings.TrimSuffix(string(output), "\n"); actual != expected {
-		t.Fatalf("native output: expected %q, found %q", expected, actual)
-	}
 }

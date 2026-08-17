@@ -687,7 +687,7 @@ function main() -> Record {
 			want: "root.Record",
 		},
 		{
-			name: "classes holding callables compare unequal in both backends",
+			name: "classes holding callables compare unequal in every backend",
 			source: `
 class Record {
     Transform: (int) -> int

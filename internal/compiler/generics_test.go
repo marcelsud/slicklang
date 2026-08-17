@@ -32,7 +32,7 @@ func runGenerics(t *testing.T, sources ...compiler.Source) string {
 	return output
 }
 
-func buildAndRunGenerics(t *testing.T, sources ...compiler.Source) string {
+func buildAndRunGenericsBackend(t *testing.T, backend compiler.Backend, sources ...compiler.Source) string {
 	t.Helper()
 	root := t.TempDir()
 	for _, source := range sources {
@@ -45,30 +45,39 @@ func buildAndRunGenerics(t *testing.T, sources ...compiler.Source) string {
 		}
 	}
 	binary := filepath.Join(t.TempDir(), "app")
-	diagnostics, err := compiler.BuildPath(root, binary)
+	diagnostics, err := compiler.BuildPathBackend(root, binary, backend)
 	if err != nil {
-		t.Fatalf("build native binary: %v", err)
+		t.Fatalf("build %s binary: %v", backend, err)
 	}
 	assertNoDiagnostics(t, diagnostics)
 	output, err := exec.Command(binary).CombinedOutput()
 	if err != nil {
-		t.Fatalf("run native binary: %v: %s", err, output)
+		t.Fatalf("run %s binary: %v: %s", backend, err, output)
 	}
 	return strings.TrimSuffix(string(output), "\n")
 }
 
-// runGenericsEverywhere holds the interpreter and the native binary to one
-// observable result, so a generic declaration cannot mean different things on
-// the two backends.
-func runGenericsEverywhere(t *testing.T, source string) string {
+// runGenericsSourcesEverywhere holds the interpreter, generated-Go, and LLVM
+// backends to one observable result.
+func runGenericsSourcesEverywhere(t *testing.T, sources ...compiler.Source) string {
 	t.Helper()
-	sources := []compiler.Source{{Name: "main.slk", Namespace: "root", Text: source}}
-	interpreted := runGenerics(t, sources...)
-	native := buildAndRunGenerics(t, sources...)
-	if interpreted != native {
-		t.Fatalf("interpreter produced %q, native binary produced %q", interpreted, native)
+	var interpreted string
+	t.Run("interpreter", func(t *testing.T) {
+		interpreted = runGenerics(t, sources...)
+	})
+	for _, backend := range []compiler.Backend{compiler.BackendGo, compiler.BackendLLVM} {
+		t.Run(string(backend), func(t *testing.T) {
+			if output := buildAndRunGenericsBackend(t, backend, sources...); output != interpreted {
+				t.Fatalf("interpreter produced %q, %s produced %q", interpreted, backend, output)
+			}
+		})
 	}
 	return interpreted
+}
+
+func runGenericsEverywhere(t *testing.T, source string) string {
+	t.Helper()
+	return runGenericsSourcesEverywhere(t, compiler.Source{Name: "main.slk", Namespace: "root", Text: source})
 }
 
 func checkGenerics(t *testing.T, source string) []compiler.Diagnostic {
@@ -76,7 +85,7 @@ func checkGenerics(t *testing.T, source string) []compiler.Diagnostic {
 	return compiler.Check([]compiler.Source{{Name: "main.slk", Namespace: "root", Text: source}})
 }
 
-func TestGenericDeclarationsRunOnBothBackends(t *testing.T) {
+func TestGenericDeclarationsRunOnEveryBackend(t *testing.T) {
 	tests := map[string]struct {
 		source   string
 		expected string
@@ -407,10 +416,8 @@ function main() -> string {
     ` + "`${Number};${Text}`" + `
 }
 `}
-	interpreted := runGenerics(t, library, main)
-	native := buildAndRunGenerics(t, library, main)
-	if interpreted != "1;two" || native != interpreted {
-		t.Fatalf("expected 1;two from both backends, found %q and %q", interpreted, native)
+	if output := runGenericsSourcesEverywhere(t, library, main); output != "1;two" {
+		t.Fatalf("cross-namespace generic output = %q, want 1;two", output)
 	}
 }
 
@@ -457,7 +464,7 @@ function main() -> int {
 // built: a class that reaches itself by value through an optional is a Go
 // recursive value type, which the native backend already rejects for the
 // non-generic class Node { Next: Node? }. Recursion through an array is
-// covered by TestGenericDeclarationsRunOnBothBackends on both backends.
+// covered by TestGenericDeclarationsRunOnEveryBackend on every backend.
 func TestRecursiveGenericConverges(t *testing.T) {
 	t.Run("same type arguments", func(t *testing.T) {
 		source := `

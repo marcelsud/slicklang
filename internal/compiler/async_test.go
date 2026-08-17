@@ -1,6 +1,7 @@
 package compiler_test
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,8 +17,24 @@ import (
 	"slick/internal/compiler"
 )
 
-func runAsyncBackend(source string, native bool) (string, error) {
-	if !native {
+type asyncTestBackend struct {
+	name    string
+	native  bool
+	backend compiler.Backend
+}
+
+var asyncTestBackends = []asyncTestBackend{
+	{name: "interpreter"},
+	{name: "go", native: true, backend: compiler.BackendGo},
+	{name: "llvm", native: true, backend: compiler.BackendLLVM},
+}
+
+func runAsyncBackend(source string, testBackend asyncTestBackend) (string, error) {
+	return runAsyncBackendContext(context.Background(), source, testBackend)
+}
+
+func runAsyncBackendContext(ctx context.Context, source string, testBackend asyncTestBackend) (string, error) {
+	if !testBackend.native {
 		output, diagnostics, err := compiler.Run([]compiler.Source{{Name: "main.slk", Namespace: "root", Text: source}})
 		if len(diagnostics) != 0 {
 			return "", fmt.Errorf("async diagnostics: %v", diagnostics)
@@ -35,26 +52,67 @@ func runAsyncBackend(source string, native bool) (string, error) {
 		return "", err
 	}
 	binary := filepath.Join(root, "app")
-	diagnostics, err := compiler.BuildPath(sourcePath, binary)
+	diagnostics, err := compiler.BuildPathBackend(sourcePath, binary, testBackend.backend)
 	if err != nil {
 		return "", err
 	}
 	if len(diagnostics) != 0 {
 		return "", fmt.Errorf("async diagnostics: %v", diagnostics)
 	}
-	output, err := exec.Command(binary).CombinedOutput()
+	output, err := exec.CommandContext(ctx, binary).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("%w: %s", err, output)
 	}
 	return strings.TrimSuffix(string(output), "\n"), nil
 }
 
-func receiveAsyncSignal(t *testing.T, signal <-chan struct{}, label string) {
-	t.Helper()
+type asyncRunResult struct {
+	output string
+	err    error
+}
+
+func receiveAsyncSignal(signal <-chan struct{}, label string) error {
 	select {
 	case <-signal:
+		return nil
 	case <-time.After(5 * time.Second):
-		t.Fatalf("timed out waiting for %s", label)
+		return fmt.Errorf("timed out waiting for %s", label)
+	}
+}
+
+func receiveAsyncResult(result <-chan asyncRunResult, label string) (asyncRunResult, error) {
+	select {
+	case completed := <-result:
+		return completed, nil
+	case <-time.After(5 * time.Second):
+		return asyncRunResult{}, fmt.Errorf("timed out waiting for %s", label)
+	}
+}
+
+func stopAsyncRun(
+	cancel context.CancelFunc,
+	server *httptest.Server,
+	unblock func(),
+	result <-chan asyncRunResult,
+) error {
+	if unblock != nil {
+		unblock()
+	}
+	cancel()
+	server.CloseClientConnections()
+	if _, err := receiveAsyncResult(result, "background run to stop"); err != nil {
+		return err
+	}
+	closed := make(chan struct{})
+	go func() {
+		server.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		return nil
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("timed out waiting for test server to close")
 	}
 }
 
@@ -204,12 +262,8 @@ function main() -> int {
 }
 
 func TestAsyncPreparationFailureLaunchesNoChild(t *testing.T) {
-	for _, native := range []bool{false, true} {
-		name := "interpreter"
-		if native {
-			name = "native"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, backend := range asyncTestBackends {
+		t.Run(backend.name, func(t *testing.T) {
 			var hits atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 				hits.Add(1)
@@ -229,7 +283,7 @@ function main() -> Result<int, PrepFailure> effects { network } {
     Ok(Value)
 }
 `, server.URL)
-			output, err := runAsyncBackend(source, native)
+			output, err := runAsyncBackend(source, backend)
 			if err != nil {
 				t.Fatalf("run preparation scenario: %v", err)
 			}
@@ -244,12 +298,8 @@ function main() -> Result<int, PrepFailure> effects { network } {
 }
 
 func TestAsyncArgumentsEvaluateOnceInSourceOrder(t *testing.T) {
-	for _, native := range []bool{false, true} {
-		name := "interpreter"
-		if native {
-			name = "native"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, backend := range asyncTestBackends {
+		t.Run(backend.name, func(t *testing.T) {
 			var mutex sync.Mutex
 			var paths []string
 			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -270,7 +320,7 @@ function main() -> Result<int, std.http.Failure> effects { network } {
     Ok(await Work)
 }
 `, server.URL+"/first", server.URL+"/second")
-			output, err := runAsyncBackend(source, native)
+			output, err := runAsyncBackend(source, backend)
 			if err != nil {
 				t.Fatalf("run argument-order scenario: %v", err)
 			}
@@ -288,20 +338,16 @@ function main() -> Result<int, std.http.Failure> effects { network } {
 }
 
 func TestAsyncHTTPChildrenOverlap(t *testing.T) {
-	for _, native := range []bool{false, true} {
-		name := "interpreter"
-		if native {
-			name = "native"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, backend := range asyncTestBackends {
+		t.Run(backend.name, func(t *testing.T) {
 			started := make(chan struct{}, 2)
 			release := make(chan struct{})
+			releaseRequests := sync.OnceFunc(func() { close(release) })
 			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 				started <- struct{}{}
 				<-release
 				_, _ = response.Write([]byte("x"))
 			}))
-			defer server.Close()
 
 			source := fmt.Sprintf(`
 function Fetch(URL: string) -> Result<int, std.http.Failure> effects { network } {
@@ -317,21 +363,28 @@ function main() -> Result<int, std.http.Failure> effects { network } {
 }
 `, server.URL+"/left", server.URL+"/right")
 
-			result := make(chan struct {
-				output string
-				err    error
-			}, 1)
+			runContext, cancelRun := context.WithCancel(context.Background())
+			result := make(chan asyncRunResult, 1)
 			go func() {
-				output, err := runAsyncBackend(source, native)
-				result <- struct {
-					output string
-					err    error
-				}{output, err}
+				output, err := runAsyncBackendContext(runContext, source, backend)
+				result <- asyncRunResult{output: output, err: err}
 			}()
-			receiveAsyncSignal(t, started, "first request")
-			receiveAsyncSignal(t, started, "second request")
-			close(release)
-			completed := <-result
+			if err := receiveAsyncSignal(started, "first request"); err != nil {
+				cleanupErr := stopAsyncRun(cancelRun, server, releaseRequests, result)
+				t.Fatalf("%v; cleanup: %v", err, cleanupErr)
+			}
+			if err := receiveAsyncSignal(started, "second request"); err != nil {
+				cleanupErr := stopAsyncRun(cancelRun, server, releaseRequests, result)
+				t.Fatalf("%v; cleanup: %v", err, cleanupErr)
+			}
+			releaseRequests()
+			completed, err := receiveAsyncResult(result, "overlap scenario")
+			if err != nil {
+				cleanupErr := stopAsyncRun(cancelRun, server, releaseRequests, result)
+				t.Fatalf("%v; cleanup: %v", err, cleanupErr)
+			}
+			cancelRun()
+			server.Close()
 			if completed.err != nil {
 				t.Fatalf("run overlap scenario: %v", completed.err)
 			}
@@ -343,12 +396,8 @@ function main() -> Result<int, std.http.Failure> effects { network } {
 }
 
 func TestAsyncResultPropagationCancelsAndJoinsHTTPChild(t *testing.T) {
-	for _, native := range []bool{false, true} {
-		name := "interpreter"
-		if native {
-			name = "native"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, backend := range asyncTestBackends {
+		t.Run(backend.name, func(t *testing.T) {
 			blocked := make(chan struct{}, 1)
 			cancelled := make(chan struct{}, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -358,7 +407,11 @@ func TestAsyncResultPropagationCancelsAndJoinsHTTPChild(t *testing.T) {
 					cancelled <- struct{}{}
 					return
 				}
-				<-blocked
+				select {
+				case <-blocked:
+				case <-request.Context().Done():
+					return
+				}
 				hijacker := response.(http.Hijacker)
 				connection, _, err := hijacker.Hijack()
 				if err != nil {
@@ -367,7 +420,6 @@ func TestAsyncResultPropagationCancelsAndJoinsHTTPChild(t *testing.T) {
 				}
 				_ = connection.Close()
 			}))
-			defer server.Close()
 
 			source := fmt.Sprintf(`
 function Pair() -> Result<null, std.http.Failure> effects { network } {
@@ -385,19 +437,23 @@ function main() -> string effects { network } {
 }
 `, server.URL+"/failure", server.URL+"/blocked")
 
-			result := make(chan struct {
-				output string
-				err    error
-			}, 1)
+			runContext, cancelRun := context.WithCancel(context.Background())
+			result := make(chan asyncRunResult, 1)
 			go func() {
-				output, err := runAsyncBackend(source, native)
-				result <- struct {
-					output string
-					err    error
-				}{output, err}
+				output, err := runAsyncBackendContext(runContext, source, backend)
+				result <- asyncRunResult{output: output, err: err}
 			}()
-			receiveAsyncSignal(t, cancelled, "cancelled sibling request")
-			completed := <-result
+			if err := receiveAsyncSignal(cancelled, "cancelled sibling request"); err != nil {
+				cleanupErr := stopAsyncRun(cancelRun, server, nil, result)
+				t.Fatalf("%v; cleanup: %v", err, cleanupErr)
+			}
+			completed, err := receiveAsyncResult(result, "cancellation scenario")
+			if err != nil {
+				cleanupErr := stopAsyncRun(cancelRun, server, nil, result)
+				t.Fatalf("%v; cleanup: %v", err, cleanupErr)
+			}
+			cancelRun()
+			server.Close()
 			if completed.err != nil {
 				t.Fatalf("run cancellation scenario: %v", completed.err)
 			}
@@ -409,12 +465,8 @@ function main() -> string effects { network } {
 }
 
 func TestAsyncReturnJoinsChildBeforeParentUsingCleanup(t *testing.T) {
-	for _, native := range []bool{false, true} {
-		name := "interpreter"
-		if native {
-			name = "native"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, backend := range asyncTestBackends {
+		t.Run(backend.name, func(t *testing.T) {
 			started := make(chan struct{}, 1)
 			childDone := make(chan struct{})
 			var closes atomic.Int32
@@ -467,7 +519,7 @@ function main() -> string effects { network } {
     "ok"
 }
 `, server.URL)
-			output, err := runAsyncBackend(source, native)
+			output, err := runAsyncBackend(source, backend)
 			if err != nil {
 				t.Fatalf("run cleanup scenario: %v", err)
 			}

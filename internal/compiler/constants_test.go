@@ -19,7 +19,7 @@ function main() -> string {
 }
 
 // TestConstantsProduceOneValueInEveryBackend covers the constant expression
-// grammar end to end: both backends must agree on the value a program prints.
+// grammar end to end: all backends must agree on the value a program prints.
 func TestConstantsProduceOneValueInEveryBackend(t *testing.T) {
 	for _, test := range []struct {
 		name         string

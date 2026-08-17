@@ -44,10 +44,9 @@ function DescribeGroup(Inner: Shape, Tag: Label) -> string {
 
 // TestUnionValuesFlowThroughEveryStorage constructs variants in a local, a
 // field, an argument, a return, an array, a map, an optional, and a Result,
-// and asserts both backends observe the same values.
+// and asserts all three backends observe the same values.
 func TestUnionValuesFlowThroughEveryStorage(t *testing.T) {
-	// runResultEverywhere runs the interpreter and a native binary and fails
-	// unless both produce the same output.
+	// runResultEverywhere compares the interpreter and both native backends.
 	output := runResultEverywhere(t, unionShapes+`
 class Holder {
     Value: Shape
@@ -154,7 +153,7 @@ function main() -> string {
 }
 
 // TestUnionValuesCompareByVariantAndPayload pins structural equality, which
-// both backends must agree on for nested recursive values.
+// all three backends must agree on for nested recursive values.
 func TestUnionValuesCompareByVariantAndPayload(t *testing.T) {
 	output := runResultEverywhere(t, unionShapes+`
 function main() -> string {

@@ -1,10 +1,6 @@
 package compiler_test
 
 import (
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
 	"testing"
 
 	"slick/internal/compiler"
@@ -26,8 +22,8 @@ function find_user(Found: bool) -> User? {
 `
 
 // TestOptionalPrograms pins the observable behaviour of every Optional feature
-// against both backends at once. Interpreter and native output must agree, so
-// each case doubles as the cross-backend contract.
+// against all three backends at once. Their output must agree, so each case
+// doubles as the cross-backend contract.
 func TestOptionalPrograms(t *testing.T) {
 	tests := map[string]struct {
 		source   string
@@ -488,37 +484,11 @@ function main() -> string {
 	assertOptionalProgram(t, source, "no array;x-;ok none;Grace")
 }
 
-// assertOptionalProgram runs source through the interpreter and through a
-// native binary built from the same source, requiring both to produce expected.
-// Optional values are only useful if the two backends agree, so every positive
-// contract checks both rather than trusting one.
+// assertOptionalProgram holds the interpreter, generated-Go, and LLVM
+// backends to the same Optional result.
 func assertOptionalProgram(t *testing.T, source, expected string) {
 	t.Helper()
-	output, diagnostics, err := compiler.Run([]compiler.Source{{Name: "main.slk", Namespace: "root", Text: source}})
-	if err != nil {
-		t.Fatalf("run Slick: %v", err)
-	}
-	assertNoDiagnostics(t, diagnostics)
-	if output != expected {
-		t.Fatalf("interpreter produced %q, expected %q", output, expected)
-	}
-
-	root := t.TempDir()
-	sourcePath := filepath.Join(root, "main.slk")
-	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
-		t.Fatalf("write Slick source: %v", err)
-	}
-	binary := filepath.Join(root, "app")
-	diagnostics, err = compiler.BuildPath(sourcePath, binary)
-	if err != nil {
-		t.Fatalf("build native binary: %v", err)
-	}
-	assertNoDiagnostics(t, diagnostics)
-	native, err := exec.Command(binary).CombinedOutput()
-	if err != nil {
-		t.Fatalf("run native binary: %v: %s", err, native)
-	}
-	if nativeOutput := strings.TrimSuffix(string(native), "\n"); nativeOutput != expected {
-		t.Fatalf("native binary produced %q, expected %q", nativeOutput, expected)
+	if output := runResultEverywhere(t, source); output != expected {
+		t.Fatalf("optional program produced %q, expected %q", output, expected)
 	}
 }

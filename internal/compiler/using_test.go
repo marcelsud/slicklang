@@ -260,7 +260,7 @@ function main() -> string throws BodyFailure | InnerFailure | OuterFailure {
 }
 `
 	want := "root.BodyFailure: body (suppressed: root.InnerFailure: inner; root.OuterFailure: outer)"
-	if got := runUsingFailureEverywhere(t, source); got != want {
+	if got := runFailureEverywhere(t, source); got != want {
 		t.Fatalf("using failure = %q, want %q", got, want)
 	}
 }
@@ -280,7 +280,7 @@ function main() -> string throws SharedFailure {
 }
 `
 	want := "root.SharedFailure: same (suppressed: root.SharedFailure: same)"
-	if got := runUsingFailureEverywhere(t, source); got != want {
+	if got := runFailureEverywhere(t, source); got != want {
 		t.Fatalf("shared using failure = %q, want %q", got, want)
 	}
 }
@@ -577,13 +577,17 @@ function main() -> Resource {
 	assertNoDiagnostics(t, diagnostics)
 }
 
-func runUsingFailureEverywhere(t *testing.T, source string) string {
+func runFailureEverywhere(t *testing.T, source string) string {
 	t.Helper()
-	_, diagnostics, interpretedError := compiler.Run([]compiler.Source{{Name: "main.slk", Namespace: "root", Text: source}})
-	assertNoDiagnostics(t, diagnostics)
-	if interpretedError == nil {
-		t.Fatal("interpreter succeeded, want using failure")
-	}
+	var interpretedError error
+	t.Run("interpreter", func(t *testing.T) {
+		_, diagnostics, err := compiler.Run([]compiler.Source{{Name: "main.slk", Namespace: "root", Text: source}})
+		assertNoDiagnostics(t, diagnostics)
+		if err == nil {
+			t.Fatal("interpreter succeeded, want runtime failure")
+		}
+		interpretedError = err
+	})
 
 	root := t.TempDir()
 	path := filepath.Join(root, "main.slk")
@@ -600,7 +604,7 @@ func runUsingFailureEverywhere(t *testing.T, source string) string {
 			assertNoDiagnostics(t, diagnostics)
 			output, nativeError := exec.Command(binary).CombinedOutput()
 			if nativeError == nil {
-				t.Fatalf("%s binary succeeded, want using failure", backend)
+				t.Fatalf("%s binary succeeded, want runtime failure", backend)
 			}
 			native := strings.TrimSpace(string(output))
 			if interpretedError.Error() != native {

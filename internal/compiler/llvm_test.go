@@ -258,3 +258,28 @@ function main() -> string {
 		t.Fatalf("failed LLVM build changed output: contents=%q err=%v", unchanged, readErr)
 	}
 }
+
+func TestLLVMIncompatibleToolchainLeavesNoPartialOutput(t *testing.T) {
+	tools := t.TempDir()
+	for _, name := range []string{"llvm-as-18", "llc-18"} {
+		path := filepath.Join(tools, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\necho 'LLVM version 17.0.0'\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("SLICK_LLVM_BIN", tools)
+
+	root := t.TempDir()
+	source := filepath.Join(root, "main.slk")
+	if err := os.WriteFile(source, []byte(`function main() -> string { "ok" }`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(root, "app")
+	_, err := compiler.BuildPathBackend(source, output, compiler.BackendLLVM)
+	if err == nil || !strings.Contains(err.Error(), "major version 18 is required") {
+		t.Fatalf("incompatible LLVM build error = %v", err)
+	}
+	if _, statErr := os.Stat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("incompatible LLVM build created output: %v", statErr)
+	}
+}
