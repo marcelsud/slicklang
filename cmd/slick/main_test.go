@@ -45,6 +45,14 @@ func TestParseBuildOptionsAcceptsTarget(t *testing.T) {
 	}
 }
 
+func TestRustBuildStatusReportsPinnedToolchainAndTarget(t *testing.T) {
+	message := buildSuccessMessage("bin/app", compiler.BuildOptions{Backend: compiler.BackendRust})
+	want := "built bin/app (backend rust, target x86_64-unknown-linux-gnu, rust 1.93.1)"
+	if message != want {
+		t.Fatalf("message = %q, want %q", message, want)
+	}
+}
+
 func TestBuildAndCheckParseExplicitAlphaOptIn(t *testing.T) {
 	_, _, build, err := parseBuildOptions([]string{"examples/hello", "-o", "bin/hello", "--allow-alpha"})
 	if err != nil || !build.AllowAlpha {

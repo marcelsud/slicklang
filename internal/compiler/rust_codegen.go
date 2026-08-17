@@ -1,0 +1,759 @@
+package compiler
+
+import (
+	"encoding/hex"
+	"fmt"
+	"math"
+	"sort"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+)
+
+func validateRustCore(core coreProgram, runtime backendRuntimeInputs) error {
+	for _, class := range core.Classes {
+		if !strings.HasPrefix(class.ID, "std.") {
+			return rustLoweringError(class.Location, "classes are not supported (%s)", class.ID)
+		}
+	}
+	for _, iface := range core.Interfaces {
+		if !strings.HasPrefix(iface.ID, "std.") {
+			return rustLoweringError(iface.Location, "interfaces are not supported (%s)", iface.ID)
+		}
+	}
+	for _, union := range core.Unions {
+		if !strings.HasPrefix(union.ID, "std.") {
+			return rustLoweringError(union.Location, "unions are not supported (%s)", union.ID)
+		}
+	}
+	constants := make(map[string]coreConstant, len(core.Constants))
+	for _, constant := range core.Constants {
+		if _, err := rustType(constant.Type); err != nil {
+			return rustLoweringError(constant.Location, "constant %s: %v", constant.ID, err)
+		}
+		if _, err := rustLiteral(constant.Value); err != nil {
+			return rustLoweringError(constant.Location, "constant %s: %v", constant.ID, err)
+		}
+		constants[constant.ID] = constant
+	}
+	functions := make(map[string]coreFunction, len(core.Functions))
+	for _, function := range core.Functions {
+		functions[function.ID] = function
+	}
+	main, ok := functions["root.main"]
+	if !ok {
+		return fmt.Errorf("Rust lowering: program has no root.main")
+	}
+	if len(main.Parameters) != 0 {
+		return rustLoweringError(main.Location, "root.main parameters are not supported")
+	}
+	validator := rustCoreValidator{functions: functions, constants: constants}
+	for _, function := range core.Functions {
+		if function.Receiver != "" {
+			return rustLoweringError(function.Location, "methods are not supported (%s)", function.ID)
+		}
+		if len(function.Throws) > 0 {
+			return rustLoweringError(function.Location, "checked failures are not supported (%s)", function.ID)
+		}
+		if _, err := rustType(function.Result); err != nil {
+			return rustLoweringError(function.Location, "function %s result: %v", function.ID, err)
+		}
+		for _, parameter := range function.Parameters {
+			if _, err := rustType(parameter.Type); err != nil {
+				return rustLoweringError(function.Location, "function %s parameter %s: %v", function.ID, parameter.Name, err)
+			}
+		}
+		if err := validator.block(function.Body, 0); err != nil {
+			return err
+		}
+	}
+	if len(runtime.operations) > 0 {
+		return fmt.Errorf("Rust lowering contract missed runtime operation %s", runtime.operations[0])
+	}
+	if len(runtime.families) > 0 {
+		families := make([]string, 0, len(runtime.families))
+		for family := range runtime.families {
+			families = append(families, string(family))
+		}
+		sort.Strings(families)
+		return fmt.Errorf("Rust lowering contract missed runtime families %s", strings.Join(families, ", "))
+	}
+	return nil
+}
+
+type rustCoreValidator struct {
+	functions map[string]coreFunction
+	constants map[string]coreConstant
+}
+
+func (v rustCoreValidator) block(block coreBlock, loopDepth int) error {
+	if block.StructuredTasks {
+		return rustLoweringError(block.Location, "structured tasks are not supported")
+	}
+	if block.ResultConversion != "" {
+		return rustLoweringError(block.Location, "storage conversion %s is not supported", block.ResultConversion)
+	}
+	for _, statement := range block.Statements {
+		switch statement.Kind {
+		case "bind":
+			if statement.Value == nil || len(statement.Bindings) == 0 {
+				return rustLoweringError(statement.Location, "invalid binding")
+			}
+			for _, binding := range statement.Bindings {
+				if _, err := rustType(binding.Type); err != nil {
+					return rustLoweringError(statement.Location, "binding %s: %v", binding.Name, err)
+				}
+			}
+			if err := v.expression(*statement.Value); err != nil {
+				return err
+			}
+		case "assign":
+			if statement.Value == nil || statement.Target == "" {
+				return rustLoweringError(statement.Location, "invalid assignment")
+			}
+			if err := v.expression(*statement.Value); err != nil {
+				return err
+			}
+		case "loop":
+			if statement.Value == nil || statement.Value.Kind != "range" || len(statement.Bindings) != 1 || statement.Body == nil {
+				return rustLoweringError(statement.Location, "only one-binding integer range loops are supported")
+			}
+			if statement.Bindings[0].Type != "int" {
+				return rustLoweringError(statement.Location, "range loop binding must be int")
+			}
+			if err := v.expression(*statement.Value); err != nil {
+				return err
+			}
+			if err := v.block(*statement.Body, loopDepth+1); err != nil {
+				return err
+			}
+		case "break", "continue":
+		case "return", "expression":
+			if statement.Value == nil {
+				return rustLoweringError(statement.Location, "%s has no value", statement.Kind)
+			}
+			if err := v.expression(*statement.Value); err != nil {
+				return err
+			}
+		default:
+			return rustLoweringError(statement.Location, "statement %s is not supported", statement.Kind)
+		}
+	}
+	return nil
+}
+
+func (v rustCoreValidator) expression(expression coreExpression) error {
+	if _, err := rustType(expression.Type); err != nil &&
+		expression.Kind != "range" && !(expression.Kind == "branch" && expression.Type == typeNever) {
+		return rustLoweringError(expression.Location, "%s expression: %v", expression.Kind, err)
+	}
+	if expression.Conversion != "" || expression.ReadConversion != "" {
+		return rustLoweringError(expression.Location, "storage conversion is not supported")
+	}
+	if expression.Cleanup != nil {
+		return rustLoweringError(expression.Location, "checked cleanup is not supported")
+	}
+	check := func(value *coreExpression) error {
+		if value == nil {
+			return rustLoweringError(expression.Location, "%s expression has a missing operand", expression.Kind)
+		}
+		return v.expression(*value)
+	}
+	switch expression.Kind {
+	case "literal":
+		if expression.Literal == nil {
+			return rustLoweringError(expression.Location, "literal has no value")
+		}
+		if _, err := rustLiteral(*expression.Literal); err != nil {
+			return rustLoweringError(expression.Location, "%v", err)
+		}
+		return nil
+	case "tuple":
+		if len(expression.Elements) < 2 {
+			return rustLoweringError(expression.Location, "tuple needs at least two elements")
+		}
+		for _, element := range expression.Elements {
+			if err := v.expression(element); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "name":
+		if expression.Declaration != "" {
+			if _, ok := v.constants[expression.Declaration]; !ok {
+				return rustLoweringError(expression.Location, "value reference %s is not supported", expression.Declaration)
+			}
+		}
+		return nil
+	case "call":
+		if expression.Operation != "" {
+			return rustLoweringError(expression.Location, "standard-library operation %s is not supported", expression.Operation)
+		}
+		if expression.Receiver != nil || expression.Value != nil || expression.Declaration == "" {
+			return rustLoweringError(expression.Location, "only static user-function calls are supported")
+		}
+		if _, ok := v.functions[expression.Declaration]; !ok {
+			return rustLoweringError(expression.Location, "unknown static function %s", expression.Declaration)
+		}
+		if len(expression.Throws) > 0 {
+			return rustLoweringError(expression.Location, "checked call outcomes are not supported")
+		}
+		for _, argument := range expression.Arguments {
+			if err := v.expression(argument); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "unary":
+		if expression.Operator != "-" && expression.Operator != "!" {
+			return rustLoweringError(expression.Location, "unary operator %s is not supported", expression.Operator)
+		}
+		return check(expression.Value)
+	case "binary":
+		if expression.Operator == "+" && expression.Type == "string" {
+			return rustLoweringError(expression.Location, "allocating string concatenation is not supported")
+		}
+		switch expression.Operator {
+		case "+", "-", "*", "<", "<=", ">", ">=", "==", "!=", "&&", "||":
+		default:
+			return rustLoweringError(expression.Location, "binary operator %s is not supported", expression.Operator)
+		}
+		if err := check(expression.Left); err != nil {
+			return err
+		}
+		return check(expression.Right)
+	case "branch":
+		if err := check(expression.Value); err != nil {
+			return err
+		}
+		if expression.Body == nil || expression.Alternate == nil {
+			return rustLoweringError(expression.Location, "branch has a missing arm")
+		}
+		if err := v.block(*expression.Body, 0); err != nil {
+			return err
+		}
+		return v.block(*expression.Alternate, 0)
+	case "range":
+		if expression.Left == nil || expression.Right == nil {
+			return rustLoweringError(expression.Location, "range has a missing bound")
+		}
+		if err := check(expression.Left); err != nil {
+			return err
+		}
+		return check(expression.Right)
+	default:
+		return rustLoweringError(expression.Location, "expression %s is not supported", expression.Kind)
+	}
+}
+
+func rustLoweringError(location coreLocation, format string, arguments ...any) error {
+	message := fmt.Sprintf(format, arguments...)
+	if location.File == "" {
+		return fmt.Errorf("Rust lowering: %s", message)
+	}
+	return fmt.Errorf("Rust lowering %s:%d:%d: %s", location.File, location.Line, location.Column, message)
+}
+
+func generateRust(core coreProgram) (string, error) {
+	runtime, err := runtimeInputsForCore(core)
+	if err != nil {
+		return "", err
+	}
+	if err := validateRustCore(core, runtime); err != nil {
+		return "", err
+	}
+	generator := rustGenerator{
+		core:      core,
+		functions: make(map[string]coreFunction, len(core.Functions)),
+		constants: make(map[string]coreConstant, len(core.Constants)),
+	}
+	for _, function := range core.Functions {
+		generator.functions[function.ID] = function
+	}
+	for _, constant := range core.Constants {
+		generator.constants[constant.ID] = constant
+	}
+	return generator.generate()
+}
+
+type rustGenerator struct {
+	core      coreProgram
+	functions map[string]coreFunction
+	constants map[string]coreConstant
+	temporary int
+}
+
+func (g *rustGenerator) generate() (string, error) {
+	var output strings.Builder
+	output.WriteString("// Generated by Slick. Compiler-owned Rust runtime ABI 1.\n")
+	output.WriteString(`struct SlickFloatText {
+    bytes: [u8; 32],
+    length: usize,
+}
+
+impl std::fmt::Write for SlickFloatText {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        let end = self.length + value.len();
+        if end > self.bytes.len() { return Err(std::fmt::Error); }
+        self.bytes[self.length..end].copy_from_slice(value.as_bytes());
+        self.length = end;
+        Ok(())
+    }
+}
+
+fn slick_print_float(value: f64) {
+    if value.is_nan() {
+        print!("NaN");
+        return;
+    }
+    if value == f64::INFINITY {
+        print!("+Inf");
+        return;
+    }
+    if value == f64::NEG_INFINITY {
+        print!("-Inf");
+        return;
+    }
+    let magnitude = value.abs();
+    if value == 0.0 || (magnitude >= 1e-4 && magnitude < 1e6) {
+        print!("{}", value);
+        return;
+    }
+    let mut buffer = SlickFloatText { bytes: [0; 32], length: 0 };
+    std::fmt::write(&mut buffer, format_args!("{:e}", value)).expect("f64 text fits fixed buffer");
+    let text = std::str::from_utf8(&buffer.bytes[..buffer.length]).expect("Rust formats f64 as ASCII");
+    let (mantissa, exponent) = text.split_once('e').expect("lower-exp format contains exponent");
+    let exponent: i32 = exponent.parse().expect("lower-exp format contains numeric exponent");
+    if exponent < 0 {
+        print!("{}e-{:02}", mantissa, -exponent);
+    } else {
+        print!("{}e+{:02}", mantissa, exponent);
+    }
+}
+
+`)
+	for _, constant := range g.core.Constants {
+		typ, _ := rustType(constant.Type)
+		literal, _ := rustLiteral(constant.Value)
+		fmt.Fprintf(&output, "const %s: %s = %s;\n", rustConstantName(constant.ID), typ, literal)
+	}
+	if len(g.core.Constants) > 0 {
+		output.WriteString("\n")
+	}
+	for _, function := range g.core.Functions {
+		generated, err := g.function(function)
+		if err != nil {
+			return "", err
+		}
+		output.WriteString(generated)
+		output.WriteString("\n")
+	}
+	main := g.functions["root.main"]
+	output.WriteString("fn main() {\n")
+	if main.Result == "null" {
+		fmt.Fprintf(&output, "    %s();\n", rustFunctionName(main.ID))
+	} else {
+		fmt.Fprintf(&output, "    let slick_main_value = %s();\n", rustFunctionName(main.ID))
+		if main.Result == "string" {
+			output.WriteString("    if slick_main_value.is_empty() { return; }\n")
+		}
+		if err := rustPrintValue(&output, "slick_main_value", main.Result, 1); err != nil {
+			return "", err
+		}
+		output.WriteString("    println!();\n")
+	}
+	output.WriteString("}\n")
+	return output.String(), nil
+}
+
+func (g *rustGenerator) function(function coreFunction) (string, error) {
+	var output strings.Builder
+	fmt.Fprintf(&output, "fn %s(", rustFunctionName(function.ID))
+	for index, parameter := range function.Parameters {
+		if index > 0 {
+			output.WriteString(", ")
+		}
+		typ, _ := rustType(parameter.Type)
+		fmt.Fprintf(&output, "mut %s: %s", rustLocalName(parameter.Name), typ)
+	}
+	result, _ := rustType(function.Result)
+	fmt.Fprintf(&output, ") -> %s ", result)
+	body, err := g.block(function.Body, 0)
+	if err != nil {
+		return "", err
+	}
+	output.WriteString(body)
+	output.WriteString("\n")
+	return output.String(), nil
+}
+
+func (g *rustGenerator) block(block coreBlock, level int) (string, error) {
+	var output strings.Builder
+	output.WriteString("{\n")
+	for index, statement := range block.Statements {
+		last := index == len(block.Statements)-1
+		generated, err := g.statement(statement, level+1, last)
+		if err != nil {
+			return "", err
+		}
+		output.WriteString(generated)
+	}
+	if len(block.Statements) == 0 || block.Statements[len(block.Statements)-1].Kind != "expression" {
+		if block.Result == typeNever {
+			fmt.Fprintf(&output, "%sunreachable!()\n", rustIndent(level+1))
+		} else {
+			fmt.Fprintf(&output, "%s()\n", rustIndent(level+1))
+		}
+	}
+	fmt.Fprintf(&output, "%s}", rustIndent(level))
+	return output.String(), nil
+}
+
+func (g *rustGenerator) statement(statement coreStatement, level int, last bool) (string, error) {
+	indent := rustIndent(level)
+	var output strings.Builder
+	switch statement.Kind {
+	case "bind":
+		value, err := g.expression(*statement.Value, level)
+		if err != nil {
+			return "", err
+		}
+		if len(statement.Bindings) == 1 {
+			name := rustLocalName(statement.Bindings[0].Name)
+			if statement.Bindings[0].Name == "_" {
+				fmt.Fprintf(&output, "%slet _ = %s;\n", indent, value)
+			} else {
+				fmt.Fprintf(&output, "%slet mut %s = %s;\n", indent, name, value)
+			}
+		} else {
+			bindings := make([]string, len(statement.Bindings))
+			for index, binding := range statement.Bindings {
+				if binding.Name == "_" {
+					bindings[index] = "_"
+				} else {
+					bindings[index] = "mut " + rustLocalName(binding.Name)
+				}
+			}
+			fmt.Fprintf(&output, "%slet (%s) = %s;\n", indent, strings.Join(bindings, ", "), value)
+		}
+	case "assign":
+		value, err := g.expression(*statement.Value, level)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&output, "%s%s = %s;\n", indent, rustLocalName(statement.Target), value)
+	case "loop":
+		start, err := g.expression(*statement.Value.Left, level)
+		if err != nil {
+			return "", err
+		}
+		end, err := g.expression(*statement.Value.Right, level)
+		if err != nil {
+			return "", err
+		}
+		startName, endName := g.nextTemporary(), g.nextTemporary()
+		fmt.Fprintf(&output, "%slet %s = %s;\n", indent, startName, start)
+		fmt.Fprintf(&output, "%slet %s = %s;\n", indent, endName, end)
+		binding := statement.Bindings[0].Name
+		if binding == "_" {
+			binding = g.nextTemporary()
+		} else {
+			binding = rustLocalName(binding)
+		}
+		body, err := g.block(*statement.Body, level)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&output, "%sfor mut %s in %s..%s %s\n", indent, binding, startName, endName, body)
+	case "break", "continue":
+		fmt.Fprintf(&output, "%s%s;\n", indent, statement.Kind)
+	case "return":
+		value, err := g.expression(*statement.Value, level)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&output, "%sreturn %s;\n", indent, value)
+	case "expression":
+		value, err := g.expression(*statement.Value, level)
+		if err != nil {
+			return "", err
+		}
+		if last {
+			fmt.Fprintf(&output, "%s%s\n", indent, value)
+		} else {
+			fmt.Fprintf(&output, "%slet _ = %s;\n", indent, value)
+		}
+	default:
+		return "", rustLoweringError(statement.Location, "statement %s is not supported", statement.Kind)
+	}
+	return output.String(), nil
+}
+
+func (g *rustGenerator) expression(expression coreExpression, level int) (string, error) {
+	switch expression.Kind {
+	case "literal":
+		return rustLiteral(*expression.Literal)
+	case "name":
+		if expression.Declaration != "" {
+			return rustConstantName(expression.Declaration), nil
+		}
+		return rustLocalName(expression.Name), nil
+	case "tuple":
+		values := make([]string, 0, len(expression.Elements))
+		lines := make([]string, 0, len(expression.Elements)+1)
+		for _, element := range expression.Elements {
+			value, err := g.expression(element, level+1)
+			if err != nil {
+				return "", err
+			}
+			name := g.nextTemporary()
+			lines = append(lines, fmt.Sprintf("let %s = %s;", name, value))
+			values = append(values, name)
+		}
+		lines = append(lines, "("+strings.Join(values, ", ")+")")
+		return rustInlineBlock(lines, level), nil
+	case "call":
+		arguments := make([]string, 0, len(expression.Arguments))
+		lines := make([]string, 0, len(expression.Arguments)+1)
+		for _, argument := range expression.Arguments {
+			value, err := g.expression(argument, level+1)
+			if err != nil {
+				return "", err
+			}
+			name := g.nextTemporary()
+			lines = append(lines, fmt.Sprintf("let %s = %s;", name, value))
+			arguments = append(arguments, name)
+		}
+		lines = append(lines, fmt.Sprintf("%s(%s)", rustFunctionName(expression.Declaration), strings.Join(arguments, ", ")))
+		return rustInlineBlock(lines, level), nil
+	case "unary":
+		value, err := g.expression(*expression.Value, level+1)
+		if err != nil {
+			return "", err
+		}
+		name := g.nextTemporary()
+		result := "!" + name
+		if expression.Operator == "-" {
+			if expression.Type == "int" {
+				result = name + ".wrapping_neg()"
+			} else {
+				result = "-" + name
+			}
+		}
+		return rustInlineBlock([]string{"let " + name + " = " + value + ";", result}, level), nil
+	case "binary":
+		left, err := g.expression(*expression.Left, level+1)
+		if err != nil {
+			return "", err
+		}
+		leftName := g.nextTemporary()
+		if expression.Operator == "&&" || expression.Operator == "||" {
+			right, err := g.expression(*expression.Right, level+2)
+			if err != nil {
+				return "", err
+			}
+			condition := "!" + leftName
+			shortValue := "false"
+			if expression.Operator == "||" {
+				condition, shortValue = leftName, "true"
+			}
+			lines := []string{
+				"let " + leftName + " = " + left + ";",
+				fmt.Sprintf("if %s { %s } else { %s }", condition, shortValue, right),
+			}
+			return rustInlineBlock(lines, level), nil
+		}
+		right, err := g.expression(*expression.Right, level+1)
+		if err != nil {
+			return "", err
+		}
+		rightName := g.nextTemporary()
+		operation := leftName + " " + expression.Operator + " " + rightName
+		if expression.Operator == "==" || expression.Operator == "!=" {
+			operation = rustEquality(leftName, rightName, expression.Left.Type)
+			if expression.Operator == "!=" {
+				operation = "!" + operation
+			}
+		}
+		if expression.Type == "int" {
+			switch expression.Operator {
+			case "+":
+				operation = leftName + ".wrapping_add(" + rightName + ")"
+			case "-":
+				operation = leftName + ".wrapping_sub(" + rightName + ")"
+			case "*":
+				operation = leftName + ".wrapping_mul(" + rightName + ")"
+			}
+		}
+		return rustInlineBlock([]string{
+			"let " + leftName + " = " + left + ";",
+			"let " + rightName + " = " + right + ";",
+			operation,
+		}, level), nil
+	case "branch":
+		condition, err := g.expression(*expression.Value, level+1)
+		if err != nil {
+			return "", err
+		}
+		conditionName := g.nextTemporary()
+		body, err := g.block(*expression.Body, level+1)
+		if err != nil {
+			return "", err
+		}
+		alternate, err := g.block(*expression.Alternate, level+1)
+		if err != nil {
+			return "", err
+		}
+		return rustInlineBlock([]string{
+			"let " + conditionName + " = " + condition + ";",
+			fmt.Sprintf("if %s %s else %s", conditionName, body, alternate),
+		}, level), nil
+	default:
+		return "", rustLoweringError(expression.Location, "expression %s is not supported", expression.Kind)
+	}
+}
+
+func rustEquality(left, right, typ string) string {
+	parsed := parseTypeName(typ)
+	if parsed.kind != typeKindTuple {
+		return "(" + left + " == " + right + ")"
+	}
+	parts := make([]string, len(parsed.args))
+	for index, elementType := range parsed.args {
+		parts[index] = rustEquality(
+			fmt.Sprintf("%s.%d", left, index),
+			fmt.Sprintf("%s.%d", right, index),
+			elementType,
+		)
+	}
+	return "(" + strings.Join(parts, " && ") + ")"
+}
+
+func (g *rustGenerator) nextTemporary() string {
+	name := fmt.Sprintf("slick_tmp_%d", g.temporary)
+	g.temporary++
+	return name
+}
+
+func rustInlineBlock(lines []string, level int) string {
+	var output strings.Builder
+	output.WriteString("{\n")
+	for _, line := range lines {
+		fmt.Fprintf(&output, "%s%s\n", rustIndent(level+1), line)
+	}
+	fmt.Fprintf(&output, "%s}", rustIndent(level))
+	return output.String()
+}
+
+func rustType(name string) (string, error) {
+	switch name {
+	case "null":
+		return "()", nil
+	case "bool":
+		return "bool", nil
+	case "int":
+		return "i64", nil
+	case "float":
+		return "f64", nil
+	case "string":
+		return "&'static str", nil
+	}
+	parsed := parseTypeName(name)
+	if parsed.kind != typeKindTuple || len(parsed.args) < 2 {
+		return "", fmt.Errorf("type %s is not supported", name)
+	}
+	parts := make([]string, len(parsed.args))
+	for index, argument := range parsed.args {
+		typ, err := rustType(argument)
+		if err != nil {
+			return "", err
+		}
+		parts[index] = typ
+	}
+	return "(" + strings.Join(parts, ", ") + ")", nil
+}
+
+func rustLiteral(literal coreLiteral) (string, error) {
+	switch literal.Kind {
+	case "null":
+		return "()", nil
+	case "bool":
+		return strconv.FormatBool(literal.Boolean), nil
+	case "int":
+		return strconv.FormatInt(literal.Integer, 10) + "i64", nil
+	case "float":
+		return fmt.Sprintf("f64::from_bits(0x%016x)", math.Float64bits(literal.Float)), nil
+	case "string":
+		return rustStringLiteral(literal.Text), nil
+	default:
+		return "", fmt.Errorf("literal kind %s is not supported", literal.Kind)
+	}
+}
+
+func rustStringLiteral(value string) string {
+	var output strings.Builder
+	output.WriteByte('"')
+	for len(value) > 0 {
+		r, size := utf8.DecodeRuneInString(value)
+		value = value[size:]
+		switch r {
+		case '\\':
+			output.WriteString("\\\\")
+		case '"':
+			output.WriteString("\\\"")
+		case '\n':
+			output.WriteString("\\n")
+		case '\r':
+			output.WriteString("\\r")
+		case '\t':
+			output.WriteString("\\t")
+		case '\x00':
+			output.WriteString("\\0")
+		default:
+			if r < 0x20 || r == 0x7f || (r >= '\u202a' && r <= '\u202e') ||
+				(r >= '\u2066' && r <= '\u2069') {
+				fmt.Fprintf(&output, "\\u{%x}", r)
+			} else {
+				output.WriteRune(r)
+			}
+		}
+	}
+	output.WriteByte('"')
+	return output.String()
+}
+
+func rustFunctionName(name string) string { return "slick_fn_" + hex.EncodeToString([]byte(name)) }
+func rustConstantName(name string) string {
+	return "SLICK_CONST_" + strings.ToUpper(hex.EncodeToString([]byte(name)))
+}
+func rustLocalName(name string) string { return "slick_local_" + hex.EncodeToString([]byte(name)) }
+func rustIndent(level int) string      { return strings.Repeat("    ", level) }
+
+func rustPrintValue(output *strings.Builder, expression, typ string, level int) error {
+	indent := rustIndent(level)
+	switch typ {
+	case "null":
+		return nil
+	case "float":
+		fmt.Fprintf(output, "%sslick_print_float(%s);\n", indent, expression)
+		return nil
+	case "string", "int", "bool":
+		fmt.Fprintf(output, "%sprint!(\"{}\", %s);\n", indent, expression)
+		return nil
+	}
+	parsed := parseTypeName(typ)
+	if parsed.kind != typeKindTuple {
+		return fmt.Errorf("Rust main result type %s is not printable", typ)
+	}
+	fmt.Fprintf(output, "%sprint!(\"(\");\n", indent)
+	for index, elementType := range parsed.args {
+		if index > 0 {
+			fmt.Fprintf(output, "%sprint!(\", \");\n", indent)
+		}
+		if err := rustPrintValue(output, fmt.Sprintf("%s.%d", expression, index), elementType, level); err != nil {
+			return err
+		}
+	}
+	fmt.Fprintf(output, "%sprint!(\")\");\n", indent)
+	return nil
+}

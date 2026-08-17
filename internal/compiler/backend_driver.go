@@ -88,11 +88,13 @@ type backendDriverID string
 const (
 	backendDriverGo   backendDriverID = "go"
 	backendDriverLLVM backendDriverID = "llvm"
+	backendDriverRust backendDriverID = "rust"
 )
 
 var backendDriverRegistry = map[backendDriverID]func(*program) backendDriver{
 	backendDriverGo:   goBackendDriver,
 	backendDriverLLVM: llvmBackendDriver,
+	backendDriverRust: rustBackendDriver,
 }
 
 func registeredBackendDriver(id backendDriverID, program *program) (backendDriver, bool) {

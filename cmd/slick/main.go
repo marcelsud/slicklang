@@ -43,7 +43,7 @@ func run(args []string) int {
 		if reportDiagnostics(diagnostics) {
 			return 1
 		}
-		fmt.Printf("built %s\n", output)
+		fmt.Fprintln(os.Stdout, buildSuccessMessage(output, options))
 		return 0
 	}
 	if args[0] == "check" {
@@ -166,6 +166,24 @@ func parseBuildOptions(args []string) (string, string, compiler.BuildOptions, er
 		return "", "", compiler.BuildOptions{}, errors.New("build requires -o <output>")
 	}
 	return path, output, options, nil
+}
+
+func buildSuccessMessage(output string, options compiler.BuildOptions) string {
+	if options.Backend != compiler.BackendRust {
+		return fmt.Sprintf("built %s", output)
+	}
+	for _, backend := range compiler.Backends() {
+		if backend.Name != options.Backend {
+			continue
+		}
+		for _, target := range backend.Targets {
+			if options.Target == "" || target.Name == options.Target {
+				return fmt.Sprintf("built %s (backend %s, target %s, %s %s)",
+					output, backend.Name, target.Name, target.Toolchain, target.ToolchainVersion)
+			}
+		}
+	}
+	return fmt.Sprintf("built %s", output)
 }
 
 func parseCheckArgs(args []string) (string, compiler.CheckOptions, error) {

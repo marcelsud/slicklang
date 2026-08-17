@@ -229,6 +229,7 @@ var (
 	interpreterRuntimeOperations = runtimeOperationsFor(runtimeImplementationInterpreter)
 	goRuntimeOperations          = runtimeOperationsFor(runtimeImplementationGo)
 	llvmRuntimeOperations        = runtimeOperationsFor(runtimeImplementationLLVM)
+	rustRuntimeOperations        = runtimeOperationTable{}
 )
 
 func runtimeInputsForCore(core coreProgram) (backendRuntimeInputs, error) {
