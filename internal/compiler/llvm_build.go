@@ -59,7 +59,7 @@ func buildLLVMEmission(tool llvmToolchain, runtime backendRuntimeInputs, emissio
 	for _, name := range []string{"runtime.c", "natives.c"} {
 		src := filepath.Join(workspace, name)
 		obj := filepath.Join(workspace, name+".o")
-		compile := []string{"-c", "-std=c11", "-O2", "-fPIC", "-o", obj, src}
+		compile := []string{"-c", "-std=c11", "-O2", "-fPIC", "-ffunction-sections", "-fdata-sections", "-o", obj, src}
 		if runtime.usesSQLite {
 			compile = append(compile, "-DSLICK_HAS_SQLITE")
 		}
@@ -72,7 +72,7 @@ func buildLLVMEmission(tool llvmToolchain, runtime backendRuntimeInputs, emissio
 		}
 		objects = append(objects, obj)
 	}
-	libs := []string{"-lpthread", "-lm"}
+	libs := []string{"-Wl,--gc-sections", "-lpthread", "-lm"}
 	if runtime.usesSQLite {
 		libs = append(libs, "-lsqlite3")
 	}

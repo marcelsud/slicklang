@@ -133,7 +133,7 @@ func TestStdEnvGeneratedSourceIsDeterministicAndRuntimeBacked(t *testing.T) {
 
 func TestEveryStandardLibraryNativeHasLLVMLowering(t *testing.T) {
 	symbols := nativeSymbols()
-	check := func(native nativeFunction) {
+	check := func(native runtimeOperationID) {
 		t.Helper()
 		if native == "" || isNativeStdBuffer(native) ||
 			native == nativeStdJsonDecode || native == nativeStdJsonEncode {
@@ -162,7 +162,7 @@ func TestEveryStandardLibraryNativeHasLLVMLowering(t *testing.T) {
 	}
 
 	if err := (&llvmGen{}).emitNativeWrapper(
-		&functionDecl{native: nativeFunction("std.missing.Native")},
+		&functionDecl{native: runtimeOperationID("std.missing.Native")},
 		"",
 		"",
 	); err == nil || !strings.Contains(err.Error(), "unknown native Slick function") {
@@ -170,7 +170,7 @@ func TestEveryStandardLibraryNativeHasLLVMLowering(t *testing.T) {
 	}
 }
 
-func assertStandardFunction(t *testing.T, function *functionDecl, namespace, name string, parameters []string, result string, native nativeFunction) {
+func assertStandardFunction(t *testing.T, function *functionDecl, namespace, name string, parameters []string, result string, native runtimeOperationID) {
 	t.Helper()
 	if function == nil {
 		t.Fatalf("std function %s.%s was not registered", namespace, name)

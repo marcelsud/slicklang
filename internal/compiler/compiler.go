@@ -154,7 +154,7 @@ type functionDecl struct {
 	receiverCanonical string
 	inline            bool
 	instanceOf        string
-	native            nativeFunction
+	native            runtimeOperationID
 	annotations       []*annotationUse
 	documentation     *string
 	pos               position

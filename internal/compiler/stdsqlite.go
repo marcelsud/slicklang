@@ -17,16 +17,16 @@ import (
 )
 
 const (
-	nativeStdSQLiteOpen                nativeFunction = "std.sqlite.Open"
-	nativeStdSQLiteDatabaseExecute     nativeFunction = "std.sqlite.Database.Execute"
-	nativeStdSQLiteDatabaseQuery       nativeFunction = "std.sqlite.Database.Query"
-	nativeStdSQLiteDatabaseBegin       nativeFunction = "std.sqlite.Database.Begin"
-	nativeStdSQLiteDatabaseClose       nativeFunction = "std.sqlite.Database.Close"
-	nativeStdSQLiteTransactionExecute  nativeFunction = "std.sqlite.Transaction.Execute"
-	nativeStdSQLiteTransactionQuery    nativeFunction = "std.sqlite.Transaction.Query"
-	nativeStdSQLiteTransactionCommit   nativeFunction = "std.sqlite.Transaction.Commit"
-	nativeStdSQLiteTransactionRollback nativeFunction = "std.sqlite.Transaction.Rollback"
-	nativeStdSQLiteTransactionClose    nativeFunction = "std.sqlite.Transaction.Close"
+	nativeStdSQLiteOpen                runtimeOperationID = "std.sqlite.Open"
+	nativeStdSQLiteDatabaseExecute     runtimeOperationID = "std.sqlite.Database.Execute"
+	nativeStdSQLiteDatabaseQuery       runtimeOperationID = "std.sqlite.Database.Query"
+	nativeStdSQLiteDatabaseBegin       runtimeOperationID = "std.sqlite.Database.Begin"
+	nativeStdSQLiteDatabaseClose       runtimeOperationID = "std.sqlite.Database.Close"
+	nativeStdSQLiteTransactionExecute  runtimeOperationID = "std.sqlite.Transaction.Execute"
+	nativeStdSQLiteTransactionQuery    runtimeOperationID = "std.sqlite.Transaction.Query"
+	nativeStdSQLiteTransactionCommit   runtimeOperationID = "std.sqlite.Transaction.Commit"
+	nativeStdSQLiteTransactionRollback runtimeOperationID = "std.sqlite.Transaction.Rollback"
+	nativeStdSQLiteTransactionClose    runtimeOperationID = "std.sqlite.Transaction.Close"
 
 	stdSQLiteValueName       = "std.sqlite.Value"
 	stdSQLiteStatementName   = "std.sqlite.Statement"

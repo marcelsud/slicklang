@@ -24,7 +24,7 @@ function Suffix(Path: string) -> string? { std.path.Extension(Path) }
 		name      string
 		params    []string
 		result    string
-		native    nativeFunction
+		native    runtimeOperationID
 	}{
 		{canonical: "std.path.Join", name: "Join", params: []string{"string[]"}, result: "string", native: nativeStdPathJoin},
 		{canonical: "std.path.Clean", name: "Clean", params: []string{"string"}, result: "string", native: nativeStdPathClean},

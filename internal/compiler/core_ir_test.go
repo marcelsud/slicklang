@@ -395,7 +395,7 @@ func TestCoreIRUsesStableStandardOperationIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	call := coreFunctionNamed(t, core, "root.main").Body.Statements[0].Value
-	if call == nil || call.Declaration != "std.bytes.FromUtf8" || call.Operation != coreOperationID(nativeStdBytesFromUtf8) {
+	if call == nil || call.Declaration != "std.bytes.FromUtf8" || call.Operation != runtimeOperationID(nativeStdBytesFromUtf8) {
 		t.Fatalf("standard operation = %#v", call)
 	}
 }
@@ -412,6 +412,9 @@ func assertCoreIRType(t *testing.T, typ reflect.Type, seen map[reflect.Type]bool
 		return
 	}
 	seen[typ] = true
+	if typ == reflect.TypeOf(runtimeOperationID("")) {
+		return
+	}
 	if typ.PkgPath() == "" {
 		if typ.Kind() == reflect.Interface || typ.Kind() == reflect.Map {
 			t.Fatalf("Core IR contains open host type %s", typ)

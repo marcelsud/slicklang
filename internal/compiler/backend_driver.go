@@ -46,6 +46,9 @@ const (
 )
 
 type backendRuntimeInputs struct {
+	abiVersion int
+	operations []runtimeOperationID
+	families   map[runtimeFamily]bool
 	usesJSON   bool
 	usesSQLite bool
 	usesHTTP   bool

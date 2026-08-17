@@ -14,7 +14,7 @@ func TestRegisteredBackendDriversDeclareBuildContracts(t *testing.T) {
 		t.Fatalf("backend names = %v", names)
 	}
 	for _, registration := range backendRegistry {
-		if registration.driver == "" || registration.implements == nil {
+		if registration.driver == "" || registration.runtimeABI == 0 || registration.operations == nil {
 			t.Fatalf("backend %s lacks driver or operation implementation metadata", registration.name)
 		}
 		if len(registration.runtimeCapabilities) == 0 {

@@ -31,7 +31,8 @@ type backendRegistration struct {
 	stability           Stability
 	targets             []backendTargetRegistration
 	runtimeCapabilities []backendRuntimeCapability
-	implements          func(nativeFunction) bool
+	runtimeABI          int
+	operations          runtimeOperationTable
 	driver              backendDriverID
 }
 
@@ -47,7 +48,8 @@ var backendRegistry = []backendRegistration{
 			toolchain:    backendToolchainRegistration{name: "go", version: "system"},
 		}},
 		runtimeCapabilities: []backendRuntimeCapability{backendCapabilityEmbeddedRuntime, backendCapabilityStructuredTasks},
-		implements:          goNativeOperationImplemented,
+		runtimeABI:          runtimeABIVersion,
+		operations:          goRuntimeOperations,
 		driver:              backendDriverGo,
 	},
 	{
@@ -61,67 +63,10 @@ var backendRegistry = []backendRegistration{
 			toolchain:    backendToolchainRegistration{name: "llvm", version: "18"},
 		}},
 		runtimeCapabilities: []backendRuntimeCapability{backendCapabilityEmbeddedRuntime, backendCapabilityStructuredTasks},
-		implements: func(native nativeFunction) bool {
-			return isNativeStdBuffer(native) ||
-				native == nativeStdJsonDecode ||
-				native == nativeStdJsonEncode ||
-				nativeSymbol(native) != ""
-		},
-		driver: backendDriverLLVM,
+		runtimeABI:          runtimeABIVersion,
+		operations:          llvmRuntimeOperations,
+		driver:              backendDriverLLVM,
 	},
-}
-
-func goNativeOperationImplemented(native nativeFunction) bool {
-	return goNativeFunctionImplemented(native) || goNativeMethodImplemented(native)
-}
-
-func goNativeFunctionImplemented(native nativeFunction) bool {
-	switch native {
-	case nativeStdJsonDecode, nativeStdJsonEncode,
-		nativeStdBufferNew, nativeStdBufferPush, nativeStdBufferGet,
-		nativeStdBufferSet, nativeStdBufferLength, nativeStdBufferFreeze,
-		nativeStdBytesFromUtf8, nativeStdBytesToUtf8, nativeStdBytesLength,
-		nativeStdBytesAt, nativeStdBytesConcat, nativeStdBytesSlice, nativeStdBytesFromValues,
-		nativeStdUTF8DecodeAt,
-		nativeStdUnicodeIsLetter, nativeStdUnicodeIsDigit,
-		nativeStdUnicodeIsWhitespace, nativeStdUnicodeIsUpper,
-		nativeStdConvertParseInt, nativeStdConvertParseFloat,
-		nativeStdConvertIntToString, nativeStdConvertFloatToString,
-		nativeStdMathDivide, nativeStdMathRemainder,
-		nativeStdEnvGet, nativeStdEnvSet, nativeStdEnvUnset,
-		nativeStdFSReadText, nativeStdFSWriteText, nativeStdFSExists,
-		nativeStdFSCreateDirectoryAll, nativeStdFSRemove,
-		nativeStdFSReadDirectory, nativeStdFSCreateTemporaryDirectory,
-		nativeStdPathJoin, nativeStdPathClean, nativeStdPathBase,
-		nativeStdPathDirectory, nativeStdPathExtension, nativeStdPathIsAbsolute,
-		nativeStdTextTrim, nativeStdTextContains, nativeStdTextStartsWith,
-		nativeStdTextEndsWith, nativeStdTextSplit, nativeStdTextJoin,
-		nativeStdTextReplaceAll, nativeStdTextCut, nativeStdTextQuote,
-		nativeStdIOReaderFromBytes, nativeStdIOWriterToBytes,
-		nativeStdIOReadAll, nativeStdIOCopy,
-		nativeStdHTTPFetch, nativeStdHTTPServerServe,
-		nativeStdHTTPHeaderValues, nativeStdHTTPStatusText,
-		nativeStdProcessRun, nativeStdSQLiteOpen:
-		return true
-	default:
-		return false
-	}
-}
-
-func goNativeMethodImplemented(native nativeFunction) bool {
-	switch native {
-	case nativeStdIOReaderRead, nativeStdIOReaderClose,
-		nativeStdIOWriterWrite, nativeStdIOWriterBytes, nativeStdIOWriterClose,
-		nativeStdFSTemporaryDirectoryClose,
-		nativeStdSQLiteDatabaseExecute, nativeStdSQLiteDatabaseQuery,
-		nativeStdSQLiteDatabaseBegin, nativeStdSQLiteDatabaseClose,
-		nativeStdSQLiteTransactionExecute, nativeStdSQLiteTransactionQuery,
-		nativeStdSQLiteTransactionCommit, nativeStdSQLiteTransactionRollback,
-		nativeStdSQLiteTransactionClose:
-		return true
-	default:
-		return false
-	}
 }
 
 // BackendTargetDescription exposes one maintainer-declared backend target.
@@ -162,8 +107,11 @@ func Backends() []BackendDescription {
 }
 
 func backendEligible(backend backendRegistration) bool {
+	if backend.runtimeABI != runtimeABIVersion {
+		return false
+	}
 	for _, record := range standardSymbolRecords(standardLibraryRegistry) {
-		if record.stability == StabilityStable && record.native != "" && !backend.implements(record.native) {
+		if record.stability == StabilityStable && record.native != "" && !backend.operations.implements(record.native) {
 			return false
 		}
 	}
@@ -280,6 +228,13 @@ func BuildSourcesWithOptions(sources []Source, output string, options BuildOptio
 	if err != nil {
 		return nil, fmt.Errorf("lower Core IR: %w", err)
 	}
+	runtimeInputs, err := runtimeInputsForCore(core)
+	if err != nil {
+		return nil, fmt.Errorf("resolve runtime inputs: %w", err)
+	}
+	if err := validateRuntimeContract(declaration, runtimeInputs); err != nil {
+		return nil, err
+	}
 	driver, ok := registeredBackendDriver(declaration.driver, program)
 	if !ok {
 		return nil, fmt.Errorf("backend %s has no build driver", backend)
@@ -288,7 +243,7 @@ func BuildSourcesWithOptions(sources []Source, output string, options BuildOptio
 		input: backendDriverInput{
 			core:         core,
 			target:       target,
-			runtime:      backendRuntimeInputs{usesJSON: program.usesStdJSON(), usesSQLite: program.usesStdSQLite, usesHTTP: program.usesStdHTTP},
+			runtime:      runtimeInputs,
 			artifactKind: target.artifactKind,
 		},
 		output: output,

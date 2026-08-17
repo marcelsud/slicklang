@@ -7,8 +7,6 @@ import (
 	"strings"
 )
 
-type coreOperationID string
-
 type coreLocation struct {
 	File   string `json:"file"`
 	Line   int    `json:"line"`
@@ -18,6 +16,7 @@ type coreLocation struct {
 type coreProgram struct {
 	EvaluationOrder    string          `json:"evaluation_order"`
 	CleanupSuppression string          `json:"cleanup_suppression"`
+	RuntimeFamilies    []string        `json:"runtime_families"`
 	Classes            []coreClass     `json:"classes"`
 	Interfaces         []coreInterface `json:"interfaces"`
 	Unions             []coreUnion     `json:"unions"`
@@ -38,14 +37,14 @@ type coreField struct {
 }
 
 type coreSignature struct {
-	ID             string          `json:"id"`
-	Parameters     []coreBinding   `json:"parameters"`
-	Result         string          `json:"result"`
-	Throws         []string        `json:"throws"`
-	Effects        []string        `json:"effects"`
-	Operation      coreOperationID `json:"operation,omitempty"`
-	Implementation string          `json:"implementation,omitempty"`
-	Location       coreLocation    `json:"location"`
+	ID             string             `json:"id"`
+	Parameters     []coreBinding      `json:"parameters"`
+	Result         string             `json:"result"`
+	Throws         []string           `json:"throws"`
+	Effects        []string           `json:"effects"`
+	Operation      runtimeOperationID `json:"operation,omitempty"`
+	Implementation string             `json:"implementation,omitempty"`
+	Location       coreLocation       `json:"location"`
 }
 
 type coreClass struct {
@@ -160,8 +159,8 @@ type coreTemplatePart struct {
 	ReadConversion  string `json:"read_conversion,omitempty"`
 }
 type coreCleanup struct {
-	Operation   coreOperationID `json:"operation"`
-	Suppression string          `json:"suppression"`
+	Operation   runtimeOperationID `json:"operation"`
+	Suppression string             `json:"suppression"`
 }
 
 type coreExpression struct {
@@ -170,7 +169,7 @@ type coreExpression struct {
 	Name            string             `json:"name,omitempty"`
 	Operator        string             `json:"operator,omitempty"`
 	Declaration     string             `json:"declaration,omitempty"`
-	Operation       coreOperationID    `json:"operation,omitempty"`
+	Operation       runtimeOperationID `json:"operation,omitempty"`
 	ReceiverType    string             `json:"receiver_type,omitempty"`
 	Receiver        *coreExpression    `json:"receiver,omitempty"`
 	StorageType     string             `json:"storage_type,omitempty"`
@@ -206,11 +205,28 @@ type coreLowerer struct {
 	records  map[string]standardSymbolRecord
 }
 
+func (p *program) coreRuntimeFamilies() []string {
+	families := make(map[string]struct{})
+	include := func(used bool, family runtimeFamily) {
+		if used {
+			families[string(family)] = struct{}{}
+		}
+	}
+	include(p.usesStdIO, runtimeFamilyIO)
+	include(p.usesStdHTTP, runtimeFamilyHTTP)
+	include(p.usesStdHTTPServer, runtimeFamilyHTTPServer)
+	include(p.usesStdFSDirectory, runtimeFamilyFilesystem)
+	include(p.usesStdProcess, runtimeFamilyProcess)
+	include(p.usesStdSQLite, runtimeFamilySQLite)
+	return sortedKeys(families)
+}
+
 func (p *program) lowerCore() (coreProgram, error) {
 	lowerer := &coreLowerer{program: p, records: standardSymbolRecords(standardLibraryRegistry)}
 	core := coreProgram{
 		EvaluationOrder:    "left_to_right_once",
 		CleanupSuppression: "immutable_primary_then_cleanup",
+		RuntimeFamilies:    p.coreRuntimeFamilies(),
 		Classes:            []coreClass{},
 		Interfaces:         []coreInterface{},
 		Unions:             []coreUnion{},
@@ -309,9 +325,9 @@ func (p *program) lowerCore() (coreProgram, error) {
 }
 
 func (l *coreLowerer) signature(id string, params []paramDecl, result typeRef, throws []typeRef, effects operationEffectSet, namespace string, aliases map[string]aliasDecl, implementation string, pos position) coreSignature {
-	operation := coreOperationID("")
+	operation := runtimeOperationID("")
 	if record, ok := l.records[id]; ok {
-		operation = coreOperationID(record.native)
+		operation = runtimeOperationID(record.native)
 	}
 	return coreSignature{
 		ID: id, Parameters: l.bindings(namespace, aliases, params), Result: l.program.resolveType(namespace, aliases, result),
@@ -580,6 +596,9 @@ func (l *coreLowerer) expression(expression expressionNode) (coreExpression, err
 	case *nameExpression:
 		core.Kind, core.Name = "name", node.name
 		core.Declaration = l.nameDeclaration(node)
+		if record, ok := l.records[core.Declaration]; ok {
+			core.Operation = record.native
+		}
 		if node.storageType != "" {
 			core.ReadStorageType = node.storageType
 			if base, optional := optionalBase(node.storageType); optional && base == core.Type {
@@ -638,12 +657,12 @@ func (l *coreLowerer) expression(expression expressionNode) (coreExpression, err
 		}
 		core.Throws = coreSortedThrows(node.resolvedThrows)
 		if record, ok := l.records[core.Declaration]; ok {
-			core.Operation = coreOperationID(record.native)
+			core.Operation = runtimeOperationID(record.native)
 		} else {
-			core.Operation = coreOperationID(node.resolvedNative)
+			core.Operation = runtimeOperationID(node.resolvedNative)
 		}
 		if core.Operation == "" && strings.HasPrefix(core.Declaration, "core.") {
-			core.Operation = coreOperationID(core.Declaration)
+			core.Operation = runtimeOperationID(core.Declaration)
 		}
 		var err error
 		core.Arguments, err = lowerAll(node.args)
@@ -748,7 +767,11 @@ func (l *coreLowerer) expression(expression expressionNode) (coreExpression, err
 	case *usingExpression:
 		core.Kind = "using"
 		core.Bindings = []coreBinding{{Name: node.name, Type: node.resolved}}
-		core.Cleanup = &coreCleanup{Operation: "core.resource.Close", Suppression: "immutable_primary_then_cleanup"}
+		cleanupOperation := runtimeOperationID("core.resource.Close")
+		if record, ok := l.records[node.resolved+".Close"]; ok && record.native != "" {
+			cleanupOperation = record.native
+		}
+		core.Cleanup = &coreCleanup{Operation: cleanupOperation, Suppression: "immutable_primary_then_cleanup"}
 		var err error
 		if core.Value, err = lower(node.initializer); err != nil {
 			return coreExpression{}, err
