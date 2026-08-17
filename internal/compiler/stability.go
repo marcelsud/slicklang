@@ -3,6 +3,7 @@ package compiler
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // Stability is maintainer-declared release status. Zero is invalid so a new
@@ -23,41 +24,6 @@ type standardLibraryRegistryDecl struct {
 	functions  []standardFunctionDecl
 	classes    []standardClassDecl
 	interfaces []standardInterfaceDecl
-}
-
-// declareStandardLibrary makes the stability of this registry block explicit.
-// An entry may opt into a different status, but zero never means stable.
-func declareStandardLibrary(stability Stability, registry standardLibraryRegistryDecl) standardLibraryRegistryDecl {
-	declared := func(entry Stability) Stability {
-		if entry == "" {
-			return stability
-		}
-		return entry
-	}
-	for index := range registry.namespaces {
-		registry.namespaces[index].stability = declared(registry.namespaces[index].stability)
-	}
-	for index := range registry.functions {
-		registry.functions[index].stability = declared(registry.functions[index].stability)
-	}
-	for index := range registry.classes {
-		class := &registry.classes[index]
-		class.stability = declared(class.stability)
-		for fieldIndex := range class.fields {
-			class.fields[fieldIndex].stability = declared(class.fields[fieldIndex].stability)
-		}
-		for methodIndex := range class.methods {
-			class.methods[methodIndex].stability = declared(class.methods[methodIndex].stability)
-		}
-	}
-	for index := range registry.interfaces {
-		iface := &registry.interfaces[index]
-		iface.stability = declared(iface.stability)
-		for methodIndex := range iface.methods {
-			iface.methods[methodIndex].stability = declared(iface.methods[methodIndex].stability)
-		}
-	}
-	return registry
 }
 
 type standardSymbolRecord struct {
@@ -186,6 +152,203 @@ func validateStandardSymbolAvailability(name string, backend Backend, target str
 			target = declaration.targets[0].name
 		}
 		return fmt.Errorf("standard-library symbol %s is unavailable for backend %s target %s", name, backend, target)
+	}
+	return nil
+}
+
+func (p *program) usedStandardSymbols() []string {
+	records := standardSymbolRecords(standardLibraryRegistry)
+	used := make(map[string]struct{})
+	natives := make(map[nativeFunction]string)
+	for name, record := range records {
+		if record.native != "" {
+			natives[record.native] = name
+		}
+	}
+	addType := func(namespace string, aliases map[string]aliasDecl, name string) {
+		names := make(map[string]struct{})
+		standardTypeNames(p.canonicalTypeName(namespace, aliases, name), names)
+		for candidate := range names {
+			if _, ok := records[candidate]; ok {
+				used[candidate] = struct{}{}
+			}
+		}
+	}
+	var collectBlock func(*blockNode, *functionDecl)
+	var collectExpression func(expressionNode, *functionDecl)
+	collectExpression = func(expression expressionNode, function *functionDecl) {
+		switch node := expression.(type) {
+		case nil, *invalidExpression, *literalExpression, *templateExpression, *nameExpression, *awaitExpression:
+		case *tupleExpression:
+			for _, element := range node.elements {
+				collectExpression(element, function)
+			}
+		case *arrayExpression:
+			for _, element := range node.elements {
+				collectExpression(element, function)
+			}
+		case *mapExpression:
+			for _, entry := range node.entries {
+				collectExpression(entry.key, function)
+				collectExpression(entry.value, function)
+			}
+		case *rangeExpression:
+			collectExpression(node.start, function)
+			collectExpression(node.end, function)
+		case *lambdaExpression:
+			for _, param := range node.params {
+				addType(function.namespace, function.aliases, param.typ.name)
+			}
+			addType(function.namespace, function.aliases, node.result.name)
+			for _, thrown := range node.throws {
+				addType(function.namespace, function.aliases, thrown.name)
+			}
+			collectBlock(node.body, node.fn)
+		case *objectExpression:
+			addType(function.namespace, function.aliases, node.typeName)
+			for _, field := range node.fields {
+				collectExpression(field.value, function)
+			}
+		case *callExpression:
+			if name, ok := natives[node.resolvedNative]; ok {
+				used[name] = struct{}{}
+			}
+			if callee, ok := node.callee.(*nameExpression); ok {
+				if _, exists := records[callee.name]; exists {
+					used[callee.name] = struct{}{}
+				}
+				if node.resolvedReceiver != "" {
+					parts := strings.Split(callee.name, ".")
+					name := node.resolvedReceiver + "." + parts[len(parts)-1]
+					if _, exists := records[name]; exists {
+						used[name] = struct{}{}
+					}
+				}
+			}
+			for _, typeArg := range node.resolvedTypeArgs {
+				addType(function.namespace, function.aliases, typeArg)
+			}
+			collectExpression(node.callee, function)
+			for _, argument := range node.args {
+				collectExpression(argument, function)
+			}
+		case *unaryExpression:
+			collectExpression(node.value, function)
+		case *binaryExpression:
+			collectExpression(node.left, function)
+			collectExpression(node.right, function)
+		case *ifExpression:
+			collectExpression(node.condition, function)
+			collectBlock(node.thenBlock, function)
+			collectBlock(node.elseBlock, function)
+		case *catchExpression:
+			collectExpression(node.value, function)
+			for _, arm := range node.arms {
+				addType(function.namespace, function.aliases, arm.errorType.name)
+				collectExpression(arm.value, function)
+			}
+		case *resultExpression:
+			collectExpression(node.value, function)
+		case *propagateExpression:
+			collectExpression(node.value, function)
+		case *usingExpression:
+			collectExpression(node.initializer, function)
+			collectBlock(node.body, function)
+		case *matchExpression:
+			collectExpression(node.value, function)
+			for _, arm := range node.arms {
+				collectExpression(arm.value, function)
+			}
+		}
+	}
+	collectBlock = func(block *blockNode, function *functionDecl) {
+		if block == nil || function == nil {
+			return
+		}
+		for _, statement := range block.statements {
+			switch node := statement.(type) {
+			case *letStatement:
+				collectExpression(node.value, function)
+			case *asyncLetStatement:
+				collectExpression(node.call, function)
+			case *assignmentStatement:
+				collectExpression(node.value, function)
+			case *forStatement:
+				collectExpression(node.iterable, function)
+				collectBlock(node.body, function)
+			case *throwStatement:
+				collectExpression(node.value, function)
+			case *returnStatement:
+				collectExpression(node.value, function)
+			case *expressionStatement:
+				collectExpression(node.value, function)
+			case *breakStatement, *continueStatement:
+			}
+		}
+	}
+	for _, function := range p.authoredCallables() {
+		for _, param := range function.params {
+			addType(function.namespace, function.aliases, param.typ.name)
+		}
+		addType(function.namespace, function.aliases, function.result.name)
+		for _, thrown := range function.throws {
+			addType(function.namespace, function.aliases, thrown.name)
+		}
+		collectBlock(function.ast, function)
+	}
+	for _, class := range p.classes {
+		if class.pos.file == "" || class.instanceOf != "" {
+			continue
+		}
+		for _, field := range class.fields {
+			addType(class.namespace, class.aliases, field.typ.name)
+		}
+	}
+	for _, iface := range p.interfaces {
+		if iface.pos.file == "" || iface.instanceOf != "" {
+			continue
+		}
+		for _, method := range iface.methods {
+			for _, param := range method.params {
+				addType(method.namespace, method.aliases, param.typ.name)
+			}
+			addType(method.namespace, method.aliases, method.result.name)
+			for _, thrown := range method.throws {
+				addType(method.namespace, method.aliases, thrown.name)
+			}
+		}
+	}
+	for _, union := range p.unions {
+		for _, variant := range union.variants {
+			for _, field := range variant.fields {
+				addType(union.namespace, union.aliases, field.typ.name)
+			}
+		}
+	}
+	for _, constant := range p.constants {
+		addType(constant.namespace, constant.aliases, constant.typ.name)
+		collectExpression(constant.ast, &functionDecl{namespace: constant.namespace, aliases: constant.aliases})
+	}
+	names := make([]string, 0, len(used))
+	for name := range used {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (p *program) validateStandardUsage(backend Backend, target string, allowAlpha, validateBackend bool) error {
+	records := standardSymbolRecords(standardLibraryRegistry)
+	for _, name := range p.usedStandardSymbols() {
+		record := records[name]
+		if record.stability == StabilityAlpha && !allowAlpha {
+			return fmt.Errorf("standard-library symbol %s is alpha; pass --allow-alpha to use it", name)
+		}
+		if validateBackend {
+			if err := validateStandardSymbolAvailability(name, backend, target, allowAlpha); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

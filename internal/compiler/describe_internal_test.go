@@ -1,6 +1,8 @@
 package compiler
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -114,5 +116,67 @@ func TestStableBackendRequiresEveryStableOperation(t *testing.T) {
 
 	if err := validateStabilityRegistries(); err == nil || !strings.Contains(err.Error(), "lacks complete stable-backend coverage") {
 		t.Fatalf("stable backend coverage error = %v", err)
+	}
+}
+
+func TestOmittedStabilityIsInvalid(t *testing.T) {
+	original := standardLibraryRegistry
+	registry := original
+	registry.functions = append([]standardFunctionDecl(nil), original.functions...)
+	registry.functions[0].stability = ""
+	standardLibraryRegistry = registry
+	defer func() { standardLibraryRegistry = original }()
+
+	if err := validateStabilityRegistries(); err == nil || !strings.Contains(err.Error(), "invalid stability") {
+		t.Fatalf("omitted stability validation error = %v", err)
+	}
+}
+
+func TestAlphaUseRequiresOptInAndBackendCoverageBeforeEmission(t *testing.T) {
+	originalRegistry := standardLibraryRegistry
+	registry := originalRegistry
+	registry.functions = append([]standardFunctionDecl(nil), originalRegistry.functions...)
+	registry.functions[0].stability = StabilityAlpha
+	standardLibraryRegistry = registry
+	defer func() { standardLibraryRegistry = originalRegistry }()
+
+	source := Source{Name: "main.slk", Namespace: "root", Text: `function main() -> bytes { std.bytes.FromUtf8("ok") }`}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.slk"), []byte(source.Text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CheckPath(root); err == nil || !strings.Contains(err.Error(), "--allow-alpha") {
+		t.Fatalf("check without alpha opt-in error = %v", err)
+	}
+	if diagnostics, err := CheckPathWithOptions(root, CheckOptions{AllowAlpha: true}); err != nil || len(diagnostics) != 0 {
+		t.Fatalf("check with alpha opt-in = %v, %v", diagnostics, err)
+	}
+
+	output := filepath.Join(root, "existing")
+	if err := os.WriteFile(output, []byte("sentinel"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildSourcesWithOptions([]Source{source}, output, BuildOptions{Backend: BackendGo}); err == nil || !strings.Contains(err.Error(), "--allow-alpha") {
+		t.Fatalf("build without alpha opt-in error = %v", err)
+	}
+	if contents, err := os.ReadFile(output); err != nil || string(contents) != "sentinel" {
+		t.Fatalf("pre-emission alpha failure changed output: %q, %v", contents, err)
+	}
+
+	originalBackends := backendRegistry
+	backendRegistry = append(append([]backendRegistration(nil), originalBackends...), backendRegistration{
+		name:       "missing-alpha",
+		stability:  StabilityAlpha,
+		targets:    []backendTargetRegistration{{name: "linux-x64", stability: StabilityAlpha}},
+		implements: func(nativeFunction) bool { return false },
+	})
+	defer func() { backendRegistry = originalBackends }()
+	if _, err := BuildSourcesWithOptions([]Source{source}, output, BuildOptions{Backend: "missing-alpha", AllowAlpha: true}); err == nil ||
+		!strings.Contains(err.Error(), "std.bytes.FromUtf8") ||
+		!strings.Contains(err.Error(), "backend missing-alpha target linux-x64") {
+		t.Fatalf("missing alpha backend coverage error = %v", err)
+	}
+	if contents, err := os.ReadFile(output); err != nil || string(contents) != "sentinel" {
+		t.Fatalf("pre-emission backend failure changed output: %q, %v", contents, err)
 	}
 }

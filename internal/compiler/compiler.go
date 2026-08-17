@@ -231,8 +231,14 @@ func CheckPathWithOptions(path string, options CheckOptions) ([]Diagnostic, erro
 	if err != nil {
 		return nil, err
 	}
-	_ = options
-	return Check(sources), nil
+	program, diagnostics := compile(sources)
+	if len(diagnostics) > 0 {
+		return diagnostics, nil
+	}
+	if err := program.validateStandardUsage(BackendGo, "", options.AllowAlpha, false); err != nil {
+		return nil, err
+	}
+	return nil, nil
 }
 
 // LoadSources reads the .slk file at path, or every .slk file under it when

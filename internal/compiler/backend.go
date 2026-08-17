@@ -37,7 +37,7 @@ var backendRegistry = []backendRegistration{
 		name:       BackendGo,
 		stability:  StabilityStable,
 		targets:    []backendTargetRegistration{{name: hostTargetName(), stability: StabilityStable}},
-		implements: func(nativeFunction) bool { return true },
+		implements: goNativeOperationImplemented,
 	},
 	{
 		name:      BackendLLVM,
@@ -50,6 +50,59 @@ var backendRegistry = []backendRegistration{
 				nativeSymbol(native) != ""
 		},
 	},
+}
+
+func goNativeOperationImplemented(native nativeFunction) bool {
+	return goNativeFunctionImplemented(native) || goNativeMethodImplemented(native)
+}
+
+func goNativeFunctionImplemented(native nativeFunction) bool {
+	switch native {
+	case nativeStdJsonDecode, nativeStdJsonEncode,
+		nativeStdBufferNew, nativeStdBufferPush, nativeStdBufferGet,
+		nativeStdBufferSet, nativeStdBufferLength, nativeStdBufferFreeze,
+		nativeStdBytesFromUtf8, nativeStdBytesToUtf8, nativeStdBytesLength,
+		nativeStdBytesAt, nativeStdBytesConcat, nativeStdBytesSlice, nativeStdBytesFromValues,
+		nativeStdUTF8DecodeAt,
+		nativeStdUnicodeIsLetter, nativeStdUnicodeIsDigit,
+		nativeStdUnicodeIsWhitespace, nativeStdUnicodeIsUpper,
+		nativeStdConvertParseInt, nativeStdConvertParseFloat,
+		nativeStdConvertIntToString, nativeStdConvertFloatToString,
+		nativeStdMathDivide, nativeStdMathRemainder,
+		nativeStdEnvGet, nativeStdEnvSet, nativeStdEnvUnset,
+		nativeStdFSReadText, nativeStdFSWriteText, nativeStdFSExists,
+		nativeStdFSCreateDirectoryAll, nativeStdFSRemove,
+		nativeStdFSReadDirectory, nativeStdFSCreateTemporaryDirectory,
+		nativeStdPathJoin, nativeStdPathClean, nativeStdPathBase,
+		nativeStdPathDirectory, nativeStdPathExtension, nativeStdPathIsAbsolute,
+		nativeStdTextTrim, nativeStdTextContains, nativeStdTextStartsWith,
+		nativeStdTextEndsWith, nativeStdTextSplit, nativeStdTextJoin,
+		nativeStdTextReplaceAll, nativeStdTextCut, nativeStdTextQuote,
+		nativeStdIOReaderFromBytes, nativeStdIOWriterToBytes,
+		nativeStdIOReadAll, nativeStdIOCopy,
+		nativeStdHTTPFetch, nativeStdHTTPServerServe,
+		nativeStdHTTPHeaderValues, nativeStdHTTPStatusText,
+		nativeStdProcessRun, nativeStdSQLiteOpen:
+		return true
+	default:
+		return false
+	}
+}
+
+func goNativeMethodImplemented(native nativeFunction) bool {
+	switch native {
+	case nativeStdIOReaderRead, nativeStdIOReaderClose,
+		nativeStdIOWriterWrite, nativeStdIOWriterBytes, nativeStdIOWriterClose,
+		nativeStdFSTemporaryDirectoryClose,
+		nativeStdSQLiteDatabaseExecute, nativeStdSQLiteDatabaseQuery,
+		nativeStdSQLiteDatabaseBegin, nativeStdSQLiteDatabaseClose,
+		nativeStdSQLiteTransactionExecute, nativeStdSQLiteTransactionQuery,
+		nativeStdSQLiteTransactionCommit, nativeStdSQLiteTransactionRollback,
+		nativeStdSQLiteTransactionClose:
+		return true
+	default:
+		return false
+	}
 }
 
 // BackendTargetDescription exposes one maintainer-declared backend target.
@@ -182,6 +235,13 @@ func BuildSourcesWithOptions(sources []Source, output string, options BuildOptio
 	program, diagnostics := compile(sources)
 	if len(diagnostics) > 0 {
 		return diagnostics, nil
+	}
+	target := ""
+	if len(declaration.targets) > 0 {
+		target = declaration.targets[0].name
+	}
+	if err := program.validateStandardUsage(backend, target, options.AllowAlpha, true); err != nil {
+		return nil, err
 	}
 	output, err := filepath.Abs(output)
 	if err != nil {
