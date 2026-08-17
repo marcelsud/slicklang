@@ -31,12 +31,12 @@ func run(args []string) int {
 		return runQuality(args[1:], os.Stdout, os.Stderr)
 	}
 	if args[0] == "build" {
-		path, output, backend, err := parseBuildArgs(args[1:])
+		path, output, options, err := parseBuildOptions(args[1:])
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return reportUsage()
 		}
-		diagnostics, err := compiler.BuildPathBackend(path, output, backend)
+		diagnostics, err := compiler.BuildPathWithOptions(path, output, options)
 		if err != nil {
 			return reportError("build", err)
 		}
@@ -47,14 +47,12 @@ func run(args []string) int {
 		return 0
 	}
 	if args[0] == "check" {
-		if len(args) > 2 {
+		path, options, err := parseCheckArgs(args[1:])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
 			return reportUsage()
 		}
-		path := "."
-		if len(args) == 2 {
-			path = args[1]
-		}
-		diagnostics, err := compiler.CheckPath(path)
+		diagnostics, err := compiler.CheckPathWithOptions(path, options)
 		if err != nil {
 			return reportError("check", err)
 		}
@@ -101,48 +99,86 @@ func runProgram(args []string, stdout, stderr io.Writer) int {
 }
 
 func parseBuildArgs(args []string) (string, string, compiler.Backend, error) {
+	path, output, options, err := parseBuildOptions(args)
+	return path, output, options.Backend, err
+}
+
+func parseBuildOptions(args []string) (string, string, compiler.BuildOptions, error) {
 	path := "."
 	output := ""
-	backend := compiler.BackendGo
+	options := compiler.BuildOptions{Backend: compiler.BackendGo}
 	pathSet := false
+	alphaSet := false
 	for index := 0; index < len(args); index++ {
 		switch args[index] {
 		case "-o", "--output":
 			index++
 			if index >= len(args) {
-				return "", "", "", errors.New("build output path is missing")
+				return "", "", compiler.BuildOptions{}, errors.New("build output path is missing")
 			}
 			output = args[index]
 		case "--backend":
 			index++
 			if index >= len(args) {
-				return "", "", "", errors.New("build backend is missing")
+				return "", "", compiler.BuildOptions{}, errors.New("build backend is missing")
 			}
 			parsed, err := compiler.ParseBackend(args[index])
 			if err != nil {
-				return "", "", "", err
+				return "", "", compiler.BuildOptions{}, err
 			}
-			backend = parsed
+			options.Backend = parsed
+		case "--allow-alpha":
+			if alphaSet {
+				return "", "", compiler.BuildOptions{}, errors.New("build --allow-alpha may only be specified once")
+			}
+			options.AllowAlpha = true
+			alphaSet = true
 		default:
 			if strings.HasPrefix(args[index], "--backend=") {
 				parsed, err := compiler.ParseBackend(strings.TrimPrefix(args[index], "--backend="))
 				if err != nil {
-					return "", "", "", err
+					return "", "", compiler.BuildOptions{}, err
 				}
-				backend = parsed
+				options.Backend = parsed
 				continue
 			}
+			if strings.HasPrefix(args[index], "-") {
+				return "", "", compiler.BuildOptions{}, fmt.Errorf("unknown build flag %q", args[index])
+			}
 			if pathSet {
-				return "", "", "", fmt.Errorf("unexpected build argument %q", args[index])
+				return "", "", compiler.BuildOptions{}, fmt.Errorf("unexpected build argument %q", args[index])
 			}
 			path = args[index]
 			pathSet = true
 		}
 	}
 	if output == "" {
-		return "", "", "", errors.New("build requires -o <output>")
+		return "", "", compiler.BuildOptions{}, errors.New("build requires -o <output>")
 	}
-	return path, output, backend, nil
+	return path, output, options, nil
+}
+
+func parseCheckArgs(args []string) (string, compiler.CheckOptions, error) {
+	path := "."
+	pathSet := false
+	options := compiler.CheckOptions{}
+	for _, arg := range args {
+		switch {
+		case arg == "--allow-alpha":
+			if options.AllowAlpha {
+				return "", compiler.CheckOptions{}, errors.New("check --allow-alpha may only be specified once")
+			}
+			options.AllowAlpha = true
+		case strings.HasPrefix(arg, "-"):
+			return "", compiler.CheckOptions{}, fmt.Errorf("unknown check flag %q", arg)
+		case pathSet:
+			return "", compiler.CheckOptions{}, fmt.Errorf("unexpected check argument %q", arg)
+		default:
+			path = arg
+			pathSet = true
+		}
+	}
+	return path, options, nil
 }
 
 func reportUsage() int {

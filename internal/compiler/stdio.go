@@ -335,6 +335,9 @@ func runtimeIOFailureMessage(value runtimeValue) string {
 }
 
 func (g *goGenerator) emitNativeMethod(function *functionDecl, receiverType string) error {
+	if !goNativeMethodImplemented(function.native) {
+		return fmt.Errorf("unknown native Slick method %s", function.native)
+	}
 	resultType, err := g.declaredType(function.namespace, function.aliases, function.result)
 	if err != nil {
 		return err

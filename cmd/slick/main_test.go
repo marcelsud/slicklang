@@ -35,6 +35,17 @@ func TestParseBuildArgsAcceptsLLVMBackend(t *testing.T) {
 	}
 }
 
+func TestBuildAndCheckParseExplicitAlphaOptIn(t *testing.T) {
+	_, _, build, err := parseBuildOptions([]string{"examples/hello", "-o", "bin/hello", "--allow-alpha"})
+	if err != nil || !build.AllowAlpha {
+		t.Fatalf("build alpha options = %+v, %v", build, err)
+	}
+	path, check, err := parseCheckArgs([]string{"--allow-alpha", "examples/hello"})
+	if err != nil || path != "examples/hello" || !check.AllowAlpha {
+		t.Fatalf("check alpha options = %q, %+v, %v", path, check, err)
+	}
+}
+
 // TestRunProgramForwardsArgumentsAndStatus covers the `slick run` seam: the
 // project path is the first argument, everything after it belongs to the Slick
 // program, and a std.process.Status result becomes exact bytes plus the exit

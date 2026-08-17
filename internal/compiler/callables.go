@@ -44,6 +44,9 @@ func (p *program) checkFunctionValue(node *nameExpression, scope *astScope) (exp
 			"%s is generic and has no single callable type; call it with its type arguments", node.name)
 		return unknown, true
 	}
+	if callee.native != "" {
+		node.resolvedStandard = callee.qualified
+	}
 	p.markStandardLibraryUse(callee.namespace, callee.native)
 	typ := p.functionCallableType(callee)
 	// The value carries the declaration's types into this namespace, so the same

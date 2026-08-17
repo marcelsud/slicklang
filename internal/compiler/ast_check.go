@@ -567,6 +567,7 @@ func (p *program) checkTupleExpression(node *tupleExpression, scope *astScope, e
 
 func (p *program) checkTemplateExpression(node *templateExpression, scope *astScope) expressionInfo {
 	info := expressionInfo{typ: "string", effects: make(effectSet)}
+	node.resolvedStandards = nil
 	text := node.text
 	for {
 		start := strings.Index(text, "${")
@@ -579,7 +580,11 @@ func (p *program) checkTemplateExpression(node *templateExpression, scope *astSc
 			return info
 		}
 		name := strings.TrimSpace(text[:end])
-		mergeEffects(info.effects, p.checkNameExpression(&nameExpression{name: name, pos: node.pos}, scope).effects)
+		reference := &nameExpression{name: name, pos: node.pos}
+		mergeEffects(info.effects, p.checkNameExpression(reference, scope).effects)
+		if reference.resolvedStandard != "" {
+			node.resolvedStandards = append(node.resolvedStandards, reference.resolvedStandard)
+		}
 		text = text[end+1:]
 	}
 }
@@ -624,6 +629,9 @@ func (p *program) checkNameExpression(node *nameExpression, scope *astScope) exp
 		class := p.classes[receiver]
 		if class != nil {
 			if field, ok := class.fields[parts[1]]; ok {
+				if _, _, standard := standardSymbolMetadata(class.qualified + "." + field.name); standard {
+					node.resolvedStandard = class.qualified + "." + field.name
+				}
 				p.requireAccess(node.pos, scope.function.namespace, class.namespace, field.name, "field")
 				info := expressionInfo{typ: p.resolveType(class.namespace, class.aliases, field.typ), effects: make(effectSet)}
 				if binding, active := scope.usingBindings[parts[0]]; active && !p.taskSafeType(info.typ, make(map[string]bool)) {
@@ -843,7 +851,8 @@ func (p *program) checkObjectExpression(node *objectExpression, scope *astScope)
 	}
 	p.requireAccess(node.pos, scope.function.namespace, class.namespace, class.name, "class")
 	seen := make(map[string]struct{}, len(node.fields))
-	for _, fieldValue := range node.fields {
+	for index := range node.fields {
+		fieldValue := &node.fields[index]
 		if _, duplicate := seen[fieldValue.name]; duplicate {
 			p.add(fieldValue.pos, diagnosticCodeTypeMismatch, "duplicate field %s.%s", class.name, fieldValue.name)
 			continue
@@ -853,6 +862,9 @@ func (p *program) checkObjectExpression(node *objectExpression, scope *astScope)
 		if !ok {
 			p.add(fieldValue.pos, diagnosticCodeUnknownField, "%s has no field %s", class.name, fieldValue.name)
 			continue
+		}
+		if _, _, standard := standardSymbolMetadata(class.qualified + "." + field.name); standard {
+			fieldValue.resolvedStandard = class.qualified + "." + field.name
 		}
 		p.requireAccess(fieldValue.pos, scope.function.namespace, class.namespace, field.name, "field")
 		expected := p.resolveType(class.namespace, class.aliases, field.typ)
@@ -1036,6 +1048,14 @@ func (p *program) checkCallExpressionEffects(node *callExpression, scope *astSco
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	}
 	p.markStandardLibraryUse(target.namespace, target.native)
+	if target.function != nil && target.function.native != "" {
+		name.resolvedStandard = target.function.qualified
+	} else if node.resolvedReceiver != "" {
+		candidate := node.resolvedReceiver + "." + parts[len(parts)-1]
+		if _, _, standard := standardSymbolMetadata(candidate); standard {
+			name.resolvedStandard = candidate
+		}
+	}
 
 	info := expressionInfo{
 		typ:     p.resolveType(target.namespace, target.aliases, target.result),

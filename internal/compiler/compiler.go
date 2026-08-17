@@ -212,12 +212,33 @@ func newProgram(terminals ...terminalAnnotationDecl) *program {
 	return program
 }
 
+// CheckOptions contains project-level governance choices.
+type CheckOptions struct {
+	AllowAlpha bool
+}
+
 func CheckPath(path string) ([]Diagnostic, error) {
+	return CheckPathWithOptions(path, CheckOptions{})
+}
+
+// CheckPathWithOptions validates the declared stability registries before
+// checking source. Alpha symbol-use enforcement is shared with compilation.
+func CheckPathWithOptions(path string, options CheckOptions) ([]Diagnostic, error) {
+	if err := validateStabilityRegistries(); err != nil {
+		return nil, err
+	}
 	sources, err := loadSources(path)
 	if err != nil {
 		return nil, err
 	}
-	return Check(sources), nil
+	program, diagnostics := compile(sources)
+	if len(diagnostics) > 0 {
+		return diagnostics, nil
+	}
+	if err := program.validateStandardUsage(BackendGo, "", options.AllowAlpha, false); err != nil {
+		return nil, err
+	}
+	return nil, nil
 }
 
 // LoadSources reads the .slk file at path, or every .slk file under it when
