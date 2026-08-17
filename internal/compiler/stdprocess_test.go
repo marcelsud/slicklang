@@ -202,6 +202,18 @@ type programResult struct {
 	failure     error
 }
 
+type processTestBackend struct {
+	name        string
+	interpreter bool
+	backend     compiler.Backend
+}
+
+var processTestBackends = []processTestBackend{
+	{name: "interpreter", interpreter: true},
+	{name: "go", backend: compiler.BackendGo},
+	{name: "llvm", backend: compiler.BackendLLVM},
+}
+
 // interpretProgram runs source through the interpreter exactly as `slick run`
 // does, including reporting an out-of-range status as a runtime failure after
 // the produced bytes are available.
@@ -261,6 +273,14 @@ func executeProgram(t *testing.T, binary string, arguments []string) programResu
 		output:      output.String(),
 		errorOutput: errorOutput.String(),
 	}
+}
+
+func (backend processTestBackend) run(t *testing.T, source string, arguments []string) programResult {
+	t.Helper()
+	if backend.interpreter {
+		return interpretProgram(t, source, arguments)
+	}
+	return executeProgram(t, buildProgram(t, source, backend.backend), arguments)
 }
 
 func asExitError(err error, target **exec.ExitError) bool {
@@ -524,9 +544,46 @@ func assertCLIResult(t *testing.T, arguments []string, result programResult) {
 // TestEmptyCLIArgumentsReachMain covers the empty argument vector: a CLI main
 // still runs, sees no arguments, and reports its own status.
 func TestEmptyCLIArgumentsReachMain(t *testing.T) {
-	interpreted := interpretProgram(t, processCLISource, nil)
-	assertEmptyCLIResult(t, interpreted)
-	assertEmptyCLIResult(t, executeProgram(t, buildProgram(t, processCLISource), nil))
+	for _, backend := range processTestBackends {
+		t.Run(backend.name, func(t *testing.T) {
+			assertEmptyCLIResult(t, backend.run(t, processCLISource, nil))
+		})
+	}
+}
+
+func TestStdProcessExampleRunsEverywhere(t *testing.T) {
+	const usage = "usage: std-process <program> [arguments...]"
+	for _, backend := range processTestBackends {
+		t.Run(backend.name, func(t *testing.T) {
+			var result programResult
+			if backend.interpreter {
+				outcome, diagnostics, err := compiler.RunPathArguments(examplePath("std-process"), nil)
+				assertNoDiagnostics(t, diagnostics)
+				if err != nil {
+					t.Fatalf("run std-process example: %v", err)
+				}
+				if outcome.Status == nil {
+					t.Fatal("std-process example produced no status")
+				}
+				result = programResult{
+					exitCode:    outcome.Status.ExitCode,
+					output:      string(outcome.Status.Output),
+					errorOutput: string(outcome.Status.ErrorOutput),
+				}
+			} else {
+				binary := filepath.Join(t.TempDir(), "std-process")
+				diagnostics, err := compiler.BuildPathBackend(examplePath("std-process"), binary, backend.backend)
+				if err != nil {
+					t.Fatalf("build %s std-process example: %v", backend.name, err)
+				}
+				assertNoDiagnostics(t, diagnostics)
+				result = executeProgram(t, binary, nil)
+			}
+			if result.exitCode != 2 || result.output != "" || result.errorOutput != usage {
+				t.Fatalf("%s std-process result = %+v", backend.name, result)
+			}
+		})
+	}
 }
 
 func assertEmptyCLIResult(t *testing.T, result programResult) {
@@ -553,26 +610,28 @@ func TestExitCodeOutsideTheValidRangeFailsAfterWritingOutput(t *testing.T) {
 	for _, code := range []string{"256", "-1"} {
 		t.Run(code, func(t *testing.T) {
 			arguments := []string{code, "tail"}
-			interpreted := interpretProgram(t, processCLISource, arguments)
-			if interpreted.failure == nil {
-				t.Fatalf("interpreter accepted exit code %s", code)
-			}
-			if !strings.Contains(interpreted.failure.Error(), "ExitCode must be 0 through 255") {
-				t.Fatalf("unexpected interpreter failure %v", interpreted.failure)
-			}
-			if interpreted.output != strings.Join(arguments, "|") {
-				t.Fatalf("interpreter dropped output %q", interpreted.output)
-			}
-
-			native := executeProgram(t, buildProgram(t, processCLISource), arguments)
-			if native.exitCode != 1 {
-				t.Fatalf("expected the native failure exit, found %d", native.exitCode)
-			}
-			if native.output != strings.Join(arguments, "|") {
-				t.Fatalf("native binary dropped output %q", native.output)
-			}
-			if !strings.Contains(native.errorOutput, "ExitCode must be 0 through 255") {
-				t.Fatalf("unexpected native stderr %q", native.errorOutput)
+			for _, backend := range processTestBackends {
+				t.Run(backend.name, func(t *testing.T) {
+					result := backend.run(t, processCLISource, arguments)
+					if result.output != strings.Join(arguments, "|") {
+						t.Fatalf("%s dropped output %q", backend.name, result.output)
+					}
+					if backend.interpreter {
+						if result.failure == nil {
+							t.Fatalf("interpreter accepted exit code %s", code)
+						}
+						if !strings.Contains(result.failure.Error(), "ExitCode must be 0 through 255") {
+							t.Fatalf("unexpected interpreter failure %v", result.failure)
+						}
+						return
+					}
+					if result.exitCode != 1 {
+						t.Fatalf("expected the %s failure exit, found %d", backend.name, result.exitCode)
+					}
+					if !strings.Contains(result.errorOutput, "ExitCode must be 0 through 255") {
+						t.Fatalf("unexpected %s stderr %q", backend.name, result.errorOutput)
+					}
+				})
 			}
 		})
 	}
@@ -600,16 +659,16 @@ function main() -> std.process.Status effects { environment } {
     }
 }
 `
-	interpreted := interpretProgram(t, source, nil)
-	if interpreted.output != "value;ABC" {
-		t.Fatalf("interpreted cleanup trace %q", interpreted.output)
-	}
-	native := executeProgram(t, buildProgram(t, source), nil)
-	if native.output != "value;ABC" {
-		t.Fatalf("native cleanup trace %q", native.output)
-	}
-	if native.exitCode != 0 {
-		t.Fatalf("native exit %d", native.exitCode)
+	for _, backend := range processTestBackends {
+		t.Run(backend.name, func(t *testing.T) {
+			result := backend.run(t, source, nil)
+			if result.output != "value;ABC" {
+				t.Fatalf("%s cleanup trace %q", backend.name, result.output)
+			}
+			if result.exitCode != 0 {
+				t.Fatalf("%s exit %d", backend.name, result.exitCode)
+			}
+		})
 	}
 }
 
@@ -642,7 +701,15 @@ func TestUnsupportedMainParametersAreRejected(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "main.slk"), []byte(source), 0o644); err != nil {
 		t.Fatalf("write Slick source: %v", err)
 	}
-	if _, err := compiler.BuildPath(root, filepath.Join(root, "app")); err == nil || !strings.Contains(err.Error(), "one string[] parameter") {
-		t.Fatalf("build accepted main(Count: int): %v", err)
+	for _, backend := range []compiler.Backend{compiler.BackendGo, compiler.BackendLLVM} {
+		t.Run(string(backend), func(t *testing.T) {
+			output := filepath.Join(root, "app-"+string(backend))
+			if _, err := compiler.BuildPathBackend(root, output, backend); err == nil || !strings.Contains(err.Error(), "one string[] parameter") {
+				t.Fatalf("%s build accepted main(Count: int): %v", backend, err)
+			}
+			if _, err := os.Stat(output); !os.IsNotExist(err) {
+				t.Fatalf("invalid %s build created output", backend)
+			}
+		})
 	}
 }

@@ -16,8 +16,20 @@ import (
 	"slick/internal/compiler"
 )
 
-func runAsyncBackend(source string, native bool) (string, error) {
-	if !native {
+type asyncTestBackend struct {
+	name    string
+	native  bool
+	backend compiler.Backend
+}
+
+var asyncTestBackends = []asyncTestBackend{
+	{name: "interpreter"},
+	{name: "go", native: true, backend: compiler.BackendGo},
+	{name: "llvm", native: true, backend: compiler.BackendLLVM},
+}
+
+func runAsyncBackend(source string, testBackend asyncTestBackend) (string, error) {
+	if !testBackend.native {
 		output, diagnostics, err := compiler.Run([]compiler.Source{{Name: "main.slk", Namespace: "root", Text: source}})
 		if len(diagnostics) != 0 {
 			return "", fmt.Errorf("async diagnostics: %v", diagnostics)
@@ -35,7 +47,7 @@ func runAsyncBackend(source string, native bool) (string, error) {
 		return "", err
 	}
 	binary := filepath.Join(root, "app")
-	diagnostics, err := compiler.BuildPath(sourcePath, binary)
+	diagnostics, err := compiler.BuildPathBackend(sourcePath, binary, testBackend.backend)
 	if err != nil {
 		return "", err
 	}
@@ -204,12 +216,8 @@ function main() -> int {
 }
 
 func TestAsyncPreparationFailureLaunchesNoChild(t *testing.T) {
-	for _, native := range []bool{false, true} {
-		name := "interpreter"
-		if native {
-			name = "native"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, backend := range asyncTestBackends {
+		t.Run(backend.name, func(t *testing.T) {
 			var hits atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 				hits.Add(1)
@@ -229,7 +237,7 @@ function main() -> Result<int, PrepFailure> effects { network } {
     Ok(Value)
 }
 `, server.URL)
-			output, err := runAsyncBackend(source, native)
+			output, err := runAsyncBackend(source, backend)
 			if err != nil {
 				t.Fatalf("run preparation scenario: %v", err)
 			}
@@ -244,12 +252,8 @@ function main() -> Result<int, PrepFailure> effects { network } {
 }
 
 func TestAsyncArgumentsEvaluateOnceInSourceOrder(t *testing.T) {
-	for _, native := range []bool{false, true} {
-		name := "interpreter"
-		if native {
-			name = "native"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, backend := range asyncTestBackends {
+		t.Run(backend.name, func(t *testing.T) {
 			var mutex sync.Mutex
 			var paths []string
 			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -270,7 +274,7 @@ function main() -> Result<int, std.http.Failure> effects { network } {
     Ok(await Work)
 }
 `, server.URL+"/first", server.URL+"/second")
-			output, err := runAsyncBackend(source, native)
+			output, err := runAsyncBackend(source, backend)
 			if err != nil {
 				t.Fatalf("run argument-order scenario: %v", err)
 			}
@@ -288,12 +292,8 @@ function main() -> Result<int, std.http.Failure> effects { network } {
 }
 
 func TestAsyncHTTPChildrenOverlap(t *testing.T) {
-	for _, native := range []bool{false, true} {
-		name := "interpreter"
-		if native {
-			name = "native"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, backend := range asyncTestBackends {
+		t.Run(backend.name, func(t *testing.T) {
 			started := make(chan struct{}, 2)
 			release := make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
@@ -322,7 +322,7 @@ function main() -> Result<int, std.http.Failure> effects { network } {
 				err    error
 			}, 1)
 			go func() {
-				output, err := runAsyncBackend(source, native)
+				output, err := runAsyncBackend(source, backend)
 				result <- struct {
 					output string
 					err    error
@@ -343,12 +343,8 @@ function main() -> Result<int, std.http.Failure> effects { network } {
 }
 
 func TestAsyncResultPropagationCancelsAndJoinsHTTPChild(t *testing.T) {
-	for _, native := range []bool{false, true} {
-		name := "interpreter"
-		if native {
-			name = "native"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, backend := range asyncTestBackends {
+		t.Run(backend.name, func(t *testing.T) {
 			blocked := make(chan struct{}, 1)
 			cancelled := make(chan struct{}, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -390,7 +386,7 @@ function main() -> string effects { network } {
 				err    error
 			}, 1)
 			go func() {
-				output, err := runAsyncBackend(source, native)
+				output, err := runAsyncBackend(source, backend)
 				result <- struct {
 					output string
 					err    error
@@ -409,12 +405,8 @@ function main() -> string effects { network } {
 }
 
 func TestAsyncReturnJoinsChildBeforeParentUsingCleanup(t *testing.T) {
-	for _, native := range []bool{false, true} {
-		name := "interpreter"
-		if native {
-			name = "native"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, backend := range asyncTestBackends {
+		t.Run(backend.name, func(t *testing.T) {
 			started := make(chan struct{}, 1)
 			childDone := make(chan struct{})
 			var closes atomic.Int32
@@ -467,7 +459,7 @@ function main() -> string effects { network } {
     "ok"
 }
 `, server.URL)
-			output, err := runAsyncBackend(source, native)
+			output, err := runAsyncBackend(source, backend)
 			if err != nil {
 				t.Fatalf("run cleanup scenario: %v", err)
 			}

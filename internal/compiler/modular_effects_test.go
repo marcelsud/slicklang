@@ -47,15 +47,14 @@ func TestModularEffectsEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	riskServer := newModularEffectsRiskServer(t, false)
-	binary := filepath.Join(t.TempDir(), "modular-effects")
-	diagnostics, err := compiler.BuildPath(projectPath, binary)
-	if err != nil {
-		t.Fatalf("build modular-effects: %v", err)
-	}
-	assertNoDiagnostics(t, diagnostics)
 
-	runners := map[string]func(*testing.T, modularEffectsConfig) string{
-		"interpreter": func(t *testing.T, config modularEffectsConfig) string {
+	type runner struct {
+		name string
+		run  func(*testing.T, modularEffectsConfig) string
+	}
+	runners := []runner{{
+		name: "interpreter",
+		run: func(t *testing.T, config modularEffectsConfig) string {
 			setModularEffectsEnv(t, config)
 			output, diagnostics, err := compiler.RunPath(projectPath)
 			if err != nil {
@@ -64,13 +63,24 @@ func TestModularEffectsEndToEnd(t *testing.T) {
 			assertNoDiagnostics(t, diagnostics)
 			return output
 		},
-		"native": func(t *testing.T, config modularEffectsConfig) string {
-			return runModularEffectsNative(t, binary, config)
-		},
+	}}
+	for _, backend := range []compiler.Backend{compiler.BackendGo, compiler.BackendLLVM} {
+		binary := filepath.Join(t.TempDir(), "modular-effects")
+		diagnostics, err := compiler.BuildPathBackend(projectPath, binary, backend)
+		if err != nil {
+			t.Fatalf("build %s modular-effects: %v", backend, err)
+		}
+		assertNoDiagnostics(t, diagnostics)
+		runners = append(runners, runner{
+			name: string(backend),
+			run: func(t *testing.T, config modularEffectsConfig) string {
+				return runModularEffectsNative(t, binary, config)
+			},
+		})
 	}
 
-	for name, run := range runners {
-		t.Run(name, func(t *testing.T) {
+	for _, runner := range runners {
+		t.Run(runner.name, func(t *testing.T) {
 			root := t.TempDir()
 			config := modularEffectsConfig{
 				inputPath:    inputPath,
@@ -79,7 +89,7 @@ func TestModularEffectsEndToEnd(t *testing.T) {
 				reportPath:   filepath.Join(root, "audit.json"),
 				nowEpoch:     "1700000000",
 			}
-			if output := strings.TrimSpace(run(t, config)); output != "processed=3;accepted=1;review=1;rejected=1" {
+			if output := strings.TrimSpace(runner.run(t, config)); output != "processed=3;accepted=1;review=1;rejected=1" {
 				t.Fatalf("summary = %q", output)
 			}
 			verifyModularEffectsDatabase(t, config.databasePath)
@@ -127,24 +137,29 @@ func TestModularEffectsEndToEnd(t *testing.T) {
 		}
 		for _, test := range tests {
 			t.Run(test.name, func(t *testing.T) {
-				root := t.TempDir()
-				test.config.databasePath = filepath.Join(root, "PRIVATE_DATABASE_PATH.db")
-				test.config.reportPath = filepath.Join(root, "PRIVATE_REPORT_PATH", "audit.json")
-				test.config.nowEpoch = "1700000000"
-				if test.name != "audit" {
-					test.config.reportPath = filepath.Join(root, "audit.json")
-				}
-				if test.prepare != nil {
-					test.prepare(t, test.config)
-				}
-				output := strings.TrimSpace(runModularEffectsNative(t, binary, test.config))
-				if output != test.want {
-					t.Fatalf("output = %q, want %q", output, test.want)
-				}
-				for _, secret := range []string{modularEffectsToken, test.config.inputPath, test.config.databasePath, test.config.reportPath, "CREATE TABLE", "INSERT INTO"} {
-					if strings.Contains(output, secret) {
-						t.Fatalf("output leaked %q: %q", secret, output)
-					}
+				for _, runner := range runners {
+					t.Run(runner.name, func(t *testing.T) {
+						config := test.config
+						root := t.TempDir()
+						config.databasePath = filepath.Join(root, "PRIVATE_DATABASE_PATH.db")
+						config.reportPath = filepath.Join(root, "PRIVATE_REPORT_PATH", "audit.json")
+						config.nowEpoch = "1700000000"
+						if test.name != "audit" {
+							config.reportPath = filepath.Join(root, "audit.json")
+						}
+						if test.prepare != nil {
+							test.prepare(t, config)
+						}
+						output := strings.TrimSpace(runner.run(t, config))
+						if output != test.want {
+							t.Fatalf("output = %q, want %q", output, test.want)
+						}
+						for _, secret := range []string{modularEffectsToken, config.inputPath, config.databasePath, config.reportPath, "CREATE TABLE", "INSERT INTO"} {
+							if strings.Contains(output, secret) {
+								t.Fatalf("output leaked %q: %q", secret, output)
+							}
+						}
+					})
 				}
 			})
 		}

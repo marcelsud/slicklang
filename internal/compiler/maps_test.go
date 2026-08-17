@@ -42,16 +42,10 @@ function main() -> string {
     for Entry in Base { Tuples = Tuples + ` + "`${Entry}|`" + ` }
 ` + "    `${Ada};${HasAda};${HasNobody};${OriginalLength};${UpdatedLength};${RemovedLength};${ContainsStored};${ContainsMissing};${StoredAbsent};${Missing};${ZeroValue};${FalseValue};${EmptyText};${EmptyLength};${Pairs};${Tuples};${Base};${Removed};${MissingRemoved}`\n" + `}
 `
-	output, diagnostics, err := compiler.Run([]compiler.Source{{Name: "main.slk", Namespace: "root", Text: source}})
-	if err != nil {
-		t.Fatalf("run map contracts: %v", err)
-	}
-	assertNoDiagnostics(t, diagnostics)
 	const expected = "2;true;false;2;3;2;true;false;;;0;false;;0;Ada=5;Linus=4;;(Ada, 2)|(Grace, 3)|;map {Ada: 2, Grace: 3};map {Ada: 5, Linus: 4};map {Ada: 2, Grace: 3}"
-	if output != expected {
-		t.Fatalf("expected %q, found %q", expected, output)
+	if output := runResultEverywhere(t, source); output != expected {
+		t.Fatalf("map contract produced %q, want %q", output, expected)
 	}
-	assertNativeOutput(t, source, expected)
 }
 
 func TestMapsWorkInStructuralStorage(t *testing.T) {

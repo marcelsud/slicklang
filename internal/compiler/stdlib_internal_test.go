@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"go/format"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -127,6 +128,45 @@ func TestStdEnvGeneratedSourceIsDeterministicAndRuntimeBacked(t *testing.T) {
 	}
 	if strings.Count(first, "type slickResult[") != 1 {
 		t.Fatal("generated Go contains more than one Result representation")
+	}
+}
+
+func TestEveryStandardLibraryNativeHasLLVMLowering(t *testing.T) {
+	symbols := nativeSymbols()
+	check := func(native nativeFunction) {
+		t.Helper()
+		if native == "" || isNativeStdBuffer(native) ||
+			native == nativeStdJsonDecode || native == nativeStdJsonEncode {
+			return
+		}
+		symbol := nativeSymbol(native)
+		if symbol == "" {
+			t.Fatalf("%s has no LLVM lowering", native)
+		}
+		if !slices.Contains(symbols, symbol) {
+			t.Fatalf("%s lowers to undeclared LLVM native %s", native, symbol)
+		}
+	}
+	for _, function := range standardLibraryRegistry.functions {
+		check(function.native)
+	}
+	for _, class := range standardLibraryRegistry.classes {
+		for _, method := range class.methods {
+			check(method.native)
+		}
+	}
+	for _, iface := range standardLibraryRegistry.interfaces {
+		for _, method := range iface.methods {
+			check(method.native)
+		}
+	}
+
+	if err := (&llvmGen{}).emitNativeWrapper(
+		&functionDecl{native: nativeFunction("std.missing.Native")},
+		"",
+		"",
+	); err == nil || !strings.Contains(err.Error(), "unknown native Slick function") {
+		t.Fatalf("unknown LLVM native error = %v", err)
 	}
 }
 

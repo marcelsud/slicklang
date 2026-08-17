@@ -45,13 +45,8 @@ func checkResult(t *testing.T, source string) []compiler.Diagnostic {
 	return compiler.Check([]compiler.Source{{Name: "main.slk", Namespace: "root", Text: source}})
 }
 
-// buildAndRunResult compiles source with the generated-Go backend and returns
-// its stdout without the trailing newline.
-func buildAndRunResult(t *testing.T, source string) string {
-	t.Helper()
-	return buildAndRunResultBackend(t, source, compiler.BackendGo)
-}
-
+// buildAndRunResultBackend compiles source with the selected native backend
+// and returns its stdout without the trailing newline.
 func buildAndRunResultBackend(t *testing.T, source string, backend compiler.Backend) string {
 	t.Helper()
 	root := t.TempDir()
@@ -586,7 +581,7 @@ function main() -> string {
     }
 }
 `
-	if output := buildAndRunResult(t, program); output != "missing user" {
+	if output := runResultEverywhere(t, program); output != "missing user" {
 		t.Fatalf("expected propagated Err output, found %q", output)
 	}
 }
@@ -909,10 +904,10 @@ function main() -> null { null }
 	}
 }
 
-// TestDeclaredGenericArgumentsResolveInBothBackends guards the canonical form of
-// a declared generic argument: the checker and the Go backend must agree, or a
-// program that passes Check fails to build.
-func TestDeclaredGenericArgumentsResolveInBothBackends(t *testing.T) {
+// TestDeclaredGenericArgumentsResolveInEveryBackend guards the canonical form
+// of a declared generic argument: the checker and both native backends must
+// agree, or a program that passes Check fails to build.
+func TestDeclaredGenericArgumentsResolveInEveryBackend(t *testing.T) {
 	output := runResultEverywhere(t, `
 class Dog {
     Name: string

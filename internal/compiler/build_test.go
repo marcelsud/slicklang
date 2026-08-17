@@ -15,35 +15,69 @@ import (
 // features, so the output each one documents is verified here instead of being
 // left to rot.
 var exampleOutputs = map[string]string{
-	"hello":              "Ada: woof",
-	"bytes":              "Hello, 世界; 13; 72; bytes[13]",
-	"callables":          "42; 42; 44; 42; parsed 7; empty text",
-	"range-loop":         "0:Ada;2:Grace;",
-	"checked-errors":     "Ada: woof",
-	"constants":          "SLK001; 512; 3; true; -256; Strict",
-	"fieldless-union":    "GET /todos; DELETE /todos/42",
-	"generics":           "42;slick;size=3;root;1;no two;42;42;slick",
-	"maps":               "37; 2; Ada=37;Linus=55;; map {Ada: 37, Grace: 36}",
-	"optional":           "missing user",
-	"optional-throws":    "Ada; Grace has no nickname; missing; Countess",
-	"operators":          "difference=7; product=30; ordered=true; logic=true; negative=-10; grouped=14",
-	"result":             "missing user",
-	"result-match":       "on is true; bad flag maybe; yes; no; false",
-	"result-propagation": "localhost:8080; empty host; 6; zero is not scorable",
-	"result-types":       "42; corrupt payload; no such record; [alpha, beta]; cannot divide by zero; 7",
-	"result-vs-throws":   "recovered from a thrown error; disk unavailable; disk unavailable",
-	"std-env":            "missing;Ada;missing",
-	"tagged-union":       "(6 + (3 * 7)) = 27; missing node",
-	"std-fs-directory":   "a.txt:false,b.txt:false,c:true,\u00e9.txt:false; removed=true",
-	"std-io":             "hello:5;closed",
-	"using":              "value;ABC",
-	"visibility":         "Ada:[private]; Ada: 1500 cents",
-	"std-sqlite":         "todo: ship sqlite",
-	"std-http-server":    "set SLICK_HTTP_SERVER_ADDR",
+	"async-let":           "set SLICK_ASYNC_LEFT_URL and SLICK_ASYNC_RIGHT_URL",
+	"bytes":               "Hello, 世界; 13; 72; bytes[13]",
+	"callables":           "42; 42; 44; 42; parsed 7; empty text",
+	"checked-errors":      "Ada: woof",
+	"constants":           "SLK001; 512; 3; true; -256; Strict",
+	"extensions":          "***; Ada: woof; Grace: meow",
+	"fieldless-union":     "GET /todos; DELETE /todos/42",
+	"generics":            "42;slick;size=3;root;1;no two;42;42;slick",
+	"hello":               "Ada: woof",
+	"maps":                "37; 2; Ada=37;Linus=55;; map {Ada: 37, Grace: 36}",
+	"modular-effects":     "config: MODULAR_EFFECTS_INPUT is required",
+	"operators":           "difference=7; product=30; ordered=true; logic=true; negative=-10; grouped=14",
+	"optional":            "missing user",
+	"optional-throws":     "Ada; Grace has no nickname; missing; Countess",
+	"range-loop":          "0:Ada;2:Grace;",
+	"result":              "missing user",
+	"result-match":        "on is true; bad flag maybe; yes; no; false",
+	"result-propagation":  "localhost:8080; empty host; 6; zero is not scorable",
+	"result-types":        "42; corrupt payload; no such record; [alpha, beta]; cannot divide by zero; 7",
+	"result-vs-throws":    "recovered from a thrown error; disk unavailable; disk unavailable",
+	"std-convert":         "42",
+	"std-env":             "missing;Ada;missing",
+	"std-fs":              "set SLICK_STD_FS_EXAMPLE_PATH to an isolated file path",
+	"std-fs-directory":    "a.txt:false,b.txt:false,c:true,é.txt:false; removed=true",
+	"std-http":            "set SLICK_HTTP_EXAMPLE_URL",
+	"std-http-server":     "set SLICK_HTTP_SERVER_ADDR",
+	"std-io":              "hello:5;closed",
+	"std-json":            `{"Name":"Slick","Port":8080,"Tags":["strict","native"]}`,
+	"std-math":            "20 = 6 * 3 + 2|Divide:DivisionByZero",
+	"std-path":            "report.txt:.txt",
+	"std-sqlite":          "todo: ship sqlite",
+	"std-source-scanning": "café;99:1;true;true;\"café\"",
+	"std-text":            "alpha | beta | gamma;(alpha,beta | gamma)",
+	"tagged-union":        "(6 + (3 * 7)) = 27; missing node",
+	"using":               "value;ABC",
+	"visibility":          "Ada:[private]; Ada: 1500 cents",
 }
 
 func examplePath(project string) string {
 	return filepath.Join("..", "..", "examples", project)
+}
+
+func TestEveryExampleHasLLVMExecutionContract(t *testing.T) {
+	entries, err := os.ReadDir(examplePath(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if _, ok := exampleOutputs[entry.Name()]; ok {
+			continue
+		}
+		switch entry.Name() {
+		case "std-process":
+			// TestStdProcessExampleRunsEverywhere pins its nonzero Status.
+		case "todo-api":
+			// TestTodoAPIExampleServesAndCleansUpUnderLLVM exercises its server lifecycle.
+		default:
+			t.Errorf("example %s has no LLVM execution contract", entry.Name())
+		}
+	}
 }
 
 func TestBuildPathProducesStandaloneExampleBinaries(t *testing.T) {
@@ -66,9 +100,8 @@ func TestBuildPathProducesStandaloneExampleBinaries(t *testing.T) {
 	}
 }
 
-// TestInterpreterMatchesExampleOutput holds `slick run` to the same output the
-// native binary produces, so the two backends cannot drift apart on any
-// documented example.
+// TestInterpreterMatchesExampleOutput pins `slick run` to the same output
+// shared by the generated-Go and LLVM example matrices.
 func TestInterpreterMatchesExampleOutput(t *testing.T) {
 	for project, expected := range exampleOutputs {
 		t.Run(project, func(t *testing.T) {
@@ -107,20 +140,24 @@ func TestLLVMMatchesExampleOutput(t *testing.T) {
 	}
 }
 
-func TestBuildPathStopsBeforeGoBuildOnSlickDiagnostics(t *testing.T) {
+func TestBuildPathStopsBeforeBackendOnSlickDiagnostics(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "main.slk")
 	if err := os.WriteFile(source, []byte(`function main() -> string { 42 }`), 0o644); err != nil {
 		t.Fatalf("write invalid Slick source: %v", err)
 	}
-	binary := filepath.Join(root, "app")
-	diagnostics, err := compiler.BuildPath(source, binary)
-	if err != nil {
-		t.Fatalf("check invalid Slick build: %v", err)
-	}
-	assertDiagnostic(t, diagnostics, "SLK340", "body produces int")
-	if _, err := os.Stat(binary); !os.IsNotExist(err) {
-		t.Fatalf("invalid Slick build created a binary")
+	for _, backend := range []compiler.Backend{compiler.BackendGo, compiler.BackendLLVM} {
+		t.Run(string(backend), func(t *testing.T) {
+			binary := filepath.Join(root, "app-"+string(backend))
+			diagnostics, err := compiler.BuildPathBackend(source, binary, backend)
+			if err != nil {
+				t.Fatalf("check invalid Slick %s build: %v", backend, err)
+			}
+			assertDiagnostic(t, diagnostics, "SLK340", "body produces int")
+			if _, err := os.Stat(binary); !os.IsNotExist(err) {
+				t.Fatalf("invalid Slick %s build created a binary", backend)
+			}
+		})
 	}
 }
 
@@ -185,17 +222,21 @@ function main() -> string {
 	if err := os.WriteFile(source, []byte(program), 0o644); err != nil {
 		t.Fatalf("write Slick control-flow source: %v", err)
 	}
-	binary := filepath.Join(root, "app")
-	diagnostics, err := compiler.BuildPath(source, binary)
-	if err != nil {
-		t.Fatalf("build Slick control-flow binary: %v", err)
-	}
-	assertNoDiagnostics(t, diagnostics)
-	output, err := exec.Command(binary).CombinedOutput()
-	if err != nil {
-		t.Fatalf("run Slick control-flow binary: %v: %s", err, output)
-	}
-	if string(output) != "B2caughtearly\n" {
-		t.Fatalf("unexpected control-flow output %q", output)
+	for _, backend := range []compiler.Backend{compiler.BackendGo, compiler.BackendLLVM} {
+		t.Run(string(backend), func(t *testing.T) {
+			binary := filepath.Join(root, "app-"+string(backend))
+			diagnostics, err := compiler.BuildPathBackend(source, binary, backend)
+			if err != nil {
+				t.Fatalf("build Slick control-flow binary: %v", err)
+			}
+			assertNoDiagnostics(t, diagnostics)
+			output, err := exec.Command(binary).CombinedOutput()
+			if err != nil {
+				t.Fatalf("run Slick control-flow binary: %v: %s", err, output)
+			}
+			if string(output) != "B2caughtearly\n" {
+				t.Fatalf("unexpected control-flow output %q", output)
+			}
+		})
 	}
 }
