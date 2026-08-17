@@ -7,9 +7,9 @@ import (
 	"strings"
 )
 
-// DescriptionSchemaVersion is 8 because declarations and callable types expose
-// operation effect sets.
-const DescriptionSchemaVersion = 8
+// DescriptionSchemaVersion is 9 because compiler-owned declarations expose
+// maintainer-declared stability and computed eligibility.
+const DescriptionSchemaVersion = 9
 
 var ErrUnknownSymbol = errors.New("unknown symbol")
 
@@ -22,6 +22,8 @@ type SymbolDescription struct {
 	CanonicalName      string                   `json:"canonical_name"`
 	Kind               string                   `json:"kind"`
 	Visibility         string                   `json:"visibility"`
+	Stability          Stability                `json:"stability,omitempty"`
+	Eligible           *bool                    `json:"eligible,omitempty"`
 	Documentation      *string                  `json:"documentation"`
 	Annotations        []AnnotationDescription  `json:"annotations"`
 	Type               string                   `json:"type"`
@@ -71,6 +73,8 @@ type FieldDescription struct {
 	Annotations   []AnnotationDescription  `json:"annotations"`
 	Visibility    string                   `json:"visibility"`
 	Documentation *string                  `json:"documentation"`
+	Stability     Stability                `json:"stability,omitempty"`
+	Eligible      *bool                    `json:"eligible,omitempty"`
 	Source        *SourceDescription       `json:"source"`
 }
 
@@ -78,6 +82,8 @@ type MethodDescription struct {
 	CanonicalName  string                   `json:"canonical_name"`
 	Visibility     string                   `json:"visibility"`
 	Documentation  *string                  `json:"documentation"`
+	Stability      Stability                `json:"stability,omitempty"`
+	Eligible       *bool                    `json:"eligible,omitempty"`
 	Annotations    []AnnotationDescription  `json:"annotations"`
 	Parameters     []ParameterDescription   `json:"parameters"`
 	ReturnType     string                   `json:"return_type"`
@@ -107,10 +113,12 @@ func describeCallable(name string) *CallableTypeDescription {
 }
 
 type ChildDescription struct {
-	CanonicalName string  `json:"canonical_name"`
-	Kind          string  `json:"kind"`
-	Documentation *string `json:"documentation"`
-	Visibility    string  `json:"visibility"`
+	CanonicalName string    `json:"canonical_name"`
+	Kind          string    `json:"kind"`
+	Documentation *string   `json:"documentation"`
+	Stability     Stability `json:"stability,omitempty"`
+	Eligible      *bool     `json:"eligible,omitempty"`
+	Visibility    string    `json:"visibility"`
 }
 
 type SourceDescription struct {
@@ -185,10 +193,13 @@ func (p *program) describeSymbol(name string) (SymbolDescription, bool) {
 }
 
 func emptySymbol(name, kind, visibility string) SymbolDescription {
+	stability, eligible := standardDescriptionMetadata(name)
 	return SymbolDescription{
 		CanonicalName:      name,
 		Kind:               kind,
 		Visibility:         visibility,
+		Stability:          stability,
+		Eligible:           eligible,
 		Annotations:        []AnnotationDescription{},
 		TypeParameters:     []string{},
 		Parameters:         []ParameterDescription{},
@@ -226,6 +237,7 @@ func (p *program) describeClass(class *classDecl) SymbolDescription {
 	for _, name := range sortedKeys(class.fields) {
 		field := class.fields[name]
 		fieldType := p.canonicalType(class.namespace, class.aliases, field.typ)
+		stability, eligible := standardDescriptionMetadata(class.qualified + "." + field.name)
 		description.Fields = append(description.Fields, FieldDescription{
 			Name:          field.name,
 			Type:          fieldType,
@@ -233,6 +245,8 @@ func (p *program) describeClass(class *classDecl) SymbolDescription {
 			Annotations:   p.describeAnnotations(field.annotations),
 			Visibility:    visibility(field.name),
 			Documentation: field.documentation,
+			Stability:     stability,
+			Eligible:      eligible,
 			Source:        describeSource(field.pos),
 		})
 	}
@@ -247,6 +261,7 @@ func (p *program) describeClass(class *classDecl) SymbolDescription {
 			declarationParams = method.params
 		}
 		implementationResult := p.canonicalType(implementation.namespace, implementation.aliases, implementation.result)
+		stability, eligible := standardDescriptionMetadata(class.qualified + "." + implementation.name)
 		description.ImplementedMethods = append(description.ImplementedMethods, MethodDescription{
 			CanonicalName:  class.qualified + "." + implementation.name,
 			Documentation:  implementation.documentation,
@@ -257,6 +272,8 @@ func (p *program) describeClass(class *classDecl) SymbolDescription {
 			ReturnCallable: describeCallable(implementationResult),
 			Throws:         sortedSet(implementation.throwSet),
 			Effects:        sortedOperationEffects(implementation.operationSet),
+			Stability:      stability,
+			Eligible:       eligible,
 			Source:         describeSource(implementation.pos),
 		})
 	}
@@ -337,6 +354,7 @@ func (p *program) describeVariant(name string, union *unionDecl, variant *unionV
 }
 
 func (p *program) describeMethod(owner string, method *methodSignature, implementation *functionDecl) MethodDescription {
+	stability, eligible := standardDescriptionMetadata(owner + "." + method.name)
 	var implementationParams []paramDecl
 	if implementation != nil && !implementation.inline {
 		implementationParams = implementation.params
@@ -348,6 +366,8 @@ func (p *program) describeMethod(owner string, method *methodSignature, implemen
 		Documentation:  method.documentation,
 		Visibility:     visibility(method.name),
 		Parameters:     p.describeMergedParameters(method.namespace, method.aliases, method.params, implementationParams),
+		Stability:      stability,
+		Eligible:       eligible,
 		ReturnType:     result,
 		ReturnCallable: describeCallable(result),
 		Throws:         sortedSet(method.throwSet),
@@ -518,19 +538,25 @@ func (p *program) describeChildren(namespace string) []ChildDescription {
 		remainder := strings.TrimPrefix(name, prefix)
 		if separator := strings.IndexByte(remainder, '.'); separator >= 0 {
 			childName := prefix + remainder[:separator]
+			stability, eligible := standardDescriptionMetadata(childName)
 			children[childName] = ChildDescription{
 				CanonicalName: childName,
 				Kind:          "namespace",
 				Visibility:    "public",
 				Documentation: p.namespaceDocumentation[childName],
+				Stability:     stability,
+				Eligible:      eligible,
 			}
 			return
 		}
+		stability, eligible := standardDescriptionMetadata(name)
 		children[name] = ChildDescription{
 			CanonicalName: name,
 			Kind:          kind,
 			Visibility:    visibility(declarationName),
 			Documentation: documentation,
+			Stability:     stability,
+			Eligible:      eligible,
 		}
 	}
 	for _, name := range p.declaredSymbolNames() {

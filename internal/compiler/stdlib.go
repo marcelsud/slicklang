@@ -115,11 +115,13 @@ func isNativeStdBuffer(native nativeFunction) bool {
 }
 
 type standardNamespaceDecl struct {
+	stability     Stability
 	canonical     string
 	documentation string
 }
 
 type standardFunctionDecl struct {
+	stability     Stability
 	canonical     string
 	namespace     string
 	name          string
@@ -132,6 +134,7 @@ type standardFunctionDecl struct {
 }
 
 type standardMethodDecl struct {
+	stability     Stability
 	name          string
 	documentation string
 	params        []paramDecl
@@ -142,12 +145,14 @@ type standardMethodDecl struct {
 }
 
 type standardFieldDecl struct {
+	stability     Stability
 	name          string
 	typ           typeRef
 	documentation string
 }
 
 type standardClassDecl struct {
+	stability      Stability
 	canonical      string
 	namespace      string
 	name           string
@@ -159,6 +164,7 @@ type standardClassDecl struct {
 }
 
 type standardInterfaceDecl struct {
+	stability     Stability
 	canonical     string
 	namespace     string
 	name          string
@@ -166,15 +172,10 @@ type standardInterfaceDecl struct {
 	methods       []standardMethodDecl
 }
 
-// standardLibraryRegistry is the authoritative public Slick surface backed by
-// the Go standard library. The compiler, interpreter, and Go backend all use
-// the synthetic declarations registered from this table.
-var standardLibraryRegistry = struct {
-	namespaces []standardNamespaceDecl
-	functions  []standardFunctionDecl
-	classes    []standardClassDecl
-	interfaces []standardInterfaceDecl
-}{
+// standardLibraryRegistry is the authoritative public Slick surface. The
+// compiler, interpreter, and every backend consume declarations from this
+// table; runtime providers are private implementation details.
+var standardLibraryRegistry = declareStandardLibrary(StabilityStable, standardLibraryRegistryDecl{
 	namespaces: []standardNamespaceDecl{
 		{canonical: "std", documentation: "Provides compiler-owned portable components whose blocking calls inherit the active handler or task cancellation scope and return their module's typed Failure."},
 		{canonical: "std.bytes", documentation: "Converts and inspects immutable binary byte values."},
@@ -1395,7 +1396,7 @@ var standardLibraryRegistry = struct {
 			},
 		},
 	},
-}
+})
 
 func registerStandardLibrary(p *program) {
 	for _, declaration := range standardLibraryRegistry.namespaces {

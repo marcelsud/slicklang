@@ -15,18 +15,18 @@ Use the CLI as the source of truth for the installed compiler. Prefer exact comm
 
 | Goal | Command |
 | --- | --- |
-| Check one file or project | `slick check [path]` |
+| Check one file or project | `slick check [path] [--allow-alpha]` |
 | Report dead source in a valid program | `slick lint [path]` |
 | Report formatting, validity, lint, and complexity together | `slick quality [path]` |
 | Enforce that report as a gate | `slick quality --check [path]` |
 | Run `root.main` with the interpreter | `slick run [path] [arguments...]` |
-| Build a standalone native executable | `slick build [path] -o <output> [--backend=go|llvm]` |
+| Build a standalone native executable | `slick build [path] -o <output> [--backend=go|llvm] [--allow-alpha]` |
 | Format one file or project in place | `slick fmt [path]` |
 | Verify formatting without writing | `slick fmt --check [path]` |
 | Describe a language, standard-library, or project symbol | `slick describe [--json] [--budget <lines>] <symbol> [path]` |
 | Explain a compiler diagnostic | `slick describe [--json] SLKxxx` |
 
-The default path is `.` for every command. `build` always requires `-o` or `--output`. The default backend is Go; pass `--backend=llvm` or `--backend=go` to select a native backend explicitly. `--check` may appear before or after the path for both `fmt` and `quality`. Everything after the project path in `slick run` belongs to the program, not the toolchain.
+The default path is `.` for every command. `build` always requires `-o` or `--output`. The default backend is Go; pass `--backend=llvm` or `--backend=go` to select a native backend explicitly. Alpha declarations and backends require `--allow-alpha`; technical eligibility never promotes them to stable. `--check` may appear before or after the path for both `fmt` and `quality`. Everything after the project path in `slick run` belongs to the program, not the toolchain.
 
 LLVM builds target `x86_64-pc-linux-gnu` and require a Linux/amd64 host, LLVM 18 (`llvm-as-18` and `llc-18`), and a C compiler. HTTP, JSON, and SQLite programs additionally require the libcurl, Jansson, and SQLite development libraries, respectively; native families are linked only when the checked program uses them. Set `SLICK_LLVM_BIN` when the LLVM tools are outside `PATH`.
 
@@ -120,7 +120,7 @@ Use canonical names:
 
 Compiler-owned language and `std.*` symbols need no project path. `root` symbols require the project path unless the current directory is the project root.
 
-Use `--json` for agent or program consumption. Treat `schema_version` as versioned input. Arrays and member ordering are deterministic. Large symbol descriptions may include a `budget` object and omit member sections; raise `--budget <lines>` when the omitted members are required.
+Use `--json` for agent or program consumption. Treat `schema_version` as versioned input. Compiler-owned symbols report maintainer-declared `stability` separately from computed `eligible`; eligibility is information, not promotion. Arrays and member ordering are deterministic. Large symbol descriptions may include a `budget` object and omit member sections; raise `--budget <lines>` when the omitted members are required.
 
 Malformed diagnostic-like text, such as `slk370` or `SLK37`, follows ordinary exact symbol resolution and is not a diagnostic lookup.
 

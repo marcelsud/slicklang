@@ -212,11 +212,26 @@ func newProgram(terminals ...terminalAnnotationDecl) *program {
 	return program
 }
 
+// CheckOptions contains project-level governance choices.
+type CheckOptions struct {
+	AllowAlpha bool
+}
+
 func CheckPath(path string) ([]Diagnostic, error) {
+	return CheckPathWithOptions(path, CheckOptions{})
+}
+
+// CheckPathWithOptions validates the declared stability registries before
+// checking source. Alpha symbol-use enforcement is shared with compilation.
+func CheckPathWithOptions(path string, options CheckOptions) ([]Diagnostic, error) {
+	if err := validateStabilityRegistries(); err != nil {
+		return nil, err
+	}
 	sources, err := loadSources(path)
 	if err != nil {
 		return nil, err
 	}
+	_ = options
 	return Check(sources), nil
 }
 

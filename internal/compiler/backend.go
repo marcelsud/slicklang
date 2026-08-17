@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
 )
 
 // Backend selects a native code generator after a diagnostic-free checked
@@ -17,38 +20,165 @@ const (
 	BackendLLVM Backend = "llvm"
 )
 
-// ParseBackend accepts the documented CLI names. Empty means Go.
-func ParseBackend(name string) (Backend, error) {
-	switch name {
-	case "", string(BackendGo):
-		return BackendGo, nil
-	case string(BackendLLVM):
-		return BackendLLVM, nil
-	default:
-		return "", fmt.Errorf("unknown backend %q (want go or llvm)", name)
+type backendTargetRegistration struct {
+	name      string
+	stability Stability
+}
+
+type backendRegistration struct {
+	name       Backend
+	stability  Stability
+	targets    []backendTargetRegistration
+	implements func(nativeFunction) bool
+}
+
+var backendRegistry = []backendRegistration{
+	{
+		name:       BackendGo,
+		stability:  StabilityStable,
+		targets:    []backendTargetRegistration{{name: hostTargetName(), stability: StabilityStable}},
+		implements: func(nativeFunction) bool { return true },
+	},
+	{
+		name:      BackendLLVM,
+		stability: StabilityStable,
+		targets:   []backendTargetRegistration{{name: "linux-x64", stability: StabilityStable}},
+		implements: func(native nativeFunction) bool {
+			return isNativeStdBuffer(native) ||
+				native == nativeStdJsonDecode ||
+				native == nativeStdJsonEncode ||
+				nativeSymbol(native) != ""
+		},
+	},
+}
+
+// BackendTargetDescription exposes one maintainer-declared backend target.
+type BackendTargetDescription struct {
+	Name      string    `json:"name"`
+	Stability Stability `json:"stability"`
+	Eligible  bool      `json:"eligible"`
+}
+
+// BackendDescription separates maintainer-declared stability from computed
+// technical eligibility.
+type BackendDescription struct {
+	Name      Backend                    `json:"name"`
+	Stability Stability                  `json:"stability"`
+	Eligible  bool                       `json:"eligible"`
+	Targets   []BackendTargetDescription `json:"targets"`
+}
+
+// Backends returns the registry in deterministic name order.
+func Backends() []BackendDescription {
+	descriptions := make([]BackendDescription, 0, len(backendRegistry))
+	for _, declaration := range backendRegistry {
+		eligible := backendEligible(declaration)
+		targets := make([]BackendTargetDescription, 0, len(declaration.targets))
+		for _, target := range declaration.targets {
+			targets = append(targets, BackendTargetDescription{
+				Name: target.name, Stability: target.stability, Eligible: eligible,
+			})
+		}
+		descriptions = append(descriptions, BackendDescription{
+			Name: declaration.name, Stability: declaration.stability, Eligible: eligible, Targets: targets,
+		})
 	}
+	sort.Slice(descriptions, func(left, right int) bool {
+		return descriptions[left].Name < descriptions[right].Name
+	})
+	return descriptions
+}
+
+func backendEligible(backend backendRegistration) bool {
+	for _, record := range standardSymbolRecords(standardLibraryRegistry) {
+		if record.stability == StabilityStable && record.native != "" && !backend.implements(record.native) {
+			return false
+		}
+	}
+	return true
+}
+
+func hostTargetName() string {
+	architecture := runtime.GOARCH
+	if architecture == "amd64" {
+		architecture = "x64"
+	}
+	return runtime.GOOS + "-" + architecture
+}
+
+func backendRegistrationFor(name Backend) (backendRegistration, bool) {
+	for _, backend := range backendRegistry {
+		if backend.name == name {
+			return backend, true
+		}
+	}
+	return backendRegistration{}, false
+}
+
+// ParseBackend accepts the names in the authoritative registry. Empty means Go.
+func ParseBackend(name string) (Backend, error) {
+	if name == "" {
+		return BackendGo, nil
+	}
+	if backend, ok := backendRegistrationFor(Backend(name)); ok {
+		return backend.name, nil
+	}
+	names := make([]string, 0, len(backendRegistry))
+	for _, backend := range backendRegistry {
+		names = append(names, string(backend.name))
+	}
+	sort.Strings(names)
+	return "", fmt.Errorf("unknown backend %q (want %s)", name, strings.Join(names, " or "))
+}
+
+// BuildOptions contains choices that can change target availability without
+// changing Slick source.
+type BuildOptions struct {
+	Backend    Backend
+	AllowAlpha bool
 }
 
 // BuildPath compiles a Slick file or project into a standalone native binary
-// using the Go backend.
+// using the stable Go backend.
 func BuildPath(path, output string) ([]Diagnostic, error) {
-	return BuildPathBackend(path, output, BackendGo)
+	return BuildPathWithOptions(path, output, BuildOptions{Backend: BackendGo})
 }
 
-// BuildPathBackend compiles a checked program with the selected native backend.
-// Checking, generic instantiation, and standard-library registration stay
-// backend-neutral. A missing or incompatible LLVM toolchain fails before any
-// output binary is created.
+// BuildPathBackend preserves the existing API and rejects alpha backends.
 func BuildPathBackend(path, output string, backend Backend) ([]Diagnostic, error) {
+	return BuildPathWithOptions(path, output, BuildOptions{Backend: backend})
+}
+
+// BuildPathWithOptions compiles with an explicit alpha policy.
+func BuildPathWithOptions(path, output string, options BuildOptions) ([]Diagnostic, error) {
 	sources, err := loadSources(path)
 	if err != nil {
 		return nil, err
 	}
-	return BuildSourcesBackend(sources, output, backend)
+	return BuildSourcesWithOptions(sources, output, options)
 }
 
-// BuildSourcesBackend compiles already-loaded sources with the selected backend.
+// BuildSourcesBackend compiles loaded sources and rejects alpha backends.
 func BuildSourcesBackend(sources []Source, output string, backend Backend) ([]Diagnostic, error) {
+	return BuildSourcesWithOptions(sources, output, BuildOptions{Backend: backend})
+}
+
+// BuildSourcesWithOptions validates governance before emission.
+func BuildSourcesWithOptions(sources []Source, output string, options BuildOptions) ([]Diagnostic, error) {
+	if err := validateStabilityRegistries(); err != nil {
+		return nil, err
+	}
+	backend := options.Backend
+	if backend == "" {
+		backend = BackendGo
+	}
+	declaration, ok := backendRegistrationFor(backend)
+	if !ok {
+		return nil, fmt.Errorf("unknown backend %q", backend)
+	}
+	if declaration.stability == StabilityAlpha && !options.AllowAlpha {
+		return nil, fmt.Errorf("backend %s is alpha; pass --allow-alpha to use it", backend)
+	}
 	program, diagnostics := compile(sources)
 	if len(diagnostics) > 0 {
 		return diagnostics, nil
@@ -61,11 +191,11 @@ func BuildSourcesBackend(sources []Source, output string, backend Backend) ([]Di
 		return nil, err
 	}
 	switch backend {
-	case BackendGo, "":
+	case BackendGo:
 		return nil, buildGoBinary(program, output)
 	case BackendLLVM:
 		return nil, buildLLVMBinary(program, output)
 	default:
-		return nil, fmt.Errorf("unknown backend %q", backend)
+		return nil, fmt.Errorf("backend %s has no build implementation", backend)
 	}
 }

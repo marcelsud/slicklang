@@ -193,9 +193,9 @@ func parseDescribeArgs(args []string) (symbol, path string, jsonOutput bool, bud
 }
 
 func reportUsageTo(stderr io.Writer) int {
-	fmt.Fprintln(stderr, "usage: slick check [path]")
+	fmt.Fprintln(stderr, "usage: slick check [path] [--allow-alpha]")
 	fmt.Fprintln(stderr, "       slick run [path] [arguments...]")
-	fmt.Fprintln(stderr, "       slick build [path] -o <output> [--backend=go|llvm]")
+	fmt.Fprintln(stderr, "       slick build [path] -o <output> [--backend=go|llvm] [--allow-alpha]")
 	fmt.Fprintln(stderr, "       slick describe [--json] [--budget <lines>] <symbol|diagnostic-code> [path]")
 	fmt.Fprintln(stderr, "       slick fmt [--check] [path]")
 	fmt.Fprintln(stderr, "       slick lint [path]")
@@ -244,6 +244,12 @@ func writeHumanDescription(output io.Writer, description compiler.SymbolDescript
 	fmt.Fprintf(output, "Name: %s\n", description.CanonicalName)
 	fmt.Fprintf(output, "Kind: %s\n", description.Kind)
 	fmt.Fprintf(output, "Visibility: %s\n", description.Visibility)
+	if description.Stability != "" {
+		fmt.Fprintf(output, "Stability: %s\n", description.Stability)
+		if description.Eligible != nil {
+			fmt.Fprintf(output, "Eligible: %t\n", *description.Eligible)
+		}
+	}
 	writeDocumentation(output, description.Documentation)
 	writeAnnotations(output, description.Annotations)
 

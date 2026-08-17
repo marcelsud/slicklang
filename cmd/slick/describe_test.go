@@ -17,6 +17,8 @@ func TestDescribeHumanOutputContract(t *testing.T) {
 	want := `Name: std.env.Get
 Kind: function
 Visibility: public
+Stability: stable
+Eligible: true
 Documentation:
 Returns the environment value for Name, or null when Name is unset.
 
@@ -39,11 +41,13 @@ func TestDescribeJSONOutputContract(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q", status, stderr.String())
 	}
 	want := `{
-  "schema_version": 8,
+  "schema_version": 9,
   "symbol": {
     "canonical_name": "std.env.Get",
     "kind": "function",
     "visibility": "public",
+    "stability": "stable",
+    "eligible": true,
     "documentation": "Returns the environment value for Name, or null when Name is unset.",
     "annotations": [],
     "type": "",
@@ -88,7 +92,7 @@ func TestDescribeUnknownJSONErrorContract(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q", status, stderr.String())
 	}
 	want := `{
-  "schema_version": 8,
+  "schema_version": 9,
   "error": {
     "code": "unknown_symbol",
     "message": "unknown symbol \"std.env.Missing\"",
@@ -108,8 +112,8 @@ func TestDescribeUsageErrorsStayOnStderr(t *testing.T) {
 		t.Fatalf("status=%d stdout=%q", status, stdout.String())
 	}
 	want := "describe requires a symbol or diagnostic code\n" +
-		"usage: slick check [path]\n       slick run [path] [arguments...]\n" +
-		"       slick build [path] -o <output> [--backend=go|llvm]\n" +
+		"usage: slick check [path] [--allow-alpha]\n       slick run [path] [arguments...]\n" +
+		"       slick build [path] -o <output> [--backend=go|llvm] [--allow-alpha]\n" +
 		"       slick describe [--json] [--budget <lines>] <symbol|diagnostic-code> [path]\n" +
 		"       slick fmt [--check] [path]\n" +
 		"       slick lint [path]\n" +
@@ -140,6 +144,8 @@ func TestDescribeStdIOReaderContract(t *testing.T) {
 	want := `Name: std.io.Reader
 Kind: interface
 Visibility: public
+Stability: stable
+Eligible: true
 Documentation:
 Reads bounded immutable byte chunks and supports deterministic cleanup.
 
@@ -161,11 +167,13 @@ func TestDescribeHumanBudgetContract(t *testing.T) {
 	want := `Name: std
 Kind: namespace
 Visibility: public
+Stability: stable
+Eligible: true
 Documentation:
 Provides compiler-owned portable components whose blocking calls inherit the active handler or task cancellation scope and return their module's typed Failure.
 
 Children:
-  … 16 more entries (re-run with a higher ` + "`--budget`" + `; use ` + "`--budget 23`" + ` for full output)
+  … 16 more entries (re-run with a higher ` + "`--budget`" + `; use ` + "`--budget 25`" + ` for full output)
 `
 	if stdout.String() != want {
 		t.Fatalf("budgeted human output:\n%s\nwant:\n%s", stdout.String(), want)
@@ -179,11 +187,11 @@ func TestDescribeJSONBudgetContract(t *testing.T) {
 		t.Fatalf("status=%d stderr=%q", status, stderr.String())
 	}
 	want := `{
-  "schema_version": 8,
+  "schema_version": 9,
   "budget": {
     "unit": "lines",
     "limit": 39,
-    "required": 122,
+    "required": 156,
     "truncated": true,
     "omitted": [
       {
@@ -196,6 +204,8 @@ func TestDescribeJSONBudgetContract(t *testing.T) {
     "canonical_name": "std",
     "kind": "namespace",
     "visibility": "public",
+    "stability": "stable",
+    "eligible": true,
     "documentation": "Provides compiler-owned portable components whose blocking calls inherit the active handler or task cancellation scope and return their module's typed Failure.",
     "annotations": [],
     "type": "",
