@@ -110,7 +110,8 @@ func TestStableBackendRequiresEveryStableOperation(t *testing.T) {
 		name:       "missing",
 		stability:  StabilityStable,
 		targets:    []backendTargetRegistration{{name: "linux-x64", stability: StabilityStable}},
-		implements: func(nativeFunction) bool { return false },
+		runtimeABI: runtimeABIVersion,
+		operations: runtimeOperationTable{},
 	})
 	defer func() { backendRegistry = original }()
 
@@ -171,7 +172,8 @@ func TestAlphaUseRequiresOptInAndBackendCoverageBeforeEmission(t *testing.T) {
 		name:       "missing-alpha",
 		stability:  StabilityAlpha,
 		targets:    []backendTargetRegistration{{name: "linux-x64", stability: StabilityAlpha}},
-		implements: func(nativeFunction) bool { return false },
+		runtimeABI: runtimeABIVersion,
+		operations: runtimeOperationTable{},
 	})
 	defer func() { backendRegistry = originalBackends }()
 	if _, err := BuildSourcesWithOptions([]Source{source}, output, BuildOptions{Backend: "missing-alpha", AllowAlpha: true}); err == nil ||

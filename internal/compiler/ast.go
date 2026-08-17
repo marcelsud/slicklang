@@ -225,7 +225,7 @@ type callExpression struct {
 	resolvedReceiverStorage string
 	resolvedReceiver        string
 	resolvedThrows          effectSet
-	resolvedNative          nativeFunction
+	resolvedNative          runtimeOperationID
 	// resolvedCallable marks a call that goes through a callable value rather
 	// than a statically resolved function or method.
 	resolvedCallable bool

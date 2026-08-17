@@ -13,16 +13,17 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 ## Backend drivers
 
-`internal/compiler/backend.go` is the authoritative backend, target, artifact, toolchain, capability, operation-support, and driver registry. `backend_driver.go` owns the fixed validate → emit → build → verify → atomic-install sequence and the compiler-owned workspace. Target and toolchain failures happen before workspace creation; drivers write only a candidate path inside that workspace. `BuildPath` remains the stable-Go compatibility entry point, while `BuildOptions.Target` selects only targets advertised by the chosen driver.
+`internal/compiler/backend.go` is the authoritative backend, target, artifact, toolchain, capability, runtime-ABI, operation-support, and driver registry. `runtime_operations.go` owns the stable standard-operation IDs, per-backend implementation tables, and Core-reachability scan that selects runtime families; support is derived from those tables, never a second declaration-side list. `backend_driver.go` owns the fixed validate → emit → build → verify → atomic-install sequence and the compiler-owned workspace. Target, toolchain, ABI, and operation gaps fail before workspace creation; drivers write only a candidate path inside that workspace. `BuildPath` remains the stable-Go compatibility entry point, while `BuildOptions.Target` selects only targets advertised by the chosen driver.
 
 ## Adding a standard-library declaration
 
-`internal/compiler/stdlib.go` holds `standardLibraryRegistry`, the single authoritative public Slick surface. A new declaration must be wired through every backend or one of them fails at runtime:
+`internal/compiler/stdlib.go` holds `standardLibraryRegistry`, the single authoritative public Slick surface. A new native declaration must be wired through every stable backend or registry validation fails:
 
 1. registry entry (namespace, function, class, or interface) plus `documentation` on every symbol and field and the narrowest `effects` set on every authority-using or mutating function/method — undocumented symbols and undeclared transitive effects fail the build;
-2. interpreter case in the matching `callNativeStd*` dispatcher (`stdlib.go`, `stdio.go`, `stdhttp.go`, `stdhttpserver.go`, `stdfs.go`, `stdprocess.go`, `stdsqlite.go`), reached from `callNativeFunction`;
-3. generated-Go case in `emitNativeFunction` (functions) or `emitNativeMethod` in `stdio.go` (methods) — both `default` branches are hard errors;
-4. conditional runtime support: a `uses*` flag on `program`, set in `ast_check.go` (parameter and result types, object expressions, call targets) and `visibility.go` (`checkTypeName`), then honoured in `codegen.go` by `emitRuntime`, `emitDeclarations`, and `emitFunctions`.
+2. one stable ID and family in `runtimeOperationRegistry`, with an implementation-table entry for every backend that claims it;
+3. interpreter behavior in the matching `callNativeStd*` dispatcher (`stdlib.go`, `stdio.go`, `stdhttp.go`, `stdhttpserver.go`, `stdfs.go`, `stdprocess.go`, `stdsqlite.go`), reached from `callNativeFunction`;
+4. generated-Go behavior in `emitNativeFunction` (functions) or `emitNativeMethod` in `stdio.go` (methods), and LLVM behavior in `llvmlib` or Core lowering — missing table entries and unknown dispatches are hard errors;
+5. conditional declaration/runtime support through the matching `uses*` flag on `program`, set by checking all type and value positions. External build dependencies come from operation families reached in checked Core IR, not from source-name scans.
 
 `std.io`, `std.http`, `std.http.server`, `std.process`, `std.sqlite`, and the `std.fs` traversal declarations are gated this way; the rest of `std.fs` is emitted unconditionally. Client `std.http` and inbound `std.http.server` are separate flags — check the more specific `std.http.server` prefix first (`markUsesStdHTTP` / `skipStdHTTP` in `stdhttpserver.go`). Nested namespaces (`std.http.server`) appear as children of their parent in `slick describe`, so only a new top-level `std.*` child shifts the budget pins in `cmd/slick/describe_test.go`.
 

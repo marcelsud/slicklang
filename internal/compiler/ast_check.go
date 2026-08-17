@@ -22,7 +22,7 @@ type callableTarget struct {
 	result       typeRef
 	throwSet     map[string]struct{}
 	operationSet operationEffectSet
-	native       nativeFunction
+	native       runtimeOperationID
 	function     *functionDecl
 }
 
@@ -1239,7 +1239,7 @@ func (p *program) checkCallExpressionEffectsUnchecked(node *callExpression, scop
 // markStandardLibraryUse records that a program reaches a conditionally emitted
 // part of the standard library. Reading a function as a value pulls in the same
 // runtime support calling it would.
-func (p *program) markStandardLibraryUse(namespace string, native nativeFunction) {
+func (p *program) markStandardLibraryUse(namespace string, native runtimeOperationID) {
 	markUsesStdHTTPNamespace(p, namespace)
 	switch namespace {
 	case "std.io":

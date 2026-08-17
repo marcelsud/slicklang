@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	nativeStdProcessRun nativeFunction = "std.process.Run"
+	nativeStdProcessRun runtimeOperationID = "std.process.Run"
 
 	stdProcessStatusName    = "std.process.Status"
 	stdProcessCompletedName = "std.process.Completed"

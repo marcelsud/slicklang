@@ -11,73 +11,71 @@ import (
 	"unicode/utf8"
 )
 
-type nativeFunction string
-
 const (
-	nativeStdBytesFromUtf8        nativeFunction = "std.bytes.FromUtf8"
-	nativeStdBytesToUtf8          nativeFunction = "std.bytes.ToUtf8"
-	nativeStdBytesLength          nativeFunction = "std.bytes.Length"
-	nativeStdBytesAt              nativeFunction = "std.bytes.At"
-	nativeStdBytesConcat          nativeFunction = "std.bytes.Concat"
-	nativeStdBufferNew            nativeFunction = "std.buffer.New"
-	nativeStdBufferPush           nativeFunction = "std.buffer.Push"
-	nativeStdBufferGet            nativeFunction = "std.buffer.Get"
-	nativeStdBufferSet            nativeFunction = "std.buffer.Set"
-	nativeStdBufferLength         nativeFunction = "std.buffer.Length"
-	nativeStdBufferFreeze         nativeFunction = "std.buffer.Freeze"
-	nativeStdBytesSlice           nativeFunction = "std.bytes.Slice"
-	nativeStdBytesFromValues      nativeFunction = "std.bytes.FromValues"
-	nativeStdUTF8DecodeAt         nativeFunction = "std.utf8.DecodeAt"
-	nativeStdUnicodeIsLetter      nativeFunction = "std.unicode.IsLetter"
-	nativeStdUnicodeIsDigit       nativeFunction = "std.unicode.IsDigit"
-	nativeStdUnicodeIsWhitespace  nativeFunction = "std.unicode.IsWhitespace"
-	nativeStdUnicodeIsUpper       nativeFunction = "std.unicode.IsUpper"
-	nativeStdConvertParseInt      nativeFunction = "std.convert.ParseInt"
-	nativeStdConvertParseFloat    nativeFunction = "std.convert.ParseFloat"
-	nativeStdConvertIntToString   nativeFunction = "std.convert.IntToString"
-	nativeStdConvertFloatToString nativeFunction = "std.convert.FloatToString"
-	nativeStdMathDivide           nativeFunction = "std.math.Divide"
-	nativeStdMathRemainder        nativeFunction = "std.math.Remainder"
-	nativeStdEnvGet               nativeFunction = "std.env.Get"
-	nativeStdEnvSet               nativeFunction = "std.env.Set"
-	nativeStdEnvUnset             nativeFunction = "std.env.Unset"
-	nativeStdFSReadText           nativeFunction = "std.fs.ReadText"
-	nativeStdFSWriteText          nativeFunction = "std.fs.WriteText"
-	nativeStdFSExists             nativeFunction = "std.fs.Exists"
-	nativeStdFSCreateDirectoryAll nativeFunction = "std.fs.CreateDirectoryAll"
-	nativeStdFSRemove             nativeFunction = "std.fs.Remove"
-	nativeStdFSReadDirectory      nativeFunction = "std.fs.ReadDirectory"
+	nativeStdBytesFromUtf8        runtimeOperationID = "std.bytes.FromUtf8"
+	nativeStdBytesToUtf8          runtimeOperationID = "std.bytes.ToUtf8"
+	nativeStdBytesLength          runtimeOperationID = "std.bytes.Length"
+	nativeStdBytesAt              runtimeOperationID = "std.bytes.At"
+	nativeStdBytesConcat          runtimeOperationID = "std.bytes.Concat"
+	nativeStdBufferNew            runtimeOperationID = "std.buffer.New"
+	nativeStdBufferPush           runtimeOperationID = "std.buffer.Push"
+	nativeStdBufferGet            runtimeOperationID = "std.buffer.Get"
+	nativeStdBufferSet            runtimeOperationID = "std.buffer.Set"
+	nativeStdBufferLength         runtimeOperationID = "std.buffer.Length"
+	nativeStdBufferFreeze         runtimeOperationID = "std.buffer.Freeze"
+	nativeStdBytesSlice           runtimeOperationID = "std.bytes.Slice"
+	nativeStdBytesFromValues      runtimeOperationID = "std.bytes.FromValues"
+	nativeStdUTF8DecodeAt         runtimeOperationID = "std.utf8.DecodeAt"
+	nativeStdUnicodeIsLetter      runtimeOperationID = "std.unicode.IsLetter"
+	nativeStdUnicodeIsDigit       runtimeOperationID = "std.unicode.IsDigit"
+	nativeStdUnicodeIsWhitespace  runtimeOperationID = "std.unicode.IsWhitespace"
+	nativeStdUnicodeIsUpper       runtimeOperationID = "std.unicode.IsUpper"
+	nativeStdConvertParseInt      runtimeOperationID = "std.convert.ParseInt"
+	nativeStdConvertParseFloat    runtimeOperationID = "std.convert.ParseFloat"
+	nativeStdConvertIntToString   runtimeOperationID = "std.convert.IntToString"
+	nativeStdConvertFloatToString runtimeOperationID = "std.convert.FloatToString"
+	nativeStdMathDivide           runtimeOperationID = "std.math.Divide"
+	nativeStdMathRemainder        runtimeOperationID = "std.math.Remainder"
+	nativeStdEnvGet               runtimeOperationID = "std.env.Get"
+	nativeStdEnvSet               runtimeOperationID = "std.env.Set"
+	nativeStdEnvUnset             runtimeOperationID = "std.env.Unset"
+	nativeStdFSReadText           runtimeOperationID = "std.fs.ReadText"
+	nativeStdFSWriteText          runtimeOperationID = "std.fs.WriteText"
+	nativeStdFSExists             runtimeOperationID = "std.fs.Exists"
+	nativeStdFSCreateDirectoryAll runtimeOperationID = "std.fs.CreateDirectoryAll"
+	nativeStdFSRemove             runtimeOperationID = "std.fs.Remove"
+	nativeStdFSReadDirectory      runtimeOperationID = "std.fs.ReadDirectory"
 
-	nativeStdFSCreateTemporaryDirectory nativeFunction = "std.fs.CreateTemporaryDirectory"
-	nativeStdFSTemporaryDirectoryClose  nativeFunction = "std.fs.TemporaryDirectory.Close"
+	nativeStdFSCreateTemporaryDirectory runtimeOperationID = "std.fs.CreateTemporaryDirectory"
+	nativeStdFSTemporaryDirectoryClose  runtimeOperationID = "std.fs.TemporaryDirectory.Close"
 
-	nativeStdJsonDecode        nativeFunction = "std.json.Decode"
-	nativeStdJsonEncode        nativeFunction = "std.json.Encode"
-	nativeStdPathJoin          nativeFunction = "std.path.Join"
-	nativeStdPathClean         nativeFunction = "std.path.Clean"
-	nativeStdPathBase          nativeFunction = "std.path.Base"
-	nativeStdPathDirectory     nativeFunction = "std.path.Directory"
-	nativeStdPathExtension     nativeFunction = "std.path.Extension"
-	nativeStdPathIsAbsolute    nativeFunction = "std.path.IsAbsolute"
-	nativeStdTextTrim          nativeFunction = "std.text.Trim"
-	nativeStdTextContains      nativeFunction = "std.text.Contains"
-	nativeStdTextStartsWith    nativeFunction = "std.text.StartsWith"
-	nativeStdTextEndsWith      nativeFunction = "std.text.EndsWith"
-	nativeStdTextSplit         nativeFunction = "std.text.Split"
-	nativeStdTextJoin          nativeFunction = "std.text.Join"
-	nativeStdTextReplaceAll    nativeFunction = "std.text.ReplaceAll"
-	nativeStdTextCut           nativeFunction = "std.text.Cut"
-	nativeStdTextQuote         nativeFunction = "std.text.Quote"
-	nativeStdIOReaderFromBytes nativeFunction = "std.io.ReaderFromBytes"
-	nativeStdIOWriterToBytes   nativeFunction = "std.io.WriterToBytes"
-	nativeStdIOReadAll         nativeFunction = "std.io.ReadAll"
-	nativeStdIOCopy            nativeFunction = "std.io.Copy"
-	nativeStdIOReaderRead      nativeFunction = "std.io.bytesReader.Read"
-	nativeStdIOReaderClose     nativeFunction = "std.io.bytesReader.Close"
-	nativeStdIOWriterWrite     nativeFunction = "std.io.BytesWriter.Write"
-	nativeStdIOWriterBytes     nativeFunction = "std.io.BytesWriter.Bytes"
-	nativeStdIOWriterClose     nativeFunction = "std.io.BytesWriter.Close"
-	nativeStdHTTPServerServe   nativeFunction = "std.http.server.Serve"
+	nativeStdJsonDecode        runtimeOperationID = "std.json.Decode"
+	nativeStdJsonEncode        runtimeOperationID = "std.json.Encode"
+	nativeStdPathJoin          runtimeOperationID = "std.path.Join"
+	nativeStdPathClean         runtimeOperationID = "std.path.Clean"
+	nativeStdPathBase          runtimeOperationID = "std.path.Base"
+	nativeStdPathDirectory     runtimeOperationID = "std.path.Directory"
+	nativeStdPathExtension     runtimeOperationID = "std.path.Extension"
+	nativeStdPathIsAbsolute    runtimeOperationID = "std.path.IsAbsolute"
+	nativeStdTextTrim          runtimeOperationID = "std.text.Trim"
+	nativeStdTextContains      runtimeOperationID = "std.text.Contains"
+	nativeStdTextStartsWith    runtimeOperationID = "std.text.StartsWith"
+	nativeStdTextEndsWith      runtimeOperationID = "std.text.EndsWith"
+	nativeStdTextSplit         runtimeOperationID = "std.text.Split"
+	nativeStdTextJoin          runtimeOperationID = "std.text.Join"
+	nativeStdTextReplaceAll    runtimeOperationID = "std.text.ReplaceAll"
+	nativeStdTextCut           runtimeOperationID = "std.text.Cut"
+	nativeStdTextQuote         runtimeOperationID = "std.text.Quote"
+	nativeStdIOReaderFromBytes runtimeOperationID = "std.io.ReaderFromBytes"
+	nativeStdIOWriterToBytes   runtimeOperationID = "std.io.WriterToBytes"
+	nativeStdIOReadAll         runtimeOperationID = "std.io.ReadAll"
+	nativeStdIOCopy            runtimeOperationID = "std.io.Copy"
+	nativeStdIOReaderRead      runtimeOperationID = "std.io.bytesReader.Read"
+	nativeStdIOReaderClose     runtimeOperationID = "std.io.bytesReader.Close"
+	nativeStdIOWriterWrite     runtimeOperationID = "std.io.BytesWriter.Write"
+	nativeStdIOWriterBytes     runtimeOperationID = "std.io.BytesWriter.Bytes"
+	nativeStdIOWriterClose     runtimeOperationID = "std.io.BytesWriter.Close"
+	nativeStdHTTPServerServe   runtimeOperationID = "std.http.server.Serve"
 
 	stdBytesUtf8FailureName         = "std.bytes.Utf8Failure"
 	stdCollectionsBoundsFailureName = "std.collections.BoundsFailure"
@@ -104,14 +102,9 @@ const (
 	stdHTTPServerFailureName        = "std.http.server.Failure"
 )
 
-func isNativeStdBuffer(native nativeFunction) bool {
-	switch native {
-	case nativeStdBufferNew, nativeStdBufferPush, nativeStdBufferGet,
-		nativeStdBufferSet, nativeStdBufferLength, nativeStdBufferFreeze:
-		return true
-	default:
-		return false
-	}
+func isNativeStdBuffer(operation runtimeOperationID) bool {
+	declaration, ok := runtimeOperationRegistry[operation]
+	return ok && declaration.family == runtimeFamilyBuffer
 }
 
 type standardNamespaceDecl struct {
@@ -130,7 +123,7 @@ type standardFunctionDecl struct {
 	params        []paramDecl
 	result        typeRef
 	effects       []string
-	native        nativeFunction
+	native        runtimeOperationID
 }
 
 type standardMethodDecl struct {
@@ -141,7 +134,7 @@ type standardMethodDecl struct {
 	result        typeRef
 	throws        []typeRef
 	effects       []string
-	native        nativeFunction
+	native        runtimeOperationID
 }
 
 type standardFieldDecl struct {
@@ -1482,6 +1475,9 @@ func isAbsoluteCanonicalName(name string) bool {
 }
 
 func (p *program) callNativeFunction(function *functionDecl, frame *runtimeFrame, typeArgs []string) (runtimeValue, error) {
+	if !interpreterRuntimeOperations.implements(function.native) {
+		return runtimeValue{}, fmt.Errorf("interpreter does not implement runtime operation %s", function.native)
+	}
 	if value, err, ok := p.callNativeStdIO(function, frame); ok {
 		return value, err
 	}
@@ -1945,7 +1941,7 @@ func runtimeFSFailureValue(operation, path, message string) runtimeValue {
 }
 
 func (g *goGenerator) emitNativeFunction(function *functionDecl) error {
-	if !goNativeFunctionImplemented(function.native) {
+	if !goRuntimeOperations.implements(function.native) {
 		return fmt.Errorf("unknown native Slick function %s", function.native)
 	}
 	if function.native == nativeStdJsonDecode || function.native == nativeStdJsonEncode || isNativeStdBuffer(function.native) {

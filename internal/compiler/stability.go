@@ -28,7 +28,7 @@ type standardLibraryRegistryDecl struct {
 
 type standardSymbolRecord struct {
 	stability Stability
-	native    nativeFunction
+	native    runtimeOperationID
 	types     []string
 }
 
@@ -128,7 +128,7 @@ func standardSymbolEligible(record standardSymbolRecord) bool {
 		if backend.stability != StabilityStable || record.native == "" {
 			continue
 		}
-		if !backend.implements(record.native) {
+		if !backend.operations.implements(record.native) {
 			return false
 		}
 	}
@@ -147,7 +147,7 @@ func validateStandardSymbolAvailability(name string, backend Backend, target str
 	if !ok {
 		return fmt.Errorf("unknown backend %q", backend)
 	}
-	if record.native != "" && !declaration.implements(record.native) {
+	if record.native != "" && !declaration.operations.implements(record.native) {
 		if target == "" && len(declaration.targets) > 0 {
 			target = declaration.targets[0].name
 		}
@@ -159,7 +159,7 @@ func validateStandardSymbolAvailability(name string, backend Backend, target str
 func (p *program) usedStandardSymbols() []string {
 	records := standardSymbolRecords(standardLibraryRegistry)
 	used := make(map[string]struct{})
-	natives := make(map[nativeFunction]string)
+	natives := make(map[runtimeOperationID]string)
 	for name, record := range records {
 		if record.native != "" {
 			natives[record.native] = name
@@ -365,9 +365,15 @@ func (p *program) validateStandardUsage(backend Backend, target string, allowAlp
 }
 
 func validateStabilityRegistries() error {
+	if err := validateRuntimeOperationRegistry(); err != nil {
+		return err
+	}
 	for _, backend := range backendRegistry {
 		if !backend.stability.valid() {
 			return fmt.Errorf("backend %s has invalid stability %q", backend.name, backend.stability)
+		}
+		if backend.runtimeABI <= 0 {
+			return fmt.Errorf("backend %s has invalid runtime ABI %d", backend.name, backend.runtimeABI)
 		}
 		for _, target := range backend.targets {
 			if !target.stability.valid() {
@@ -382,10 +388,20 @@ func validateStabilityRegistries() error {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	claimedOperations := make(map[runtimeOperationID]string)
 	for _, name := range names {
 		record := records[name]
 		if !record.stability.valid() {
 			return fmt.Errorf("standard-library symbol %s has invalid stability %q", name, record.stability)
+		}
+		if record.native != "" {
+			if _, exists := runtimeOperationRegistry[record.native]; !exists {
+				return fmt.Errorf("standard-library symbol %s claims unknown runtime operation %s", name, record.native)
+			}
+			if claimedBy, duplicate := claimedOperations[record.native]; duplicate {
+				return fmt.Errorf("standard-library symbols %s and %s claim duplicate runtime operation %s", claimedBy, name, record.native)
+			}
+			claimedOperations[record.native] = name
 		}
 		if record.stability == StabilityStable && !standardSymbolEligible(record) {
 			return fmt.Errorf("stable standard-library symbol %s lacks complete stable-backend coverage", name)
@@ -409,9 +425,17 @@ func validateStabilityRegistries() error {
 		}
 		for _, name := range names {
 			record := records[name]
-			if record.stability == StabilityStable && record.native != "" && !backend.implements(record.native) {
+			if record.stability == StabilityStable && record.native != "" && !backend.operations.implements(record.native) {
 				return fmt.Errorf("stable backend %s lacks standard-library symbol %s", backend.name, name)
 			}
+		}
+		if backend.runtimeABI != runtimeABIVersion {
+			return fmt.Errorf("stable backend %s runtime ABI %d is incompatible with compiler ABI %d", backend.name, backend.runtimeABI, runtimeABIVersion)
+		}
+	}
+	for operation := range runtimeOperationRegistry {
+		if _, claimed := claimedOperations[operation]; !claimed {
+			return fmt.Errorf("runtime operation %s has no standard-library declaration", operation)
 		}
 	}
 	return nil

@@ -15,9 +15,9 @@ import (
 )
 
 const (
-	nativeStdHTTPFetch        nativeFunction = "std.http.Fetch"
-	nativeStdHTTPHeaderValues nativeFunction = "std.http.HeaderValues"
-	nativeStdHTTPStatusText   nativeFunction = "std.http.StatusText"
+	nativeStdHTTPFetch        runtimeOperationID = "std.http.Fetch"
+	nativeStdHTTPHeaderValues runtimeOperationID = "std.http.HeaderValues"
+	nativeStdHTTPStatusText   runtimeOperationID = "std.http.StatusText"
 
 	stdHTTPRequestName  = "std.http.Request"
 	stdHTTPResponseName = "std.http.Response"
