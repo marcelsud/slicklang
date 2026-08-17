@@ -27,7 +27,10 @@ enum SlickValue {
     Buffer(Arc<Mutex<Vec<SlickValue>>>),
     Optional(Option<Box<SlickValue>>),
     Result(bool, Box<SlickValue>),
-    Object { type_name: &'static str, fields: Vec<(&'static str, SlickValue)>, resource: Option<u64> },
+    // The message slot carries a shorthand error constructor's text. It is
+    // failure metadata, not a declared field: it never participates in field
+    // access or structural equality.
+    Object { type_name: &'static str, fields: Vec<(&'static str, SlickValue)>, resource: Option<u64>, message: String },
     Union { type_name: &'static str, variant: &'static str, tag: i32, fields: Vec<SlickValue> },
     Callable(SlickCallable),
 }
@@ -99,6 +102,11 @@ impl SlickContext {
 
     fn cancelled(&self) -> bool {
         self.cancellations.iter().any(|flag| flag.load(Ordering::Acquire))
+    }
+
+    // Cleanup observes no cancellation: a cancelled scope still runs Close.
+    fn without_cancel(&self) -> Self {
+        Self { cancellations: Vec::new() }
     }
 }
 
@@ -286,8 +294,8 @@ fn slick_equal(left: &SlickValue, right: &SlickValue) -> bool {
             left_ok == right_ok && slick_equal(left, right)
         }
         (
-            SlickValue::Object { type_name: left_type, fields: left_fields, resource: left_resource },
-            SlickValue::Object { type_name: right_type, fields: right_fields, resource: right_resource },
+            SlickValue::Object { type_name: left_type, fields: left_fields, resource: left_resource, .. },
+            SlickValue::Object { type_name: right_type, fields: right_fields, resource: right_resource, .. },
         ) => {
             if left_resource.is_some() || right_resource.is_some() {
                 left_resource.is_some() && left_resource == right_resource
@@ -403,7 +411,7 @@ fn slick_builtin_method(receiver: &SlickValue, method: &str, arguments: &[SlickV
             Some(SlickOutcome::Value(match sliced {
                 Some(values) => SlickValue::Result(true, Box::new(SlickValue::Array(values))),
                 None => SlickValue::Result(false, Box::new(SlickValue::Object {
-                    type_name: "std.collections.BoundsFailure", fields: vec![], resource: None,
+                    type_name: "std.collections.BoundsFailure", fields: vec![], resource: None, message: String::new(),
                 })),
             }))
         }
@@ -444,11 +452,17 @@ fn slick_builtin_method(receiver: &SlickValue, method: &str, arguments: &[SlickV
     }
 }
 fn slick_field(value: &SlickValue, name: &str) -> Result<SlickValue, SlickFailure> {
-    match value {
-
+    // Narrowing proves an optional receiver present before a field read is
+    // allowed, so the payload is the real receiver.
+    let receiver = match value {
+        SlickValue::Optional(Some(payload)) => payload.as_ref(),
+        receiver => receiver,
+    };
+    match receiver {
         SlickValue::Object { fields, .. } => fields.iter().find(|(field, _)| *field == name)
             .map(|(_, value)| value.clone())
             .ok_or_else(|| SlickFailure::host(format!("object has no field {name}"))),
+        SlickValue::Optional(None) => Err(SlickFailure::host(format!("null has no field {name}"))),
         _ => Err(SlickFailure::host(format!("value has no field {name}"))),
     }
 }
@@ -560,10 +574,11 @@ fn slick_failure_text(failure: &SlickFailure) -> String {
             let type_name = slick_type_name(value);
             let message = match value {
                 SlickValue::String(message) => message.clone(),
-                SlickValue::Object { fields, .. } => fields.iter()
+                SlickValue::Object { fields, message, .. } => fields.iter()
                     .find(|(name, _)| *name == "Message" || *name == "message")
                     .map(|(_, value)| slick_format(value))
-                    .unwrap_or_default(),
+                    .filter(|message| !message.is_empty())
+                    .unwrap_or_else(|| message.clone()),
                 _ => String::new(),
             };
             if message.is_empty() { type_name.to_string() } else { format!("{type_name}: {message}") }
@@ -576,8 +591,11 @@ fn slick_failure_text(failure: &SlickFailure) -> String {
     }
 }
 
+// A catch arm on the Error interface claims every Slick failure; a concrete
+// error class claims only its own type.
 fn slick_match_failure(failure: &SlickFailure, type_name: &str) -> bool {
-    matches!(&failure.kind, SlickFailureKind::Slick(value) if slick_type_name(value) == type_name)
+    matches!(&failure.kind, SlickFailureKind::Slick(value)
+        if type_name == "Error" || slick_type_name(value) == type_name)
 }
 
 fn slick_result_payload(value: SlickValue, want_ok: bool) -> Option<SlickValue> {

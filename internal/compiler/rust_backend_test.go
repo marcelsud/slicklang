@@ -457,6 +457,68 @@ func TestRustLanguageRuntimeMatchesInterpreter(t *testing.T) {
 	}
 }
 
+func TestRustOptionalFieldsCatchAllAndErrorValuesMatchInterpreter(t *testing.T) {
+	source := Source{Name: "main.slk", Namespace: "root", Text: `
+class Bad implements Error { Message: string }
+class User {
+    Name: string
+    Nickname: string?
+}
+function Find(Present: bool) -> User? {
+    if (Present) { User { Name: "Ada" } } else { null }
+}
+function Fail() -> string throws Bad { throw Bad("boom") }
+function Blank() -> int? { let Ignored = 1 }
+function main() -> (bool,bool,string,string,bool,bool) {
+    let Omitted = User { Name: "Ada" }
+    let Explicit = User { Name: "Ada", Nickname: null }
+    let Nickname = Omitted.Nickname
+    let Found = Find(true)
+    let Name = if (Found == null) { "none" } else { Found.Name }
+    let Caught = Fail() catch { Error as Reason => "caught" }
+    let Blanks = [Blank()]
+    let Head = Blanks.Get(0)
+    let SameShape = Omitted == Explicit
+    let NoNickname = Nickname == null
+    let SameError = Bad("x") == Bad("y")
+    let BlankAbsent = Head == null
+    let Result = (SameShape, NoNickname, Name, Caught, BlankAbsent, SameError)
+    Result
+}
+`}
+	interpreted, diagnostics, err := Run([]Source{source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireNoRustDiagnostics(t, diagnostics)
+	if want := "(true, true, Ada, caught, true, true)"; interpreted != want {
+		t.Fatalf("interpreter output = %q, want %q", interpreted, want)
+	}
+	binary := buildRustTestProgram(t, source)
+	output, err := exec.Command(binary).CombinedOutput()
+	if err != nil || string(output) != interpreted+"\n" {
+		t.Fatalf("Rust output=%q error=%v, want %q", output, err, interpreted+"\n")
+	}
+}
+
+func TestRustErrorShorthandCarriesFailureMessage(t *testing.T) {
+	source := Source{Name: "main.slk", Namespace: "root", Text: `
+class Bad implements Error { Message: string }
+function Fail() -> string throws Bad { throw Bad("boom") }
+function main() -> string throws Bad { Fail() }
+`}
+	_, diagnostics, interpretedErr := Run([]Source{source})
+	requireNoRustDiagnostics(t, diagnostics)
+	if interpretedErr == nil {
+		t.Fatal("interpreter accepted an uncaught shorthand failure")
+	}
+	binary := buildRustTestProgram(t, source)
+	output, err := exec.Command(binary).CombinedOutput()
+	if err == nil || string(output) != interpretedErr.Error()+"\n" {
+		t.Fatalf("Rust shorthand output=%q error=%v, want %q", output, err, interpretedErr.Error()+"\n")
+	}
+}
+
 func TestRustCleanupPreservesPrimaryAndSuppressedFailures(t *testing.T) {
 	source := Source{Name: "main.slk", Namespace: "root", Text: `
 class Failure implements Error { Message: string }

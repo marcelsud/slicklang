@@ -137,9 +137,11 @@ type rustGenerator struct {
 		name  string
 		tag   int
 	}
-	lambdas   []rustLambda
-	temporary int
-	scope     int
+	classes      map[string]coreClass
+	errorClasses map[string]bool
+	lambdas      []rustLambda
+	temporary    int
+	scope        int
 }
 
 func newRustGenerator(core coreProgram) *rustGenerator {
@@ -151,6 +153,8 @@ func newRustGenerator(core coreProgram) *rustGenerator {
 			name  string
 			tag   int
 		}),
+		classes:      make(map[string]coreClass, len(core.Classes)),
+		errorClasses: make(map[string]bool),
 	}
 	for _, function := range core.Functions {
 		generator.functions[function.ID] = function
@@ -166,6 +170,12 @@ func newRustGenerator(core coreProgram) *rustGenerator {
 				name  string
 				tag   int
 			}{union: union.ID, name: name, tag: variant.Tag}
+		}
+	}
+	for _, class := range core.Classes {
+		generator.classes[class.ID] = class
+		if class.Error {
+			generator.errorClasses[class.ID] = true
 		}
 	}
 	return generator
@@ -512,7 +522,8 @@ func (g *rustGenerator) rawExpression(expression coreExpression, level int, scop
 		return rustInlineBlock(lines, level), nil
 	case "object":
 		lines := make([]string, 0, len(expression.Fields)+1)
-		fields := make([]string, 0, len(expression.Fields))
+		values := make(map[string]string, len(expression.Fields))
+		order := make([]string, 0, len(expression.Fields))
 		for _, field := range expression.Fields {
 			value, err := g.expression(field.Value, level+1, scope)
 			if err != nil {
@@ -520,9 +531,30 @@ func (g *rustGenerator) rawExpression(expression coreExpression, level int, scop
 			}
 			name := g.nextTemporary()
 			lines = append(lines, fmt.Sprintf("let %s = slick_value!(%s);", name, value))
-			fields = append(fields, fmt.Sprintf("(%s, %s)", rustStringLiteral(field.Name), name))
+			values[field.Name] = name
+			order = append(order, field.Name)
 		}
-		lines = append(lines, fmt.Sprintf("SlickOutcome::Value(SlickValue::Object { type_name: %s, fields: vec![%s], resource: None })", rustStringLiteral(expression.Declaration), strings.Join(fields, ", ")))
+		// An object literal may omit an optional field; the value still carries
+		// every declared field, initialized to tagged absence.
+		fields := make([]string, 0, len(expression.Fields))
+		for _, field := range g.classes[expression.Declaration].Fields {
+			value, ok := values[field.Name]
+			if !ok {
+				value = "SlickValue::Optional(None)"
+				if !strings.HasSuffix(field.Type, "?") {
+					value = "SlickValue::Null"
+				}
+			}
+			delete(values, field.Name)
+			fields = append(fields, fmt.Sprintf("(%s, %s)", rustStringLiteral(field.Name), value))
+		}
+		for _, name := range order {
+			if value, ok := values[name]; ok {
+				fields = append(fields, fmt.Sprintf("(%s, %s)", rustStringLiteral(name), value))
+			}
+		}
+		lines = append(lines, fmt.Sprintf("SlickOutcome::Value(SlickValue::Object { type_name: %s, fields: vec![%s], resource: None, message: String::new() })",
+			rustStringLiteral(expression.Declaration), strings.Join(fields, ", ")))
 		return rustInlineBlock(lines, level), nil
 	case "lambda":
 		id := fmt.Sprintf("lambda.%d", len(g.lambdas))
@@ -669,6 +701,22 @@ func (g *rustGenerator) call(expression coreExpression, level int, scope string)
 			rustStringLiteral(variant.union), rustStringLiteral(variant.name), variant.tag, strings.Join(values, ", ")))
 		return rustInlineBlock(lines, level), nil
 	}
+	// An error class doubles as a shorthand constructor whose single argument is
+	// only the failure message: no declared field is set, so the text travels in
+	// the value's failure metadata instead.
+	if g.errorClasses[expression.Declaration] {
+		values, lines, err := g.evaluatedExpressions(expression.Arguments, level, scope)
+		if err != nil {
+			return "", err
+		}
+		message := "String::new()"
+		if len(values) > 0 {
+			message = fmt.Sprintf("slick_format(&%s)", values[0])
+		}
+		lines = append(lines, fmt.Sprintf("SlickOutcome::Value(SlickValue::Object { type_name: %s, fields: vec![], resource: None, message: %s })",
+			rustStringLiteral(expression.Declaration), message))
+		return rustInlineBlock(lines, level), nil
+	}
 	lines := make([]string, 0, len(expression.Arguments)+3)
 	callee := ""
 	receiver := ""
@@ -792,7 +840,9 @@ func (g *rustGenerator) usingExpression(expression coreExpression, level int, sc
 	return rustInlineBlock([]string{
 		fmt.Sprintf("let %s = slick_value!(%s);", resource, initializer),
 		fmt.Sprintf("let slick_primary = { let mut %s = %s.clone(); %s };", binding, resource, body),
-		fmt.Sprintf("let slick_cleanup = slick_call_method(slick_context, %s, \"Close\", vec![]);", resource),
+		// Cleanup runs with cancellation detached, so a cancelled scope still
+		// closes its resource.
+		fmt.Sprintf("let slick_cleanup = slick_call_method(&slick_context.without_cancel(), %s, \"Close\", vec![]);", resource),
 		"slick_combine_outcomes(slick_primary, slick_cleanup)",
 	}, level), nil
 }
