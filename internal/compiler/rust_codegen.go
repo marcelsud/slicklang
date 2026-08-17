@@ -4,111 +4,17 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
-	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 )
 
 func validateRustCore(core coreProgram, runtime backendRuntimeInputs) error {
-	if err := validateNativeCore(core, runtime); err != nil {
-		return fmt.Errorf("Rust lowering: %w", err)
-	}
-	if operation, location, ok := firstRustRuntimeOperation(core); ok {
-		return rustLoweringError(location, "standard-library operation %s is not supported", operation)
-	}
-	if len(runtime.families) > 0 {
-		families := make([]string, 0, len(runtime.families))
-		for family := range runtime.families {
-			families = append(families, string(family))
-		}
-		sort.Strings(families)
-		return rustLoweringError(coreLocation{}, "runtime families %s are not supported", strings.Join(families, ", "))
-	}
-	for _, function := range core.Functions {
-		if function.ID == "root.main" && len(function.Parameters) != 0 {
-			return rustLoweringError(function.Location, "root.main parameters are not supported")
-		}
-	}
-	return nil
+	return validateLanguageCore(core, runtime, "Rust")
 }
 
 func rustLoweringError(location coreLocation, format string, arguments ...any) error {
-	return primitiveLoweringError("Rust", location, format, arguments...)
-}
-
-func firstRustRuntimeOperation(core coreProgram) (runtimeOperationID, coreLocation, bool) {
-	var block func(coreBlock) (runtimeOperationID, coreLocation, bool)
-	var expression func(coreExpression) (runtimeOperationID, coreLocation, bool)
-	expression = func(value coreExpression) (runtimeOperationID, coreLocation, bool) {
-		if value.Operation != "" && !strings.HasPrefix(string(value.Operation), "core.") {
-			return value.Operation, value.Location, true
-		}
-		if value.Cleanup != nil && value.Cleanup.Operation != "" &&
-			!strings.HasPrefix(string(value.Cleanup.Operation), "core.") {
-			return value.Cleanup.Operation, value.Location, true
-		}
-		for _, child := range []*coreExpression{value.Value, value.Left, value.Right, value.Receiver} {
-			if child != nil {
-				if operation, location, ok := expression(*child); ok {
-					return operation, location, true
-				}
-			}
-		}
-		for _, children := range [][]coreExpression{value.Elements, value.Arguments} {
-			for _, child := range children {
-				if operation, location, ok := expression(child); ok {
-					return operation, location, true
-				}
-			}
-		}
-		for _, entry := range value.Entries {
-			for _, child := range []coreExpression{entry.Key, entry.Value} {
-				if operation, location, ok := expression(child); ok {
-					return operation, location, true
-				}
-			}
-		}
-		for _, field := range value.Fields {
-			if operation, location, ok := expression(field.Value); ok {
-				return operation, location, true
-			}
-		}
-		for _, arm := range value.Arms {
-			if operation, location, ok := expression(arm.Value); ok {
-				return operation, location, true
-			}
-		}
-		for _, child := range []*coreBlock{value.Body, value.Alternate} {
-			if child != nil {
-				if operation, location, ok := block(*child); ok {
-					return operation, location, true
-				}
-			}
-		}
-		return "", coreLocation{}, false
-	}
-	block = func(value coreBlock) (runtimeOperationID, coreLocation, bool) {
-		for _, statement := range value.Statements {
-			if statement.Value != nil {
-				if operation, location, ok := expression(*statement.Value); ok {
-					return operation, location, true
-				}
-			}
-			if statement.Body != nil {
-				if operation, location, ok := block(*statement.Body); ok {
-					return operation, location, true
-				}
-			}
-		}
-		return "", coreLocation{}, false
-	}
-	for _, function := range core.Functions {
-		if operation, location, ok := block(function.Body); ok {
-			return operation, location, true
-		}
-	}
-	return "", coreLocation{}, false
+	return backendLoweringError("Rust", location, format, arguments...)
 }
 
 func generateRust(core coreProgram) (string, error) {
