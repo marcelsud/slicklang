@@ -10,7 +10,7 @@ import (
 )
 
 func TestRegisteredBackendDriversDeclareBuildContracts(t *testing.T) {
-	if names := BackendNames(); !reflect.DeepEqual(names, []string{"go", "llvm", "rust"}) {
+	if names := BackendNames(); !reflect.DeepEqual(names, []string{"bun", "go", "llvm", "rust"}) {
 		t.Fatalf("backend names = %v", names)
 	}
 	for _, registration := range backendRegistry {

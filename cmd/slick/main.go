@@ -169,12 +169,12 @@ func parseBuildOptions(args []string) (string, string, compiler.BuildOptions, er
 }
 
 func buildSuccessMessage(output string, options compiler.BuildOptions) string {
-	if options.Backend != compiler.BackendRust {
-		return fmt.Sprintf("built %s", output)
-	}
 	for _, backend := range compiler.Backends() {
 		if backend.Name != options.Backend {
 			continue
+		}
+		if backend.Stability != compiler.StabilityAlpha {
+			return fmt.Sprintf("built %s", output)
 		}
 		for _, target := range backend.Targets {
 			if options.Target == "" || target.Name == options.Target {

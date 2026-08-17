@@ -77,10 +77,11 @@ type backendEmission struct {
 // coordinator owns the workspace and installation, so a driver can only create
 // a candidate artifact and cannot partially replace the requested output.
 type backendDriver struct {
-	validate func(backendDriverInput) (backendToolchain, error)
-	emit     func(backendDriverInput, string) (backendEmission, error)
-	build    func(backendDriverInput, backendEmission, string) error
-	verify   func(backendDriverInput, string) error
+	checkCore func(backendDriverInput) error
+	validate  func(backendDriverInput) (backendToolchain, error)
+	emit      func(backendDriverInput, string) (backendEmission, error)
+	build     func(backendDriverInput, backendEmission, string) error
+	verify    func(backendDriverInput, string) error
 }
 
 type backendDriverID string
@@ -89,12 +90,14 @@ const (
 	backendDriverGo   backendDriverID = "go"
 	backendDriverLLVM backendDriverID = "llvm"
 	backendDriverRust backendDriverID = "rust"
+	backendDriverBun  backendDriverID = "bun"
 )
 
 var backendDriverRegistry = map[backendDriverID]func(*program) backendDriver{
 	backendDriverGo:   goBackendDriver,
 	backendDriverLLVM: llvmBackendDriver,
 	backendDriverRust: rustBackendDriver,
+	backendDriverBun:  bunBackendDriver,
 }
 
 func registeredBackendDriver(id backendDriverID, program *program) (backendDriver, bool) {

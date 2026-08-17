@@ -230,6 +230,7 @@ var (
 	goRuntimeOperations          = runtimeOperationsFor(runtimeImplementationGo)
 	llvmRuntimeOperations        = runtimeOperationsFor(runtimeImplementationLLVM)
 	rustRuntimeOperations        = runtimeOperationTable{}
+	bunRuntimeOperations         = runtimeOperationTable{}
 )
 
 func runtimeInputsForCore(core coreProgram) (backendRuntimeInputs, error) {

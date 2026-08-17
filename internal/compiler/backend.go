@@ -18,6 +18,8 @@ const (
 	BackendLLVM Backend = "llvm"
 	// BackendRust lowers allocation-free Core IR through a pinned Cargo toolchain.
 	BackendRust Backend = "rust"
+	// BackendBun lowers allocation-free Core IR to a Bun-compiled executable.
+	BackendBun Backend = "bun"
 )
 
 type backendTargetRegistration struct {
@@ -83,6 +85,30 @@ var backendRegistry = []backendRegistration{
 		runtimeABI:          runtimeABIVersion,
 		operations:          rustRuntimeOperations,
 		driver:              backendDriverRust,
+	},
+	{
+		name:      BackendBun,
+		stability: StabilityAlpha,
+		targets: []backendTargetRegistration{
+			{
+				name:         bunTargetLinuxX64Modern,
+				stability:    StabilityAlpha,
+				platform:     backendPlatform{operatingSystem: "linux", architecture: "x64"},
+				artifactKind: ArtifactNativeExecutable,
+				toolchain:    backendToolchainRegistration{name: "bun", version: bunToolchainVersion},
+			},
+			{
+				name:         bunTargetLinuxX64Baseline,
+				stability:    StabilityAlpha,
+				platform:     backendPlatform{operatingSystem: "linux", architecture: "x64"},
+				artifactKind: ArtifactNativeExecutable,
+				toolchain:    backendToolchainRegistration{name: "bun", version: bunToolchainVersion},
+			},
+		},
+		runtimeCapabilities: []backendRuntimeCapability{backendCapabilityEmbeddedRuntime},
+		runtimeABI:          runtimeABIVersion,
+		operations:          bunRuntimeOperations,
+		driver:              backendDriverBun,
 	},
 }
 
@@ -244,7 +270,7 @@ func BuildSourcesWithOptions(sources []Source, output string, options BuildOptio
 	if len(diagnostics) > 0 {
 		return diagnostics, nil
 	}
-	if err := program.validateStandardUsage(backend, target.name, options.AllowAlpha, true); err != nil {
+	if err := program.validateStandardUsage(backend, target.name, options.AllowAlpha, false); err != nil {
 		return nil, err
 	}
 	core, err := program.lowerCore()
@@ -255,21 +281,27 @@ func BuildSourcesWithOptions(sources []Source, output string, options BuildOptio
 	if err != nil {
 		return nil, fmt.Errorf("resolve runtime inputs: %w", err)
 	}
+	driver, ok := registeredBackendDriver(declaration.driver, program)
+	input := backendDriverInput{
+		core:         core,
+		target:       target,
+		runtime:      runtimeInputs,
+		artifactKind: target.artifactKind,
+	}
+	if driver.checkCore != nil {
+		if err := driver.checkCore(input); err != nil {
+			return nil, err
+		}
+	}
+	if err := program.validateStandardUsage(backend, target.name, options.AllowAlpha, true); err != nil {
+		return nil, err
+	}
 	if err := validateRuntimeContract(declaration, runtimeInputs); err != nil {
 		return nil, err
 	}
-	driver, ok := registeredBackendDriver(declaration.driver, program)
 	if !ok {
 		return nil, fmt.Errorf("backend %s has no build driver", backend)
 	}
-	plan := backendBuildPlan{
-		input: backendDriverInput{
-			core:         core,
-			target:       target,
-			runtime:      runtimeInputs,
-			artifactKind: target.artifactKind,
-		},
-		output: output,
-	}
+	plan := backendBuildPlan{input: input, output: output}
 	return nil, executeBuildPlan(driver, plan)
 }

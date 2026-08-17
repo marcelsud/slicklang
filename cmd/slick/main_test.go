@@ -53,6 +53,21 @@ func TestRustBuildStatusReportsPinnedToolchainAndTarget(t *testing.T) {
 	}
 }
 
+func TestBunBuildStatusReportsPinnedToolchainAndTarget(t *testing.T) {
+	for _, test := range []struct {
+		target string
+		want   string
+	}{
+		{want: "built bin/app (backend bun, target bun-linux-x64-modern, bun 1.3.14)"},
+		{target: "bun-linux-x64-baseline", want: "built bin/app (backend bun, target bun-linux-x64-baseline, bun 1.3.14)"},
+	} {
+		message := buildSuccessMessage("bin/app", compiler.BuildOptions{Backend: compiler.BackendBun, Target: test.target})
+		if message != test.want {
+			t.Fatalf("message = %q, want %q", message, test.want)
+		}
+	}
+}
+
 func TestBuildAndCheckParseExplicitAlphaOptIn(t *testing.T) {
 	_, _, build, err := parseBuildOptions([]string{"examples/hello", "-o", "bin/hello", "--allow-alpha"})
 	if err != nil || !build.AllowAlpha {

@@ -55,25 +55,40 @@ function WideEqual() -> bool {
     (1,2,3,4,5,6,7,8,9,10,11,12,13) == (1,2,3,4,5,6,7,8,9,10,11,12,13)
 }
 
-function main() -> (int,bool,int,string,float,float,float,float,int,bool) {
-    (Choose(Score(5)), false && Explode(), Maximum + 1, "ok", -0.0, 1e20, 1e-7, 1e6, Pick(true), WideEqual())
+function Rebind(Value: int) -> int {
+    let Value = 5
+    Value
+}
+
+function BranchShadow(Value: int) -> int {
+    let Inner = if (true) {
+        let Value = 7
+        Value
+    } else {
+        0
+    }
+    Value + Inner
+}
+
+function main() -> (int,bool,int,string,float,float,float,float,int,bool,int,int) {
+    (Choose(Score(5)), false && Explode(), Maximum + 1, "ok😀", -0.0, 1e20, 1e-7, 1e6, Pick(true), WideEqual(), Rebind(1), BranchShadow(3))
 }`
 
-func TestRustBackendMatchesPrimitiveEngines(t *testing.T) {
+func TestPrimitiveBackendsMatchInterpreter(t *testing.T) {
 	source := Source{Name: "main.slk", Namespace: "root", Text: rustPrimitiveProgram}
 	interpreted, diagnostics, err := Run([]Source{source})
 	if err != nil {
 		t.Fatalf("run interpreter: %v", err)
 	}
 	requireNoRustDiagnostics(t, diagnostics)
-	if want := "(230, false, -9223372036854775808, ok, -0, 1e+20, 1e-07, 1e+06, 7, true)"; interpreted != want {
+	if want := "(230, false, -9223372036854775808, ok😀, -0, 1e+20, 1e-07, 1e+06, 7, true, 5, 10)"; interpreted != want {
 		t.Fatalf("interpreter output = %q, want %q", interpreted, want)
 	}
 
-	for _, backend := range []Backend{BackendGo, BackendLLVM, BackendRust} {
+	for _, backend := range []Backend{BackendGo, BackendLLVM, BackendRust, BackendBun} {
 		t.Run(string(backend), func(t *testing.T) {
 			binary := filepath.Join(t.TempDir(), "app")
-			options := BuildOptions{Backend: backend, AllowAlpha: backend == BackendRust}
+			options := BuildOptions{Backend: backend, AllowAlpha: backend == BackendRust || backend == BackendBun}
 			diagnostics, err := BuildSourcesWithOptions([]Source{source}, binary, options)
 			if err != nil {
 				if backend == BackendLLVM && strings.Contains(err.Error(), "LLVM") && strings.Contains(err.Error(), "not found") {
