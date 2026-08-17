@@ -184,6 +184,7 @@ func (p *program) checkVariantValue(node *nameExpression, union *unionDecl, vari
 	if resolved == nil {
 		return expressionInfo{typ: typeUnknown, effects: make(effectSet)}
 	}
+	node.resolvedDeclaration = union.qualified + "." + resolved.name
 	if len(resolved.fields) > 0 {
 		p.add(node.pos, diagnosticCodeUnionVariant, "%s.%s carries a payload; construct it with %s.%s(...)",
 			union.name, resolved.name, union.name, resolved.name)
@@ -207,6 +208,7 @@ func (p *program) checkVariantConstruction(node *callExpression, name *nameExpre
 		}
 		return info
 	}
+	node.resolvedDeclaration = union.qualified + "." + resolved.name
 	if len(node.typeArgs) > 0 {
 		p.add(node.pos, diagnosticCodeTypeArguments, "%s does not take type arguments", name.name)
 	}

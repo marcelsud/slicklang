@@ -84,6 +84,10 @@ func (p *program) checkLambdaExpression(node *lambdaExpression, scope *astScope)
 		bound[param.name] = struct{}{}
 	}
 	node.captures = p.bindLambdaCaptures(node, scope, lambdaScope, bound)
+	node.captureTypes = make([]string, len(node.captures))
+	for index, capture := range node.captures {
+		node.captureTypes[index], _ = scope.lookup(capture)
+	}
 
 	paramTypes := make([]string, len(node.params))
 	seen := make(map[string]struct{}, len(node.params))
@@ -349,6 +353,7 @@ func (p *program) checkCallableInvocation(node *callExpression, scope *astScope,
 		return info
 	}
 	node.resolvedCallable = true
+	p.expressionTypes[node.callee] = calleeType
 	if len(node.typeArgs) > 0 {
 		p.add(node.pos, diagnosticCodeTypeArguments, "%s does not take type arguments", label)
 	}
@@ -401,6 +406,7 @@ func (p *program) checkCallableValueTarget(node *callExpression, scope *astScope
 		if !exists {
 			return expressionInfo{}, false
 		}
+		name.storageType = scope.locals[name.name]
 		return p.checkCallableInvocation(node, scope, typ, name.name, includeThrows), true
 	}
 	if len(parts) != 2 {
@@ -418,6 +424,9 @@ func (p *program) checkCallableValueTarget(node *callExpression, scope *astScope
 		return expressionInfo{}, false
 	}
 	node.resolvedReceiver = receiver
+	node.resolvedReceiverStorage = scope.locals[parts[0]]
+	name.resolvedDeclaration = receiver + "." + parts[1]
+	name.storageType = typ
 	return p.checkCallableInvocation(node, scope, typ, name.name, includeThrows), true
 }
 

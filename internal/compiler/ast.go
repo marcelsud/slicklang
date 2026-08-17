@@ -152,17 +152,24 @@ type rangeExpression struct {
 func (n *rangeExpression) expressionPos() position { return n.pos }
 
 type templateExpression struct {
-	text              string
-	resolvedStandards []string
-	pos               position
+	text                 string
+	resolvedStandards    []string
+	resolvedNames        []string
+	resolvedTypes        []string
+	resolvedTargets      []string
+	resolvedStorageTypes []string
+	resolvedConversions  []string
+	pos                  position
 }
 
 func (n *templateExpression) expressionPos() position { return n.pos }
 
 type nameExpression struct {
-	name             string
-	resolvedStandard string
-	pos              position
+	name                string
+	resolvedStandard    string
+	resolvedDeclaration string
+	storageType         string
+	pos                 position
 }
 
 func (n *nameExpression) expressionPos() position { return n.pos }
@@ -173,15 +180,16 @@ func (n *nameExpression) expressionPos() position { return n.pos }
 // names the surrounding bindings the body reads, copied by value when the
 // callable is created.
 type lambdaExpression struct {
-	params     []paramDecl
-	result     typeRef
-	throws     []typeRef
-	operations []operationEffectRef
-	body       *blockNode
-	fn         *functionDecl
-	captures   []string
-	resolved   string
-	pos        position
+	params       []paramDecl
+	result       typeRef
+	throws       []typeRef
+	operations   []operationEffectRef
+	body         *blockNode
+	fn           *functionDecl
+	captures     []string
+	captureTypes []string
+	resolved     string
+	pos          position
 }
 
 func (n *lambdaExpression) expressionPos() position { return n.pos }
@@ -208,14 +216,16 @@ type callExpression struct {
 	// resolvedCallee names the concrete function a call reaches when the source
 	// named a generic one, so both backends emit the instantiation the checker
 	// selected instead of resolving the open declaration again.
-	resolvedCallee        string
-	resolvedTypeArgs      []string
-	resolvedParams        []string
-	resolvedArgumentTypes []string
-	resolvedResult        string
-	resolvedReceiver      string
-	resolvedThrows        effectSet
-	resolvedNative        nativeFunction
+	resolvedCallee          string
+	resolvedDeclaration     string
+	resolvedTypeArgs        []string
+	resolvedParams          []string
+	resolvedArgumentTypes   []string
+	resolvedResult          string
+	resolvedReceiverStorage string
+	resolvedReceiver        string
+	resolvedThrows          effectSet
+	resolvedNative          nativeFunction
 	// resolvedCallable marks a call that goes through a callable value rather
 	// than a statically resolved function or method.
 	resolvedCallable bool

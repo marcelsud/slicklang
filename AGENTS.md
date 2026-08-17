@@ -6,6 +6,10 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 - `go build ./...` fails with `error obtaining VCS status` in a git worktree; use `go vet ./...` and `go test ./...` instead, or pass `-buildvcs=false`.
 - `go test ./...` builds real native binaries through `BuildPath`, so it needs a working Go toolchain and takes ~30s.
+## Core IR
+
+`internal/compiler/core_ir.go` is the typed, backend-neutral contract between checking and native emission. `BuildSourcesWithOptions` lowers every valid program before touching the output path; an unclassified or untyped node is therefore a lowering error, not a backend fallback. Call targets use resolved declaration or standard-operation IDs, and native resource state remains outside the IR. A new statement or expression node must be added to the Core lowerer; `TestCoreIRClassifiesEveryASTNode` is the completeness gate.
+
 
 ## Adding a standard-library declaration
 
@@ -27,7 +31,7 @@ Native resource classes set `nativeResource` to the Go pointer type of their run
 1. the `program` map, initialized in both `compile` (`compiler.go`) and `parseFormatSource` (`format.go`);
 2. the `parseSourceTokens` dispatch and the "expected ..." error listing the forms;
 3. name resolution: `canonicalTypeName` (`methods.go`), `checkTypeName` (`visibility.go`), `checkAliases` and `checkDeclaredTypes` (`compiler.go`);
-4. both backends: `evalExpression`, `formatRuntimeValue`, and `runtimeEqual` (`runtime.go`) plus `goType`, `resolveDeclaredType`, and `emitDeclarations` (`codegen.go`) — a type the Go backend cannot map silently becomes `any`;
+4. backend-neutral lowering in `core_ir.go`, then both backends: `evalExpression`, `formatRuntimeValue`, and `runtimeEqual` (`runtime.go`) plus `goType`, `resolveDeclaredType`, and `emitDeclarations` (`codegen.go`) — a type the Go backend cannot map silently becomes `any`;
 5. the surfaces: `describe.go` with `cmd/slick/describe.go`, `isTopDeclaration` and `collectBreaks` (`format.go`), `highlightKeywords` (`highlight.go`);
 6. diagnostics in `diagnostics.go`, whose definitions must stay sorted by code, and an example project pinned in `exampleOutputs`.
 
@@ -83,7 +87,7 @@ Annotations are part of the machine-readable description contract. Changing thei
 
 ## Adding an expression form
 
-`internal/compiler/callables.go` is the worked example (lambdas and callable values). An expression node has to reach every dispatcher or one backend disagrees at runtime: `parsePrimary` and the node type (`ast.go`), `checkASTExpressionExpecting` and `expressionLabel` (`ast_check.go`), `evalExpression` (`runtime.go`), `expression` and `expressionType` (`codegen.go`), and `collectExpression` (`format.go`). A node that caches a resolved type must return it unchanged on a second visit, because `codegen.go`'s `expressionType` re-runs the checker over sub-expressions.
+`internal/compiler/callables.go` is the worked example (lambdas and callable values). An expression node has to reach every dispatcher or one backend disagrees at runtime: `parsePrimary` and the node type (`ast.go`), `checkASTExpressionExpecting` and `expressionLabel` (`ast_check.go`), `coreLowerer.expression` (`core_ir.go`), `evalExpression` (`runtime.go`), `expression` and `expressionType` (`codegen.go`), and `collectExpression` (`format.go`). A node that caches a resolved type must return it unchanged on a second visit, because `codegen.go`'s `expressionType` re-runs the checker over sub-expressions.
 
 ## Types are strings, and every scanner over them shares one grammar
 

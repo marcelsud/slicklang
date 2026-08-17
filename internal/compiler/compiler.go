@@ -178,6 +178,7 @@ type program struct {
 	namespaceDocumentation map[string]*string
 	methodImpls            []*functionDecl
 	diags                  []Diagnostic
+	expressionTypes        map[expressionNode]string
 	// emitted deduplicates diagnostics while dedupe is on, so one mistake in a
 	// generic declaration is reported once instead of once per instantiation.
 	emitted            map[Diagnostic]struct{}
@@ -204,6 +205,7 @@ func newProgram(terminals ...terminalAnnotationDecl) *program {
 		genericFunctions:       make(map[string]*functionDecl),
 		namespaceDocumentation: make(map[string]*string),
 		annotations:            make(map[string]*annotationDecl),
+		expressionTypes:        make(map[expressionNode]string),
 		emitted:                make(map[Diagnostic]struct{}),
 	}
 	for index := range terminals {
