@@ -69,17 +69,20 @@ func TestBunWorkspaceOwnsDeterministicRuntimeAndLockfile(t *testing.T) {
 	}
 }
 
+// TestBunBackendRegistrationReportsPinnedTargets pins the stability contract:
+// complete standard-library coverage makes Bun eligible for consideration, and
+// it stays alpha until a maintainer commits a registry change.
 func TestBunBackendRegistrationReportsPinnedTargets(t *testing.T) {
 	for _, backend := range Backends() {
 		if backend.Name != BackendBun {
 			continue
 		}
-		if backend.Stability != StabilityAlpha || backend.Eligible || len(backend.Targets) != 2 {
+		if backend.Stability != StabilityAlpha || !backend.Eligible || len(backend.Targets) != 2 {
 			t.Fatalf("Bun registration = %+v", backend)
 		}
 		want := []BackendTargetDescription{
-			{Name: bunTargetLinuxX64Modern, Stability: StabilityAlpha, Toolchain: "bun", ToolchainVersion: bunToolchainVersion},
-			{Name: bunTargetLinuxX64Baseline, Stability: StabilityAlpha, Toolchain: "bun", ToolchainVersion: bunToolchainVersion},
+			{Name: bunTargetLinuxX64Modern, Stability: StabilityAlpha, Eligible: true, Toolchain: "bun", ToolchainVersion: bunToolchainVersion},
+			{Name: bunTargetLinuxX64Baseline, Stability: StabilityAlpha, Eligible: true, Toolchain: "bun", ToolchainVersion: bunToolchainVersion},
 		}
 		if !reflect.DeepEqual(backend.Targets, want) {
 			t.Fatalf("Bun targets = %+v, want %+v", backend.Targets, want)
@@ -113,48 +116,52 @@ func TestBunBackendDiagnosesSourceBeforeToolchain(t *testing.T) {
 	requireRustSentinel(t, output)
 }
 
-func TestBunBackendLocatesUnsupportedStandardOperationsBeforeToolchain(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	output := rustSentinelOutput(t)
-	diagnostics, err := BuildSourcesWithOptions([]Source{{
-		Name: "main.slk", Namespace: "root", Text: `function main() -> bool {
-    std.text.Contains("slick", "ick")
-}`,
-	}}, output, BuildOptions{Backend: BackendBun, AllowAlpha: true})
-	if len(diagnostics) != 0 || err == nil ||
-		!strings.Contains(err.Error(), "Bun lowering main.slk:2:") ||
-		!strings.Contains(err.Error(), "standard-library operation std.text.Contains is not supported") {
-		t.Fatalf("diagnostics=%v error=%v", diagnostics, err)
+// TestBunImplementsEveryRuntimeOperation is the coverage gate for issue #108:
+// every registry operation has exactly one Bun entry point, and the backend
+// advertises exactly that set.
+func TestBunImplementsEveryRuntimeOperation(t *testing.T) {
+	seen := make(map[string]runtimeOperationID, len(bunStdOperations))
+	for operation := range runtimeOperationRegistry {
+		function, ok := bunStdFunction(operation)
+		if !ok {
+			t.Fatalf("runtime operation %s has no Bun implementation", operation)
+		}
+		if previous, exists := seen[function]; exists {
+			t.Fatalf("Bun entry point %s implements both %s and %s", function, previous, operation)
+		}
+		seen[function] = operation
+		if !bunRuntimeOperations.implements(operation) {
+			t.Fatalf("Bun backend does not advertise runtime operation %s", operation)
+		}
 	}
-	if strings.Contains(err.Error(), "toolchain") {
-		t.Fatalf("unsupported operation reached Bun toolchain: %v", err)
+	if len(bunRuntimeOperations) != len(runtimeOperationRegistry) {
+		t.Fatalf("Bun advertises %d operations, registry declares %d",
+			len(bunRuntimeOperations), len(runtimeOperationRegistry))
 	}
-	requireRustSentinel(t, output)
 }
 
-func TestBunBackendRejectsUnsupportedRuntimeFamilyBeforeToolchain(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	output := rustSentinelOutput(t)
-	diagnostics, err := BuildSourcesWithOptions([]Source{{
-		Name: "main.slk", Namespace: "root", Text: `function main() -> string throws std.io.Failure effects { io, state } {
-    using Reader = std.io.ReaderFromBytes(std.bytes.FromUtf8("slick")) {
-        using Writer = std.io.WriterToBytes() {
-            match std.io.Copy(Reader, Writer, 64) {
-                Ok(Count) => "copied"
-                Err(Failure) => Failure.Message
-            }
-        }
-    }
-}`,
-	}}, output, BuildOptions{Backend: BackendBun, AllowAlpha: true})
-	if len(diagnostics) != 0 || err == nil || !strings.Contains(err.Error(), "Bun lowering") ||
-		!strings.Contains(err.Error(), "is not supported") {
-		t.Fatalf("diagnostics=%v error=%v", diagnostics, err)
+// TestBunLoweringLocatesUnsupportedStandardOperations pins the pre-toolchain
+// gate: an operation the backend does not implement is reported with its source
+// location before any toolchain work.
+func TestBunLoweringLocatesUnsupportedStandardOperations(t *testing.T) {
+	core := rustCoreForTest(t, `function main() -> bool {
+    std.text.Contains("slick", "ick")
+}`)
+	runtime, err := runtimeInputsForCore(core)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(err.Error(), "toolchain") {
-		t.Fatalf("unsupported Core reached Bun toolchain: %v", err)
+	if err := validateBunCore(core, runtime); err != nil {
+		t.Fatalf("implemented operation rejected: %v", err)
 	}
-	requireRustSentinel(t, output)
+	err = validateLanguageCore(core, runtime, "Bun", func(operation runtimeOperationID) bool {
+		return operation != nativeStdTextContains
+	})
+	if err == nil ||
+		!strings.Contains(err.Error(), "Bun lowering main.slk:2:") ||
+		!strings.Contains(err.Error(), "standard-library operation std.text.Contains is not supported") {
+		t.Fatalf("error=%v", err)
+	}
 }
 
 func TestBunBackendReportsMissingIncompatibleAndUnavailableTargets(t *testing.T) {

@@ -9,13 +9,20 @@ import (
 )
 
 func validateBunCore(core coreProgram, runtime backendRuntimeInputs) error {
-	// Host standard-library operations are not implemented for Bun yet.
-	if err := validateLanguageCore(core, runtime, "Bun", func(runtimeOperationID) bool { return false }); err != nil {
+	if err := validateLanguageCore(core, runtime, "Bun", func(operation runtimeOperationID) bool {
+		_, ok := bunStdFunction(operation)
+		return ok
+	}); err != nil {
 		return err
 	}
 	for _, function := range core.Functions {
-		if function.ID == "root.main" && len(function.Parameters) != 0 {
-			return bunLoweringError(function.Location, "root.main parameters are not supported")
+		if function.ID != "root.main" {
+			continue
+		}
+		// A command-line main takes the argument vector or nothing at all.
+		if len(function.Parameters) > 1 ||
+			(len(function.Parameters) == 1 && function.Parameters[0].Type != "string[]") {
+			return bunLoweringError(function.Location, "root.main must accept no parameters or one string[] parameter")
 		}
 	}
 	return nil
@@ -33,7 +40,9 @@ func generateBun(core coreProgram) (string, error) {
 	if err := validateBunCore(core, runtime); err != nil {
 		return "", err
 	}
-	return newBunGenerator(core).generate()
+	generator := newBunGenerator(core)
+	generator.runtime = runtime
+	return generator.generate()
 }
 
 type bunLambda struct {
@@ -59,6 +68,7 @@ type bunGenerator struct {
 	locals       map[string]string
 	classes      map[string]coreClass
 	errorClasses map[string]bool
+	runtime      backendRuntimeInputs
 }
 
 func newBunGenerator(core coreProgram) *bunGenerator {
@@ -116,23 +126,39 @@ func (g *bunGenerator) generate() (string, error) {
 		return "", err
 	}
 	g.emitDispatchTables()
+	main := g.functions["root.main"]
+	entry := "null"
+	if len(main.Parameters) == 1 {
+		entry = "\"arguments\""
+	}
 	g.line(0, "await slick.slickRun(import.meta.url, {")
 	g.line(1, "types: SLICK_TYPES,")
 	g.line(1, "functions: SLICK_FUNCTIONS,")
 	g.line(1, "methods: SLICK_METHODS,")
 	g.line(1, "callables: SLICK_CALLABLES,")
+	g.line(1, "operations: SLICK_OPERATIONS,")
+	g.line(1, "entry: %s,", entry)
+	g.line(1, "status: %t,", main.Result == stdProcessStatusName)
 	g.line(0, "});")
 	return g.output.String(), nil
 }
 
-// emitTypeDescriptors publishes the stable shape of every class, interface, and
-// union so runtime behavior never depends on host reflection.
+// emitTypeDescriptors publishes each declaration's shape, including the JSON
+// name and declared type of every field, so descriptor-driven runtime behavior
+// such as typed JSON never needs host reflection.
 func (g *bunGenerator) emitTypeDescriptors() {
+	field := func(name, jsonName, typ string) string {
+		if jsonName == "" {
+			jsonName = name
+		}
+		return fmt.Sprintf("{ name: %s, json_name: %s, typ: %s }",
+			bunStringLiteral(name), bunStringLiteral(jsonName), bunStringLiteral(typ))
+	}
 	g.line(0, "const SLICK_TYPES = [")
 	for _, class := range g.core.Classes {
 		fields := make([]string, 0, len(class.Fields))
-		for _, field := range class.Fields {
-			fields = append(fields, bunStringLiteral(field.Name))
+		for _, declared := range class.Fields {
+			fields = append(fields, field(declared.Name, declared.JSONName, declared.Type))
 		}
 		methods := make([]string, 0, len(class.Methods))
 		for _, method := range class.Methods {
@@ -143,7 +169,7 @@ func (g *bunGenerator) emitTypeDescriptors() {
 		for _, iface := range class.Interfaces {
 			interfaces = append(interfaces, bunStringLiteral(iface))
 		}
-		g.line(1, "{ name: %s, fields: [%s], methods: [%s], interfaces: [%s], variants: [] },",
+		g.line(1, "{ name: %s, kind: \"class\", fields: [%s], methods: [%s], interfaces: [%s], variants: [] },",
 			bunStringLiteral(class.ID), strings.Join(fields, ", "), strings.Join(methods, ", "), strings.Join(interfaces, ", "))
 	}
 	for _, iface := range g.core.Interfaces {
@@ -152,16 +178,21 @@ func (g *bunGenerator) emitTypeDescriptors() {
 			name, _ := coreDeclarationName(method.ID)
 			methods = append(methods, bunStringLiteral(name))
 		}
-		g.line(1, "{ name: %s, fields: [], methods: [%s], interfaces: [], variants: [] },",
+		g.line(1, "{ name: %s, kind: \"interface\", fields: [], methods: [%s], interfaces: [], variants: [] },",
 			bunStringLiteral(iface.ID), strings.Join(methods, ", "))
 	}
 	for _, union := range g.core.Unions {
 		variants := make([]string, 0, len(union.Variants))
 		for _, variant := range union.Variants {
 			name, _ := coreDeclarationName(variant.ID)
-			variants = append(variants, fmt.Sprintf("[%s, %d]", bunStringLiteral(name), variant.Tag))
+			fields := make([]string, 0, len(variant.Fields))
+			for _, declared := range variant.Fields {
+				fields = append(fields, field(declared.Name, declared.JSONName, declared.Type))
+			}
+			variants = append(variants, fmt.Sprintf("{ name: %s, tag: %d, fields: [%s] }",
+				bunStringLiteral(name), variant.Tag, strings.Join(fields, ", ")))
 		}
-		g.line(1, "{ name: %s, fields: [], methods: [], interfaces: [], variants: [%s] },",
+		g.line(1, "{ name: %s, kind: \"union\", fields: [], methods: [], interfaces: [], variants: [%s] },",
 			bunStringLiteral(union.ID), strings.Join(variants, ", "))
 	}
 	g.line(0, "];")
@@ -185,6 +216,23 @@ func (g *bunGenerator) emitDispatchTables() {
 		name, _ := coreDeclarationName(function.ID)
 		g.line(1, "%s: %s,", bunStringLiteral(function.Receiver+"."+name), bunFunctionName(function.ID))
 	}
+	// Native resource methods have no Slick body, so using-scope cleanup and
+	// interface-typed calls reach them through compiler-owned entry points. Only
+	// linked families are dispatched, because only their modules are bundled.
+	for _, class := range g.core.Classes {
+		for _, method := range class.Methods {
+			if method.Operation == "" {
+				continue
+			}
+			native, ok := bunStdFunction(method.Operation)
+			if !ok || !g.runtime.families[runtimeOperationRegistry[method.Operation].family] {
+				continue
+			}
+			name, _ := coreDeclarationName(method.ID)
+			g.line(1, "%s: (slick_context, slick_receiver, slick_arguments) => slick.%s(slick_context, [slick_receiver, ...slick_arguments]),",
+				bunStringLiteral(class.ID+"."+name), native)
+		}
+	}
 	g.line(0, "};")
 	g.line(0, "")
 	g.line(0, "const SLICK_CALLABLES = {")
@@ -197,6 +245,16 @@ func (g *bunGenerator) emitDispatchTables() {
 	}
 	for _, lambda := range g.lambdas {
 		g.line(1, "%s: %s,", bunStringLiteral(lambda.id), bunLambdaName(lambda.id))
+	}
+	g.line(0, "};")
+	g.line(0, "")
+	g.line(0, "const SLICK_OPERATIONS = {")
+	for _, operation := range g.runtime.operations {
+		native, ok := bunStdFunction(operation)
+		if !ok {
+			continue
+		}
+		g.line(1, "%s: slick.%s,", bunStringLiteral(string(operation)), native)
 	}
 	g.line(0, "};")
 	g.line(0, "")
@@ -386,7 +444,14 @@ func (g *bunGenerator) statement(statement coreStatement, level int, scope strin
 				g.line(level+1, "let %s = slick.slickTupleItem(%s, %d);", g.declareLocal(binding.Name), item, index)
 			}
 		}
-		if err := g.blockInto(*statement.Body, level+1, scope, func(string) {}); err != nil {
+		// A loop body's value is discarded, but its final expression must still
+		// run: the sink evaluates it as a statement.
+		discard := func(value string) {
+			if value != "null" {
+				g.line(level+1, "void %s;", value)
+			}
+		}
+		if err := g.blockInto(*statement.Body, level+1, scope, discard); err != nil {
 			return err
 		}
 		g.line(level, "}")
@@ -830,7 +895,7 @@ func (g *bunGenerator) call(expression coreExpression, level int, scope string) 
 		return g.coreCall(expression, level, scope)
 	}
 	if expression.Operation != "" {
-		return "", bunLoweringError(expression.Location, "standard-library operation %s is not supported", expression.Operation)
+		return g.standardCall(expression, level, scope)
 	}
 	if variant, ok := g.variants[expression.Declaration]; ok {
 		values, err := g.evaluatedExpressions(expression.Arguments, level, scope)
@@ -928,11 +993,44 @@ func (g *bunGenerator) coreCall(expression coreExpression, level int, scope stri
 	}
 }
 
+// standardCall lowers one compiler-owned standard-library operation. A method
+// operation receives its receiver as the first argument, then the declared
+// parameters, then the resolved type arguments, so every family implements one
+// uniform entry point.
+func (g *bunGenerator) standardCall(expression coreExpression, level int, scope string) (string, error) {
+	function, ok := bunStdFunction(expression.Operation)
+	if !ok {
+		return "", bunLoweringError(expression.Location, "standard-library operation %s is not supported", expression.Operation)
+	}
+	values := make([]string, 0, len(expression.Arguments)+1)
+	if expression.Receiver != nil {
+		receiver, err := g.evaluated(*expression.Receiver, level, scope)
+		if err != nil {
+			return "", err
+		}
+		values = append(values, receiver)
+	}
+	arguments, err := g.evaluatedExpressions(expression.Arguments, level, scope)
+	if err != nil {
+		return "", err
+	}
+	values = append(values, arguments...)
+	for _, typeArgument := range expression.TypeArguments {
+		values = append(values, bunStringLiteral(typeArgument))
+	}
+	return fmt.Sprintf("(await slick.%s(slick_context, [%s]))", function, strings.Join(values, ", ")), nil
+}
+
 // taskRequest materializes a launch request. Only task-safe values reach the
 // worker; the runtime rejects buffers and host resources.
 func (g *bunGenerator) taskRequest(call coreExpression, level int, scope string) (string, error) {
-	if call.Kind != "call" || call.Operation != "" || strings.HasPrefix(call.Declaration, "core.") {
-		return "", bunLoweringError(call.Location, "task launch target is not a user call")
+	if call.Kind != "call" || strings.HasPrefix(call.Declaration, "core.") {
+		return "", bunLoweringError(call.Location, "task launch target is not a call")
+	}
+	if call.Operation != "" {
+		if _, ok := bunStdFunction(call.Operation); !ok {
+			return "", bunLoweringError(call.Location, "standard-library operation %s is not supported", call.Operation)
+		}
 	}
 	target, err := g.callTarget(call, level, scope)
 	if err != nil {
@@ -941,6 +1039,19 @@ func (g *bunGenerator) taskRequest(call coreExpression, level int, scope string)
 	arguments, err := g.evaluatedExpressions(call.Arguments, level, scope)
 	if err != nil {
 		return "", err
+	}
+	if call.Operation != "" {
+		// A launched standard-library operation runs its compiler-owned entry
+		// point in the worker, receiving the same receiver-first arguments.
+		values := arguments
+		if target.receiver != "" {
+			values = append([]string{target.receiver}, arguments...)
+		}
+		for _, typeArgument := range call.TypeArguments {
+			values = append(values, bunStringLiteral(typeArgument))
+		}
+		return fmt.Sprintf("{ kind: \"operation\", target: %s, arguments: [%s] }",
+			bunStringLiteral(string(call.Operation)), strings.Join(values, ", ")), nil
 	}
 	switch {
 	case target.callee != "":

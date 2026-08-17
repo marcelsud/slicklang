@@ -126,6 +126,10 @@ func validateBunToolchain(input backendDriverInput) (backendToolchain, error) {
 }
 
 func emitBunWorkspace(core coreProgram, workspace string) (backendEmission, error) {
+	runtime, err := runtimeInputsForCore(core)
+	if err != nil {
+		return backendEmission{}, err
+	}
 	entry, err := generateBun(core)
 	if err != nil {
 		return backendEmission{}, err
@@ -134,6 +138,9 @@ func emitBunWorkspace(core coreProgram, workspace string) (backendEmission, erro
 	if err := os.MkdirAll(runtimeDirectory, 0o755); err != nil {
 		return backendEmission{}, fmt.Errorf("create compiler-owned Bun runtime: %w", err)
 	}
+	// The runtime bundles only the standard-library families this program's Core
+	// IR reaches, so an unused family never reaches the executable.
+	runtimeSource := bunRuntimeModule + bunStdModules(runtime)
 	files := []struct {
 		path string
 		data string
@@ -142,7 +149,7 @@ func emitBunWorkspace(core coreProgram, workspace string) (backendEmission, erro
 		{path: filepath.Join(workspace, "bun.lock"), data: bunLockfile},
 		{path: filepath.Join(workspace, "main.js"), data: entry},
 		{path: filepath.Join(runtimeDirectory, "package.json"), data: bunRuntimeManifest},
-		{path: filepath.Join(runtimeDirectory, "index.js"), data: bunRuntimeModule},
+		{path: filepath.Join(runtimeDirectory, "index.js"), data: runtimeSource},
 		{path: filepath.Join(workspace, "bunfig.toml"), data: bunConfig},
 		{path: filepath.Join(workspace, "tsconfig.json"), data: bunTypeScriptConfig},
 	}
