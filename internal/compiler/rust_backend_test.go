@@ -1,12 +1,14 @@
 package compiler
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 const rustPrimitiveProgram = `const Maximum: int = 9223372036854775807
@@ -224,10 +226,11 @@ func TestRustBackendRejectsUnsupportedCoreBeforeToolchain(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	output := rustSentinelOutput(t)
 	diagnostics, err := BuildSourcesWithOptions([]Source{{
-		Name: "main.slk", Namespace: "root", Text: `class Value { Number: int }
-function main() -> int { let Item = Value { Number: 1 } Item.Number }`,
+		Name: "main.slk", Namespace: "root", Text: `function main() -> bool {
+    std.text.Contains("slick", "ick")
+}`,
 	}}, output, BuildOptions{Backend: BackendRust, AllowAlpha: true})
-	if len(diagnostics) != 0 || err == nil || !strings.Contains(err.Error(), "classes are not supported (root.Value)") {
+	if len(diagnostics) != 0 || err == nil || !strings.Contains(err.Error(), "standard-library operation std.text.Contains is not supported") {
 		t.Fatalf("diagnostics=%v error=%v", diagnostics, err)
 	}
 	if strings.Contains(err.Error(), "toolchain") {
@@ -352,6 +355,172 @@ func TestRustBuildEnvironmentRemovesHostOverrides(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("environment = %v, want %v", got, want)
 	}
+}
+
+const rustLanguageRuntimeProgram = `
+const Label: string = "constant"
+class Failure implements Error { Message: string }
+interface Counter { function Read() -> int }
+class Number {
+    Value: int
+    function Read() -> int { self.Value }
+}
+class Box<T> {
+    Value: T
+    function Get() -> T { self.Value }
+}
+class Resource {
+    FailClose: bool
+    function Close() -> null throws Failure {
+        if (self.FailClose) { throw Failure { Message: "close" } } else { null }
+    }
+}
+union Choice { Number(Value: int) Empty }
+function Apply(Operation: (int) -> int, Value: int) -> int { Operation(Value) }
+function Maybe(Present: bool) -> int? { if (Present) { 0 } else { null } }
+function Outcome(Ready: bool) -> Result<int, Failure> {
+    if (Ready) { Ok(0) } else { Err(Failure { Message: "result" }) }
+}
+function Propagate() -> Result<int, Failure> {
+    let Value = Outcome(true)?
+    Ok(Value + 1)
+}
+function Read(Value: Counter) -> int { Value.Read() }
+function Render(Value: Choice) -> string {
+    match Value {
+        Choice.Number(Number) => ` + "`number ${Number}`" + `
+        Choice.Empty => "empty"
+    }
+}
+function Use(FailBody: bool, FailClose: bool) -> string throws Failure {
+    using Handle = Resource { FailClose: FailClose } {
+        if (FailBody) { throw Failure { Message: "body" } } else { "ok" }
+    }
+}
+function Recover(FailBody: bool, FailClose: bool) -> string {
+    Use(FailBody, FailClose) catch { Failure as Found => Found.Message }
+}
+function Work(Value: int) -> int { Value + 1 }
+function TaskValue() -> int {
+    async let Job = Work(41)
+    await Job
+}
+function Sum() -> int {
+    let Total = 0
+    for Value in [1, 2, 3] { Total = Total + Value }
+    Total
+}
+function Sequences() -> int {
+    let Total = 0
+    for Index, Value in enumerate([5, 6]) { Total = Total + Index + Value }
+    for Left, Right in zip([1, 2], [3, 4]) { Total = Total + Left + Right }
+    Total
+}
+function Key() -> string { "a" }
+function MaybeValues() -> int?[] { [null, 1] }
+function MaybeMap() -> Map<string, int?> { map { "none": null, "one": 1 } }
+function main() -> (string,int,int,Result<int,Failure>,int[],Map<string,int>,bool,string,string,int,int,int,int,int,bool,bool) {
+    let Offset = 1
+    let Text = Render(Choice.Number(41))
+    let Count = Read(Number { Value: 42 })
+    let Labelled = ` + "`${Label}/${Choice.Empty}/${Work}/${Text}`" + `
+    let Present = Maybe(true)
+    let PresentValue = if (Present == null) { -1 } else { Present }
+    let Values = [1, 2, 3]
+    let Mapping = map { "a": 1, Key(): 2, "b": 3 }
+    let Held = Box<int> { Value: 9 }
+    let Replaced = Mapping.With("a", 9)
+    let Updated = Replaced.Without("b")
+    let UpdatedValue = Updated.Get("a")
+    let MapValue = if (UpdatedValue == null) { -1 } else { UpdatedValue }
+    let OptionalValues = MaybeValues()
+    let OptionalMapping = MaybeMap()
+    let Result = (Labelled, Apply((Value: int) -> int { Value + Offset }, Count), PresentValue, Propagate(), Values, Mapping, Values == [1, 2, 3], Recover(true, false), Recover(false, true), TaskValue(), Sum(), Held.Get(), Sequences(), MapValue, Updated.Contains("a") && Updated.Length() == 1, Present == 0 && OptionalValues.Get(0) == null && OptionalMapping.Get("none") == null)
+    Result
+}
+`
+
+func TestRustLanguageRuntimeMatchesInterpreter(t *testing.T) {
+	source := Source{Name: "main.slk", Namespace: "root", Text: rustLanguageRuntimeProgram}
+	interpreted, diagnostics, err := Run([]Source{source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireNoRustDiagnostics(t, diagnostics)
+	if want := "(constant/Empty/<callable>/number 41, 43, 0, Ok(1), [1, 2, 3], map {a: 2, b: 3}, true, body, close, 42, 6, 9, 22, 9, true, true)"; interpreted != want {
+		t.Fatalf("interpreter output = %q, want %q", interpreted, want)
+	}
+	binary := buildRustTestProgram(t, source)
+	output, err := exec.Command(binary).CombinedOutput()
+	if err != nil || string(output) != interpreted+"\n" {
+		t.Fatalf("Rust language output=%q error=%v, want %q", output, err, interpreted+"\n")
+	}
+}
+
+func TestRustCleanupPreservesPrimaryAndSuppressedFailures(t *testing.T) {
+	source := Source{Name: "main.slk", Namespace: "root", Text: `
+class Failure implements Error { Message: string }
+class Resource {
+    function Close() -> null throws Failure { throw Failure { Message: "close" } }
+}
+function main() -> null throws Failure {
+    using Handle = Resource {} {
+        throw Failure { Message: "body" }
+    }
+}
+`}
+	_, diagnostics, interpretedErr := Run([]Source{source})
+	requireNoRustDiagnostics(t, diagnostics)
+	if interpretedErr == nil {
+		t.Fatal("interpreter accepted uncaught cleanup failures")
+	}
+	binary := buildRustTestProgram(t, source)
+	output, err := exec.Command(binary).CombinedOutput()
+	if err == nil || string(output) != interpretedErr.Error()+"\n" {
+		t.Fatalf("Rust cleanup output=%q error=%v, want %q", output, err, interpretedErr.Error()+"\n")
+	}
+	if strings.Contains(string(output), "panicked") {
+		t.Fatalf("Rust panic replaced Slick cleanup failure: %s", output)
+	}
+}
+
+func TestRustTaskFailureCancelsAndJoinsSibling(t *testing.T) {
+	source := Source{Name: "main.slk", Namespace: "root", Text: `
+class Failure implements Error { Message: string }
+function Spin() -> null { Spin() }
+function Fail() -> null throws Failure { throw Failure { Message: "failed" } }
+function Run() -> null throws Failure {
+    async let Spinner = Spin()
+    async let Broken = Fail()
+    let Value = await Broken
+    await Spinner
+}
+function main() -> null throws Failure { Run() }
+`}
+	binary := buildRustTestProgram(t, source)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, binary).CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatal("Rust task scope did not cancel and join its recursive sibling")
+	}
+	if err == nil || string(output) != "root.Failure: failed\n" {
+		t.Fatalf("Rust task output=%q error=%v", output, err)
+	}
+}
+
+func buildRustTestProgram(t *testing.T, source Source) string {
+	t.Helper()
+	binary := filepath.Join(t.TempDir(), "app")
+	diagnostics, err := BuildSourcesWithOptions([]Source{source}, binary, BuildOptions{Backend: BackendRust, AllowAlpha: true})
+	if err != nil {
+		if strings.Contains(err.Error(), "Rust toolchain not found") {
+			t.Skip(err.Error())
+		}
+		t.Fatal(err)
+	}
+	requireNoRustDiagnostics(t, diagnostics)
+	return binary
 }
 
 func rustCoreForTest(t *testing.T, text string) coreProgram {
