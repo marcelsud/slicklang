@@ -2,8 +2,6 @@ package compiler
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -21,34 +19,55 @@ const (
 )
 
 type backendTargetRegistration struct {
-	name      string
-	stability Stability
+	name         string
+	stability    Stability
+	platform     backendPlatform
+	artifactKind ArtifactKind
+	toolchain    backendToolchainRegistration
 }
 
 type backendRegistration struct {
-	name       Backend
-	stability  Stability
-	targets    []backendTargetRegistration
-	implements func(nativeFunction) bool
+	name                Backend
+	stability           Stability
+	targets             []backendTargetRegistration
+	runtimeCapabilities []backendRuntimeCapability
+	implements          func(nativeFunction) bool
+	driver              backendDriverID
 }
 
 var backendRegistry = []backendRegistration{
 	{
-		name:       BackendGo,
-		stability:  StabilityStable,
-		targets:    []backendTargetRegistration{{name: hostTargetName(), stability: StabilityStable}},
-		implements: goNativeOperationImplemented,
+		name:      BackendGo,
+		stability: StabilityStable,
+		targets: []backendTargetRegistration{{
+			name:         hostTargetName(),
+			stability:    StabilityStable,
+			platform:     backendPlatform{operatingSystem: runtime.GOOS, architecture: hostArchitecture()},
+			artifactKind: ArtifactNativeExecutable,
+			toolchain:    backendToolchainRegistration{name: "go", version: "system"},
+		}},
+		runtimeCapabilities: []backendRuntimeCapability{backendCapabilityEmbeddedRuntime, backendCapabilityStructuredTasks},
+		implements:          goNativeOperationImplemented,
+		driver:              backendDriverGo,
 	},
 	{
 		name:      BackendLLVM,
 		stability: StabilityStable,
-		targets:   []backendTargetRegistration{{name: "linux-x64", stability: StabilityStable}},
+		targets: []backendTargetRegistration{{
+			name:         "linux-x64",
+			stability:    StabilityStable,
+			platform:     backendPlatform{operatingSystem: "linux", architecture: "x64"},
+			artifactKind: ArtifactNativeExecutable,
+			toolchain:    backendToolchainRegistration{name: "llvm", version: "18"},
+		}},
+		runtimeCapabilities: []backendRuntimeCapability{backendCapabilityEmbeddedRuntime, backendCapabilityStructuredTasks},
 		implements: func(native nativeFunction) bool {
 			return isNativeStdBuffer(native) ||
 				native == nativeStdJsonDecode ||
 				native == nativeStdJsonEncode ||
 				nativeSymbol(native) != ""
 		},
+		driver: backendDriverLLVM,
 	},
 }
 
@@ -151,12 +170,15 @@ func backendEligible(backend backendRegistration) bool {
 	return true
 }
 
-func hostTargetName() string {
-	architecture := runtime.GOARCH
-	if architecture == "amd64" {
-		architecture = "x64"
+func hostArchitecture() string {
+	if runtime.GOARCH == "amd64" {
+		return "x64"
 	}
-	return runtime.GOOS + "-" + architecture
+	return runtime.GOARCH
+}
+
+func hostTargetName() string {
+	return runtime.GOOS + "-" + hostArchitecture()
 }
 
 func backendRegistrationFor(name Backend) (backendRegistration, bool) {
@@ -168,6 +190,16 @@ func backendRegistrationFor(name Backend) (backendRegistration, bool) {
 	return backendRegistration{}, false
 }
 
+// BackendNames returns the authoritative driver names in CLI order.
+func BackendNames() []string {
+	names := make([]string, 0, len(backendRegistry))
+	for _, backend := range backendRegistry {
+		names = append(names, string(backend.name))
+	}
+	sort.Strings(names)
+	return names
+}
+
 // ParseBackend accepts the names in the authoritative registry. Empty means Go.
 func ParseBackend(name string) (Backend, error) {
 	if name == "" {
@@ -176,18 +208,14 @@ func ParseBackend(name string) (Backend, error) {
 	if backend, ok := backendRegistrationFor(Backend(name)); ok {
 		return backend.name, nil
 	}
-	names := make([]string, 0, len(backendRegistry))
-	for _, backend := range backendRegistry {
-		names = append(names, string(backend.name))
-	}
-	sort.Strings(names)
-	return "", fmt.Errorf("unknown backend %q (want %s)", name, strings.Join(names, " or "))
+	return "", fmt.Errorf("unknown backend %q (want %s)", name, strings.Join(BackendNames(), " or "))
 }
 
 // BuildOptions contains choices that can change target availability without
 // changing Slick source.
 type BuildOptions struct {
 	Backend    Backend
+	Target     string
 	AllowAlpha bool
 }
 
@@ -216,7 +244,8 @@ func BuildSourcesBackend(sources []Source, output string, backend Backend) ([]Di
 	return BuildSourcesWithOptions(sources, output, BuildOptions{Backend: backend})
 }
 
-// BuildSourcesWithOptions validates governance before emission.
+// BuildSourcesWithOptions validates governance and the selected driver before
+// creating a compiler-owned workspace or touching the requested output.
 func BuildSourcesWithOptions(sources []Source, output string, options BuildOptions) ([]Diagnostic, error) {
 	if err := validateStabilityRegistries(); err != nil {
 		return nil, err
@@ -232,33 +261,37 @@ func BuildSourcesWithOptions(sources []Source, output string, options BuildOptio
 	if declaration.stability == StabilityAlpha && !options.AllowAlpha {
 		return nil, fmt.Errorf("backend %s is alpha; pass --allow-alpha to use it", backend)
 	}
+	target, err := backendTargetFor(declaration, options.Target)
+	if err != nil {
+		return nil, err
+	}
+	if target.stability == StabilityAlpha && !options.AllowAlpha {
+		return nil, fmt.Errorf("backend %s target %s is alpha; pass --allow-alpha to use it", backend, target.name)
+	}
+
 	program, diagnostics := compile(sources)
 	if len(diagnostics) > 0 {
 		return diagnostics, nil
 	}
-	target := ""
-	if len(declaration.targets) > 0 {
-		target = declaration.targets[0].name
-	}
-	if err := program.validateStandardUsage(backend, target, options.AllowAlpha, true); err != nil {
+	if err := program.validateStandardUsage(backend, target.name, options.AllowAlpha, true); err != nil {
 		return nil, err
 	}
-	if _, err := program.lowerCore(); err != nil {
+	core, err := program.lowerCore()
+	if err != nil {
 		return nil, fmt.Errorf("lower Core IR: %w", err)
 	}
-	output, err := filepath.Abs(output)
-	if err != nil {
-		return nil, err
+	driver, ok := registeredBackendDriver(declaration.driver, program)
+	if !ok {
+		return nil, fmt.Errorf("backend %s has no build driver", backend)
 	}
-	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
-		return nil, err
+	plan := backendBuildPlan{
+		input: backendDriverInput{
+			core:         core,
+			target:       target,
+			runtime:      backendRuntimeInputs{usesJSON: program.usesStdJSON(), usesSQLite: program.usesStdSQLite, usesHTTP: program.usesStdHTTP},
+			artifactKind: target.artifactKind,
+		},
+		output: output,
 	}
-	switch backend {
-	case BackendGo:
-		return nil, buildGoBinary(program, output)
-	case BackendLLVM:
-		return nil, buildLLVMBinary(program, output)
-	default:
-		return nil, fmt.Errorf("backend %s has no build implementation", backend)
-	}
+	return nil, executeBuildPlan(driver, plan)
 }

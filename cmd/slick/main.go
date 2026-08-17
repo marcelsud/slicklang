@@ -127,6 +127,12 @@ func parseBuildOptions(args []string) (string, string, compiler.BuildOptions, er
 				return "", "", compiler.BuildOptions{}, err
 			}
 			options.Backend = parsed
+		case "--target":
+			index++
+			if index >= len(args) {
+				return "", "", compiler.BuildOptions{}, errors.New("build target is missing")
+			}
+			options.Target = args[index]
 		case "--allow-alpha":
 			if alphaSet {
 				return "", "", compiler.BuildOptions{}, errors.New("build --allow-alpha may only be specified once")
@@ -140,6 +146,10 @@ func parseBuildOptions(args []string) (string, string, compiler.BuildOptions, er
 					return "", "", compiler.BuildOptions{}, err
 				}
 				options.Backend = parsed
+				continue
+			}
+			if strings.HasPrefix(args[index], "--target=") {
+				options.Target = strings.TrimPrefix(args[index], "--target=")
 				continue
 			}
 			if strings.HasPrefix(args[index], "-") {
