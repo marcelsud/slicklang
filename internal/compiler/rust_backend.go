@@ -38,7 +38,7 @@ name = "slick_program"
 version = "0.0.0"
 `
 
-func rustBackendDriver(_ *program) backendDriver {
+func rustBackendDriver() backendDriver {
 	return backendDriver{
 		checkCore: func(input backendDriverInput) error {
 			return validateRustCore(input.core, input.runtime)

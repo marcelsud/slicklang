@@ -20,7 +20,7 @@ func TestRegisteredBackendDriversDeclareBuildContracts(t *testing.T) {
 		if len(registration.runtimeCapabilities) == 0 {
 			t.Fatalf("backend %s lacks runtime capabilities", registration.name)
 		}
-		driver, ok := registeredBackendDriver(registration.driver, nil)
+		driver, ok := registeredBackendDriver(registration.driver)
 		if !ok || driver.validate == nil || driver.emit == nil || driver.build == nil || driver.verify == nil {
 			t.Fatalf("backend %s lacks an explicit build phase", registration.name)
 		}

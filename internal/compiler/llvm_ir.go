@@ -3,6 +3,7 @@ package compiler
 import (
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -314,28 +315,19 @@ func (g *llvmGen) emitRuntimeDecls() {
 }
 
 func nativeSymbols() []string {
-	return []string{
-		"slick_nat_bytes_from_utf8", "slick_nat_bytes_to_utf8", "slick_nat_bytes_length",
-		"slick_nat_bytes_at", "slick_nat_bytes_concat", "slick_nat_bytes_slice", "slick_nat_bytes_from_values",
-		"slick_nat_utf8_decode_at", "slick_nat_unicode_is_letter", "slick_nat_unicode_is_digit",
-		"slick_nat_unicode_is_space", "slick_nat_unicode_is_upper",
-		"slick_nat_parse_int", "slick_nat_parse_float", "slick_nat_int_to_string", "slick_nat_float_to_string",
-		"slick_nat_math_div", "slick_nat_math_rem",
-		"slick_nat_env_get", "slick_nat_env_set", "slick_nat_env_unset",
-		"slick_nat_fs_read_text", "slick_nat_fs_write_text", "slick_nat_fs_exists", "slick_nat_fs_mkdir",
-		"slick_nat_fs_remove", "slick_nat_fs_read_dir", "slick_nat_fs_tmp", "slick_nat_fs_tmp_close",
-		"slick_nat_path_join", "slick_nat_path_clean", "slick_nat_path_base", "slick_nat_path_dir",
-		"slick_nat_path_ext", "slick_nat_path_abs",
-		"slick_nat_text_trim", "slick_nat_text_contains", "slick_nat_text_starts", "slick_nat_text_ends",
-		"slick_nat_text_split", "slick_nat_text_join", "slick_nat_text_replace", "slick_nat_text_cut", "slick_nat_text_quote",
-		"slick_nat_io_reader", "slick_nat_io_writer", "slick_nat_io_read", "slick_nat_io_read_close",
-		"slick_nat_io_write", "slick_nat_io_bytes", "slick_nat_io_write_close", "slick_nat_io_read_all", "slick_nat_io_copy",
-		"slick_nat_process_run", "slick_nat_http_fetch", "slick_nat_http_header_values", "slick_nat_http_status_text",
-		"slick_nat_http_serve",
-		"slick_nat_sqlite_open", "slick_nat_sqlite_db_exec", "slick_nat_sqlite_db_query", "slick_nat_sqlite_db_begin",
-		"slick_nat_sqlite_db_close", "slick_nat_sqlite_tx_exec", "slick_nat_sqlite_tx_query",
-		"slick_nat_sqlite_tx_commit", "slick_nat_sqlite_tx_rollback", "slick_nat_sqlite_tx_close",
+	seen := make(map[string]struct{})
+	for _, implementation := range llvmRuntimeOperations {
+		if implementation.entry == "" || implementation.entry == "core" || implementation.entry == "generated-json" {
+			continue
+		}
+		seen[implementation.entry] = struct{}{}
 	}
+	symbols := make([]string, 0, len(seen))
+	for symbol := range seen {
+		symbols = append(symbols, symbol)
+	}
+	sort.Strings(symbols)
+	return symbols
 }
 
 func (g *llvmGen) intern(s string) string {
@@ -2225,6 +2217,9 @@ func (g *llvmGen) wrapIface(recv, className, ifaceName string) string {
 }
 
 func (g *llvmGen) exprType(expr expressionNode, scope *llvmScope) (string, error) {
+	if typ := g.program.expressionTypes[expr]; typ != "" {
+		return typ, nil
+	}
 	switch node := expr.(type) {
 	case *tupleExpression:
 		if node.resolved != "" {

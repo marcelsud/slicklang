@@ -11,7 +11,11 @@ import (
 	"strings"
 )
 
-func emitGoSource(program *program, runtime backendRuntimeInputs, workspace string) (backendEmission, error) {
+func emitGoSource(core coreProgram, runtime backendRuntimeInputs, workspace string) (backendEmission, error) {
+	program, err := coreEmitterProgram(core)
+	if err != nil {
+		return backendEmission{}, err
+	}
 	generated, err := program.generateGo()
 	if err != nil {
 		return backendEmission{}, err
@@ -1875,6 +1879,9 @@ func (g *goGenerator) nameExpression(node *nameExpression, scope *goScope) (stri
 }
 
 func (g *goGenerator) expressionType(expression expressionNode, scope *goScope) (string, error) {
+	if typ := g.program.expressionTypes[expression]; typ != "" {
+		return typ, nil
+	}
 	if node, ok := expression.(*tupleExpression); ok && node.resolved != "" {
 		return node.resolved, nil
 	}

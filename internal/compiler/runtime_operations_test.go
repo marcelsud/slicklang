@@ -84,7 +84,7 @@ function main() -> int {
 		!inputs.usesSQLite || len(inputs.operations) != 0 {
 		t.Fatalf("type-only SQLite runtime inputs = %#v, Core families = %v", inputs, core.RuntimeFamilies)
 	}
-	emission, err := emitGoSource(program, inputs, t.TempDir())
+	emission, err := emitGoSource(core, inputs, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
