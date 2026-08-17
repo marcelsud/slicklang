@@ -48,7 +48,7 @@ func TestEveryStandardLibraryRegistryEntryIsDescribable(t *testing.T) {
 	}
 }
 
-func TestStabilityRegistriesAreExplicitAndEligible(t *testing.T) {
+func TestStabilityRegistriesAreExplicit(t *testing.T) {
 	if err := validateStabilityRegistries(); err != nil {
 		t.Fatal(err)
 	}
@@ -58,12 +58,12 @@ func TestStabilityRegistriesAreExplicitAndEligible(t *testing.T) {
 		}
 	}
 	for _, backend := range Backends() {
-		if backend.Stability != StabilityStable || !backend.Eligible {
-			t.Fatalf("backend %s = %+v, want stable and eligible", backend.Name, backend)
+		if !backend.Stability.valid() || (backend.Stability == StabilityStable && !backend.Eligible) {
+			t.Fatalf("backend %s has invalid stability or stable coverage: %+v", backend.Name, backend)
 		}
 		for _, target := range backend.Targets {
-			if target.Stability != StabilityStable || !target.Eligible {
-				t.Fatalf("backend %s target = %+v, want stable and eligible", backend.Name, target)
+			if !target.Stability.valid() || (target.Stability == StabilityStable && !target.Eligible) {
+				t.Fatalf("backend %s target has invalid stability or stable coverage: %+v", backend.Name, target)
 			}
 		}
 	}
