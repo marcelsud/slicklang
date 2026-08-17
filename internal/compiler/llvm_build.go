@@ -15,39 +15,18 @@ var llvmRuntimeSource []byte
 //go:embed llvmlib/natives.c
 var llvmNativesSource []byte
 
-func buildLLVMBinary(program *program, output string) error {
-	tool, err := locateLLVMToolchain()
-	if err != nil {
-		return err
-	}
+func emitLLVMSource(program *program, workspace string) (backendEmission, error) {
 	ir, err := program.generateLLVM()
 	if err != nil {
-		return err
+		return backendEmission{}, err
 	}
 	if dump := os.Getenv("SLICK_DUMP_LL"); dump != "" {
 		_ = os.WriteFile(dump, []byte(ir), 0o644)
 	}
-	temporary, err := os.MkdirTemp(filepath.Dir(output), ".slick-llvm-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(temporary)
-	irPath := filepath.Join(temporary, "main.ll")
+	irPath := filepath.Join(workspace, "main.ll")
 	if err := os.WriteFile(irPath, []byte(ir), 0o644); err != nil {
-		return err
+		return backendEmission{}, err
 	}
-	if err := tool.verifyIR(irPath); err != nil {
-		return err
-	}
-	objPath := filepath.Join(temporary, "main.o")
-	if err := tool.assembleIR(irPath, objPath); err != nil {
-		return err
-	}
-	jsonCompile, jsonLink, err := llvmJSONFlags(program.usesStdJSON())
-	if err != nil {
-		return err
-	}
-	objects := []string{objPath}
 	sources := []struct {
 		name string
 		data []byte
@@ -56,46 +35,52 @@ func buildLLVMBinary(program *program, output string) error {
 		{name: "natives.c", data: llvmNativesSource},
 	}
 	for _, source := range sources {
-		src := filepath.Join(temporary, source.name)
-		if err := os.WriteFile(src, source.data, 0o644); err != nil {
-			return fmt.Errorf("write embedded %s: %w", source.name, err)
+		if err := os.WriteFile(filepath.Join(workspace, source.name), source.data, 0o644); err != nil {
+			return backendEmission{}, fmt.Errorf("write embedded %s: %w", source.name, err)
 		}
-		obj := filepath.Join(temporary, source.name+".o")
+	}
+	return backendEmission{primary: irPath}, nil
+}
+
+func buildLLVMEmission(tool llvmToolchain, runtime backendRuntimeInputs, emission backendEmission, output string) error {
+	if err := tool.verifyIR(emission.primary); err != nil {
+		return err
+	}
+	workspace := filepath.Dir(emission.primary)
+	objPath := filepath.Join(workspace, "main.o")
+	if err := tool.assembleIR(emission.primary, objPath); err != nil {
+		return err
+	}
+	jsonCompile, jsonLink, err := llvmJSONFlags(runtime.usesJSON)
+	if err != nil {
+		return err
+	}
+	objects := []string{objPath}
+	for _, name := range []string{"runtime.c", "natives.c"} {
+		src := filepath.Join(workspace, name)
+		obj := filepath.Join(workspace, name+".o")
 		compile := []string{"-c", "-std=c11", "-O2", "-fPIC", "-o", obj, src}
-		if program.usesStdSQLite {
+		if runtime.usesSQLite {
 			compile = append(compile, "-DSLICK_HAS_SQLITE")
 		}
-		if program.usesStdHTTP {
+		if runtime.usesHTTP {
 			compile = append(compile, "-DSLICK_HAS_CURL")
 		}
 		compile = append(compile, jsonCompile...)
 		if out, err := runCC(tool.cc, compile...); err != nil {
-			return fmt.Errorf("compile %s: %w: %s", source.name, err, strings.TrimSpace(out))
+			return fmt.Errorf("compile %s: %w: %s", name, err, strings.TrimSpace(out))
 		}
 		objects = append(objects, obj)
 	}
 	libs := []string{"-lpthread", "-lm"}
-	if program.usesStdSQLite {
-		if !sqliteDevPresent() {
-			return fmt.Errorf("LLVM backend requires libsqlite3 (sqlite3.h and -lsqlite3)")
-		}
+	if runtime.usesSQLite {
 		libs = append(libs, "-lsqlite3")
 	}
-	if program.usesStdHTTP {
-		if !curlDevPresent() {
-			return fmt.Errorf("LLVM backend requires libcurl development files (curl/curl.h and -lcurl)")
-		}
+	if runtime.usesHTTP {
 		libs = append(libs, "-lcurl")
 	}
 	libs = append(libs, jsonLink...)
-	linkedOutput := filepath.Join(temporary, "program")
-	if err := tool.link(linkedOutput, objects, libs); err != nil {
-		return err
-	}
-	if err := os.Rename(linkedOutput, output); err != nil {
-		return fmt.Errorf("install LLVM output: %w", err)
-	}
-	return nil
+	return tool.link(output, objects, libs)
 }
 
 func runCC(cc string, args ...string) (string, error) {

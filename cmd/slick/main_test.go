@@ -35,6 +35,16 @@ func TestParseBuildArgsAcceptsLLVMBackend(t *testing.T) {
 	}
 }
 
+func TestParseBuildOptionsAcceptsTarget(t *testing.T) {
+	_, _, options, err := parseBuildOptions([]string{"examples/hello", "-o", "bin/hello", "--target=linux-x64"})
+	if err != nil {
+		t.Fatalf("parse build target: %v", err)
+	}
+	if options.Target != "linux-x64" {
+		t.Fatalf("expected linux-x64 target, found %q", options.Target)
+	}
+}
+
 func TestBuildAndCheckParseExplicitAlphaOptIn(t *testing.T) {
 	_, _, build, err := parseBuildOptions([]string{"examples/hello", "-o", "bin/hello", "--allow-alpha"})
 	if err != nil || !build.AllowAlpha {

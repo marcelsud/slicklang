@@ -5,46 +5,34 @@ import (
 	"go/format"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 )
 
-func buildGoBinary(program *program, output string) error {
+func emitGoSource(program *program, runtime backendRuntimeInputs, workspace string) (backendEmission, error) {
 	generated, err := program.generateGo()
 	if err != nil {
-		return err
+		return backendEmission{}, err
 	}
 	formatted, err := format.Source([]byte(generated))
 	if err != nil {
-		return fmt.Errorf("format generated Go: %w", err)
+		return backendEmission{}, fmt.Errorf("format generated Go: %w", err)
 	}
-	temporary, err := os.MkdirTemp("", "slick-build-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(temporary)
-	sourcePath := filepath.Join(temporary, "main.go")
+	sourcePath := filepath.Join(workspace, "main.go")
 	if err := os.WriteFile(sourcePath, formatted, 0o644); err != nil {
-		return err
+		return backendEmission{}, err
 	}
-	if program.usesStdSQLite {
-		if err := os.WriteFile(filepath.Join(temporary, "go.mod"), []byte(sqlitePinnedGoMod), 0o644); err != nil {
-			return err
+	if runtime.usesSQLite {
+		if err := os.WriteFile(filepath.Join(workspace, "go.mod"), []byte(sqlitePinnedGoMod), 0o644); err != nil {
+			return backendEmission{}, err
 		}
-		if err := os.WriteFile(filepath.Join(temporary, "go.sum"), []byte(sqlitePinnedGoSum), 0o644); err != nil {
-			return err
+		if err := os.WriteFile(filepath.Join(workspace, "go.sum"), []byte(sqlitePinnedGoSum), 0o644); err != nil {
+			return backendEmission{}, err
 		}
 	}
-	command := exec.Command("go", "build", "-buildvcs=false", "-trimpath", "-o", output, sourcePath)
-	command.Dir = temporary
-	buildOutput, err := command.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("go build: %w: %s", err, strings.TrimSpace(string(buildOutput)))
-	}
-	return nil
+	return backendEmission{primary: sourcePath}, nil
 }
 
 // goBinding is one Slick local in generated Go. name is what an expression

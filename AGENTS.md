@@ -6,10 +6,14 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 - `go build ./...` fails with `error obtaining VCS status` in a git worktree; use `go vet ./...` and `go test ./...` instead, or pass `-buildvcs=false`.
 - `go test ./...` builds real native binaries through `BuildPath`, so it needs a working Go toolchain and takes ~30s.
+
 ## Core IR
 
 `internal/compiler/core_ir.go` is the typed, backend-neutral contract between checking and native emission. `BuildSourcesWithOptions` lowers every valid program before touching the output path; an unclassified or untyped node is therefore a lowering error, not a backend fallback. Call targets use resolved declaration or standard-operation IDs, and native resource state remains outside the IR. A new statement or expression node must be added to the Core lowerer; `TestCoreIRClassifiesEveryASTNode` is the completeness gate.
 
+## Backend drivers
+
+`internal/compiler/backend.go` is the authoritative backend, target, artifact, toolchain, capability, operation-support, and driver registry. `backend_driver.go` owns the fixed validate → emit → build → verify → atomic-install sequence and the compiler-owned workspace. Target and toolchain failures happen before workspace creation; drivers write only a candidate path inside that workspace. `BuildPath` remains the stable-Go compatibility entry point, while `BuildOptions.Target` selects only targets advertised by the chosen driver.
 
 ## Adding a standard-library declaration
 
