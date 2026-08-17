@@ -15,9 +15,13 @@ import (
 var ErrNoSources = errors.New("no .slk files found")
 
 type Source struct {
-	Name      string
-	Namespace string
-	Text      string
+	Name           string
+	Namespace      string
+	Text           string
+	Package        string
+	packageBackend Backend
+	packageTarget  string
+	packageImports map[string]bool
 }
 
 // Diagnostic is one reported source fact. Severity comes from the registered
@@ -176,6 +180,7 @@ type program struct {
 	genericMethodImpls     []*functionDecl
 	annotations            map[string]*annotationDecl
 	namespaceDocumentation map[string]*string
+	packageNamespaces      map[string]bool
 	methodImpls            []*functionDecl
 	diags                  []Diagnostic
 	expressionTypes        map[expressionNode]string
@@ -204,6 +209,7 @@ func newProgram(terminals ...terminalAnnotationDecl) *program {
 		genericInterfaces:      make(map[string]*interfaceDecl),
 		genericFunctions:       make(map[string]*functionDecl),
 		namespaceDocumentation: make(map[string]*string),
+		packageNamespaces:      make(map[string]bool),
 		annotations:            make(map[string]*annotationDecl),
 		expressionTypes:        make(map[expressionNode]string),
 		emitted:                make(map[Diagnostic]struct{}),
@@ -229,7 +235,7 @@ func CheckPathWithOptions(path string, options CheckOptions) ([]Diagnostic, erro
 	if err := validateStabilityRegistries(); err != nil {
 		return nil, err
 	}
-	sources, err := loadSources(path)
+	sources, err := loadSourcesWithAlpha(path, options.AllowAlpha)
 	if err != nil {
 		return nil, err
 	}
@@ -250,6 +256,10 @@ func LoadSources(path string) ([]Source, error) {
 }
 
 func loadSources(path string) ([]Source, error) {
+	return loadSourcesWithAlpha(path, false)
+}
+
+func loadSourcesWithAlpha(path string, allowAlpha bool) ([]Source, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, err
@@ -265,9 +275,22 @@ func loadSources(path string) ([]Source, error) {
 		}
 		return []Source{{Name: filepath.Base(path), Namespace: "root", Text: string(data)}}, nil
 	}
+	manifest := filepath.Join(path, projectManifestName)
+	if _, err := os.Stat(manifest); err == nil {
+		project, err := loadPackageProject(path, nil, allowAlpha)
+		if err != nil {
+			return nil, err
+		}
+		return project.sources, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	return loadNamespacedSources(path, "root", "")
+}
 
+func loadNamespacedSources(path, baseNamespace, namePrefix string) ([]Source, error) {
 	var sources []Source
-	err = filepath.WalkDir(path, func(file string, entry fs.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(path, func(file string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -283,11 +306,17 @@ func loadSources(path string) ([]Source, error) {
 			return err
 		}
 		dir := filepath.Dir(rel)
-		namespace := "root"
+		namespace := baseNamespace
 		if dir != "." {
 			namespace += "." + strings.ReplaceAll(filepath.ToSlash(dir), "/", ".")
 		}
-		sources = append(sources, Source{Name: filepath.ToSlash(rel), Namespace: namespace, Text: string(data)})
+		packageName := ""
+		if baseNamespace != "root" {
+			packageName = baseNamespace
+		}
+		sources = append(sources, Source{
+			Name: namePrefix + filepath.ToSlash(rel), Namespace: namespace, Text: string(data), Package: packageName,
+		})
 		return nil
 	})
 	if err != nil {
@@ -311,9 +340,14 @@ func compile(sources []Source) (*program, []Diagnostic) {
 
 func compileWithTerminals(sources []Source, terminals []terminalAnnotationDecl) (*program, []Diagnostic) {
 	prog := newProgram(terminals...)
+	for _, source := range sources {
+		if source.Package != "" {
+			prog.packageNamespaces[source.Package] = true
+		}
+	}
 	registerStandardLibrary(prog)
 	for _, source := range sources {
-		if !validNamespace(source.Namespace) {
+		if !validSourceNamespace(source) {
 			prog.add(position{file: source.Name, line: 1, column: 1}, diagnosticCodeNamespace, "invalid namespace %q", source.Namespace)
 			continue
 		}
@@ -507,8 +541,13 @@ func (p *parser) consumeDocumentation() *string {
 func (p *parser) parseUse() {
 	start := p.index
 	target, next, ok := readQualified(p.tokens, start)
-	if !ok || !isAbsoluteCanonicalName(target.name) {
-		p.error(p.current().pos, "use target must be an absolute root or std namespace path")
+	if !ok || !p.prog.isAbsoluteCanonicalName(target.name) {
+		p.error(p.current().pos, "use target must be an absolute project, package, or std namespace path")
+		return
+	}
+	if dependency, packageImport := p.prog.packageNamespace(target.name); packageImport &&
+		p.source.Package != dependency && !p.source.packageImports[dependency] {
+		p.error(p.current().pos, "package %s is not a declared dependency of %s", dependency, p.sourceImportOwner())
 		return
 	}
 	for index := start + 2; index < next; index += 2 {
@@ -538,6 +577,12 @@ func (p *parser) parseUse() {
 	alias := aliasDecl{name: name.text, target: target.name, namespace: p.source.Namespace, pos: name.pos}
 	p.aliases[name.text] = alias
 	p.prog.aliases = append(p.prog.aliases, alias)
+}
+func (p *parser) sourceImportOwner() string {
+	if p.source.Package != "" {
+		return p.source.Package
+	}
+	return "the application"
 }
 
 // parseTypeParameters reads a <T, U> declaration list. Names are unique and
@@ -1666,6 +1711,21 @@ func validNamespace(namespace string) bool {
 		return false
 	}
 	for _, part := range parts {
+		if !validIdentifier(part) {
+			return false
+		}
+	}
+	return true
+}
+func validSourceNamespace(source Source) bool {
+	if validNamespace(source.Namespace) {
+		return source.Package == ""
+	}
+	if source.Package == "" || !validPackageName(source.Package) ||
+		(source.Namespace != source.Package && !strings.HasPrefix(source.Namespace, source.Package+".")) {
+		return false
+	}
+	for _, part := range strings.Split(source.Namespace, ".") {
 		if !validIdentifier(part) {
 			return false
 		}

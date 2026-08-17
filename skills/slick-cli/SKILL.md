@@ -34,6 +34,72 @@ Rust is alpha and requires `--allow-alpha`, Rust/Cargo 1.93.1, and the `x86_64-u
 
 Bun is alpha and requires `--allow-alpha` and Bun 1.3.14. Its Linux/x64 targets are `bun-linux-x64-modern` (default) and `bun-linux-x64-baseline`; choose baseline for older CPUs. Like Rust, Bun currently accepts only the allocation-free primitive Core subset and reports unsupported managed/runtime behavior before emitting JavaScript or invoking Bun.
 
+## Build a package project
+
+A directory containing `slick.project.json` is a package-aware project. Application source imports one canonical package interface, never a backend implementation:
+
+```slk
+use acme.redis.Client
+```
+
+The project manifest is strict JSON. Dependencies are local, exact-version package roots and must be sorted by canonical name:
+
+```json
+{
+  "schema_version": 1,
+  "name": "example.application",
+  "source": "src",
+  "dependencies": [
+    {"name": "acme.redis", "version": "2.1.0", "path": "packages/redis"}
+  ]
+}
+```
+
+Each dependency root contains `slick.package.json`. Its canonical interface fixes the public source, effect/resource contract, conformance suite, and hashes. Every adapter names an exact backend, sorted targets, explicit stability, implementation entry, dependencies, assets, ABI, and hashes:
+
+```json
+{
+  "schema_version": 1,
+  "name": "acme.redis",
+  "version": "2.1.0",
+  "stability": "stable",
+  "interface": {
+    "path": "interface",
+    "sha256": "<64 lowercase hex digits>",
+    "effects": ["network"],
+    "resources": [],
+    "conformance_path": "conformance",
+    "conformance_sha256": "<64 lowercase hex digits>"
+  },
+  "adapters": [
+    {
+      "id": "go-linux",
+      "backend": "go",
+      "targets": ["linux-x64"],
+      "stability": "stable",
+      "kind": "slick",
+      "entry": "adapters/go",
+      "dependencies": [],
+      "checksum": "<64 lowercase hex digits>",
+      "assets": [],
+      "interface_sha256": "<same interface hash>",
+      "conformance_sha256": "<same conformance hash>",
+      "abi": "slick-core-1"
+    }
+  ],
+  "dependencies": []
+}
+```
+
+Canonical package names cannot use `root.*` or `std.*`, and names in one closure cannot overlap by prefix. Application source may import only direct project dependencies. Canonical interface source may import only the package-level dependencies; adapter source may import only names in that adapter's `dependencies` array.
+
+The conformance directory is a complete pure Slick program with `root.main() -> bool`. Slick compiles and runs it against every declared portable Slick adapter; every run must return `true`. Each adapter must expose exactly the canonical public declarations, types, checked failures, and effects, must bind the exact interface and conformance hashes, and cannot add a public symbol. The interface `effects` list is the exact union of its public callable effects; every listed resource is a public class.
+
+`slick build` resolves the full dependency closure, requires exactly one adapter for each package/backend/target tuple, rejects undeclared alpha interfaces or the selected alpha adapter without `--allow-alpha`, and validates all adapter entries/assets before code generation or toolchain invocation. Only `kind: "slick"` is linkable currently; other reserved implementation kinds fail explicitly when selected. A missing adapter reports the full dependency path and the package's available backend/target/stability tuples.
+
+Slick hashes and compiles one retained source snapshot. Before native compilation it exclusively guards `slick.lock`; concurrent target builds cannot lose each other's selections or replace output after a lock conflict. After a successful build, Slick atomically creates or extends the lock with each exact package version, canonical interface hash, and selected adapter checksum. Later version, interface, adapter, or checksum drift fails; Slick never rewrites a conflicting lock automatically. Commit `slick.project.json`, every package manifest, and `slick.lock`. Do not add implementation-provider choices to Slick source.
+
+
 ## Work on a project
 
 1. Identify the narrowest file or project directory that contains the change.
