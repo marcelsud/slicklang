@@ -186,6 +186,7 @@ type coreExpression struct {
 	Parameters      []coreBinding      `json:"parameters,omitempty"`
 	Throws          []string           `json:"throws,omitempty"`
 	Effects         []string           `json:"effects,omitempty"`
+	TypeArguments   []string           `json:"type_arguments,omitempty"`
 	Bindings        []coreBinding      `json:"bindings,omitempty"`
 	Value           *coreExpression    `json:"value,omitempty"`
 	Left            *coreExpression    `json:"left,omitempty"`
@@ -665,6 +666,7 @@ func (l *coreLowerer) expression(expression expressionNode) (coreExpression, err
 			core.Operation = runtimeOperationID(core.Declaration)
 		}
 		var err error
+		core.TypeArguments = append([]string(nil), node.resolvedTypeArgs...)
 		core.Arguments, err = lowerAll(node.args)
 		if err != nil {
 			return coreExpression{}, err

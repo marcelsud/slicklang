@@ -15,7 +15,11 @@ var llvmRuntimeSource []byte
 //go:embed llvmlib/natives.c
 var llvmNativesSource []byte
 
-func emitLLVMSource(program *program, workspace string) (backendEmission, error) {
+func emitLLVMSource(core coreProgram, workspace string) (backendEmission, error) {
+	program, err := coreEmitterProgram(core)
+	if err != nil {
+		return backendEmission{}, err
+	}
 	ir, err := program.generateLLVM()
 	if err != nil {
 		return backendEmission{}, err

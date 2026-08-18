@@ -90,7 +90,7 @@ export function slickWrite(value) {
 }
 `
 
-func bunBackendDriver(_ *program) backendDriver {
+func bunBackendDriver() backendDriver {
 	return backendDriver{
 		checkCore: func(input backendDriverInput) error {
 			return validatePrimitiveCore(input.core, input.runtime, "Bun")

@@ -334,7 +334,7 @@ func BuildSourcesWithOptions(sources []Source, output string, options BuildOptio
 	if err != nil {
 		return nil, fmt.Errorf("resolve runtime inputs: %w", err)
 	}
-	driver, ok := registeredBackendDriver(declaration.driver, program)
+	driver, ok := registeredBackendDriver(declaration.driver)
 	input := backendDriverInput{
 		core:         core,
 		target:       target,

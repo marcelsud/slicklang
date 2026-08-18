@@ -93,19 +93,19 @@ const (
 	backendDriverBun  backendDriverID = "bun"
 )
 
-var backendDriverRegistry = map[backendDriverID]func(*program) backendDriver{
+var backendDriverRegistry = map[backendDriverID]func() backendDriver{
 	backendDriverGo:   goBackendDriver,
 	backendDriverLLVM: llvmBackendDriver,
 	backendDriverRust: rustBackendDriver,
 	backendDriverBun:  bunBackendDriver,
 }
 
-func registeredBackendDriver(id backendDriverID, program *program) (backendDriver, bool) {
+func registeredBackendDriver(id backendDriverID) (backendDriver, bool) {
 	factory, ok := backendDriverRegistry[id]
 	if !ok {
 		return backendDriver{}, false
 	}
-	return factory(program), true
+	return factory(), true
 }
 
 func executeBuildPlan(driver backendDriver, plan backendBuildPlan) error {
@@ -184,8 +184,11 @@ func verifyNativeExecutable(input backendDriverInput, path string) error {
 	return nil
 }
 
-func goBackendDriver(program *program) backendDriver {
+func goBackendDriver() backendDriver {
 	return backendDriver{
+		checkCore: func(input backendDriverInput) error {
+			return validateNativeCore(input.core, input.runtime)
+		},
 		validate: func(input backendDriverInput) (backendToolchain, error) {
 			if input.target.name != hostTargetName() {
 				return backendToolchain{}, fmt.Errorf("Go target %s requires host %s", input.target.name, hostTargetName())
@@ -200,7 +203,7 @@ func goBackendDriver(program *program) backendDriver {
 			}, nil
 		},
 		emit: func(input backendDriverInput, workspace string) (backendEmission, error) {
-			return emitGoSource(program, input.runtime, workspace)
+			return emitGoSource(input.core, input.runtime, workspace)
 		},
 		build: func(input backendDriverInput, emission backendEmission, candidate string) error {
 			command := exec.Command(input.toolchain.executables["go"], "build", "-buildvcs=false", "-trimpath", "-o", candidate, emission.primary)
@@ -215,8 +218,11 @@ func goBackendDriver(program *program) backendDriver {
 	}
 }
 
-func llvmBackendDriver(program *program) backendDriver {
+func llvmBackendDriver() backendDriver {
 	return backendDriver{
+		checkCore: func(input backendDriverInput) error {
+			return validateNativeCore(input.core, input.runtime)
+		},
 		validate: func(input backendDriverInput) (backendToolchain, error) {
 			tool, err := locateLLVMToolchain()
 			if err != nil {
@@ -233,8 +239,8 @@ func llvmBackendDriver(program *program) backendDriver {
 			}
 			return backendToolchain{registration: input.target.toolchain, version: tool.version, llvm: tool}, nil
 		},
-		emit: func(_ backendDriverInput, workspace string) (backendEmission, error) {
-			return emitLLVMSource(program, workspace)
+		emit: func(input backendDriverInput, workspace string) (backendEmission, error) {
+			return emitLLVMSource(input.core, workspace)
 		},
 		build: func(input backendDriverInput, emission backendEmission, candidate string) error {
 			return buildLLVMEmission(input.toolchain.llvm, input.runtime, emission, candidate)

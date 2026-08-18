@@ -14,8 +14,7 @@ type unclassifiedCoreExpression struct{ pos position }
 
 func (n *unclassifiedCoreExpression) expressionPos() position { return n.pos }
 
-func TestCoreIRIsTypedResolvedAndDeterministic(t *testing.T) {
-	source := Source{Name: "main.slk", Namespace: "root", Text: `
+var coreIRTestSource = Source{Name: "main.slk", Namespace: "root", Text: `
 /// Expression is a test union.
 union Expression {
     /// Number carries a value.
@@ -64,7 +63,9 @@ function main() -> string {
     Render(Node)
 }
 `}
-	program, diagnostics := compile([]Source{source})
+
+func TestCoreIRIsTypedResolvedAndDeterministic(t *testing.T) {
+	program, diagnostics := compile([]Source{coreIRTestSource})
 	requireNoDiagnostics(t, diagnostics)
 
 	first, err := program.debugCore()
