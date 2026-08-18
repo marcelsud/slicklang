@@ -18,9 +18,9 @@ function main() -> string {
 `
 }
 
-// TestConstantsProduceOneValueInEveryBackend covers the constant expression
+// TestMatrixConstantsProduceOneValue covers the constant expression
 // grammar end to end: all backends must agree on the value a program prints.
-func TestConstantsProduceOneValueInEveryBackend(t *testing.T) {
+func TestMatrixConstantsProduceOneValue(t *testing.T) {
 	for _, test := range []struct {
 		name         string
 		declarations string
@@ -51,7 +51,7 @@ func TestConstantsProduceOneValueInEveryBackend(t *testing.T) {
 		{"variant equality", "union Mode {\n    Strict\n    Lenient\n}\nconst Chosen: Mode = Mode.Strict\nconst Value: bool = Chosen == Mode.Lenient", "false"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := runResultEverywhere(t, constantProgram(test.declarations)); got != test.want {
+			if got := runOnEveryEngineSource(t, constantProgram(test.declarations)); got != test.want {
 				t.Fatalf("constant produced %q, want %q", got, test.want)
 			}
 		})

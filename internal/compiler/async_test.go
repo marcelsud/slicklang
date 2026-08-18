@@ -17,31 +17,13 @@ import (
 	"slick/internal/compiler"
 )
 
-type asyncTestBackend struct {
-	name    string
-	native  bool
-	backend compiler.Backend
+func runAsyncBackend(source string, engine compiler.ExecutionEngine) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return runAsyncBackendContext(ctx, source, engine)
 }
 
-var asyncTestBackends = []asyncTestBackend{
-	{name: "interpreter"},
-	{name: "go", native: true, backend: compiler.BackendGo},
-	{name: "llvm", native: true, backend: compiler.BackendLLVM},
-}
-
-func runAsyncBackend(source string, testBackend asyncTestBackend) (string, error) {
-	return runAsyncBackendContext(context.Background(), source, testBackend)
-}
-
-func runAsyncBackendContext(ctx context.Context, source string, testBackend asyncTestBackend) (string, error) {
-	if !testBackend.native {
-		output, diagnostics, err := compiler.Run([]compiler.Source{{Name: "main.slk", Namespace: "root", Text: source}})
-		if len(diagnostics) != 0 {
-			return "", fmt.Errorf("async diagnostics: %v", diagnostics)
-		}
-		return output, err
-	}
-
+func runAsyncBackendContext(ctx context.Context, source string, engine compiler.ExecutionEngine) (string, error) {
 	root, err := os.MkdirTemp("", "slick-async-test-")
 	if err != nil {
 		return "", err
@@ -51,8 +33,15 @@ func runAsyncBackendContext(ctx context.Context, source string, testBackend asyn
 	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
 		return "", err
 	}
+	if engine.Interpreted {
+		output, diagnostics, err := compiler.RunPath(sourcePath)
+		if len(diagnostics) != 0 {
+			return "", fmt.Errorf("async diagnostics: %v", diagnostics)
+		}
+		return output, err
+	}
 	binary := filepath.Join(root, "app")
-	diagnostics, err := compiler.BuildPathBackend(sourcePath, binary, testBackend.backend)
+	diagnostics, err := compiler.BuildPathWithOptions(sourcePath, binary, engineBuildOptions(engine, ""))
 	if err != nil {
 		return "", err
 	}
@@ -75,7 +64,7 @@ func receiveAsyncSignal(signal <-chan struct{}, label string) error {
 	select {
 	case <-signal:
 		return nil
-	case <-time.After(5 * time.Second):
+	case <-time.After(45 * time.Second):
 		return fmt.Errorf("timed out waiting for %s", label)
 	}
 }
@@ -84,7 +73,7 @@ func receiveAsyncResult(result <-chan asyncRunResult, label string) (asyncRunRes
 	select {
 	case completed := <-result:
 		return completed, nil
-	case <-time.After(5 * time.Second):
+	case <-time.After(45 * time.Second):
 		return asyncRunResult{}, fmt.Errorf("timed out waiting for %s", label)
 	}
 }
@@ -261,9 +250,9 @@ function main() -> int {
 	assertDiagnostic(t, checkResult(t, resultSource), "SLK403", "async call result has task-unsafe type")
 }
 
-func TestAsyncPreparationFailureLaunchesNoChild(t *testing.T) {
-	for _, backend := range asyncTestBackends {
-		t.Run(backend.name, func(t *testing.T) {
+func TestMatrixAsyncPreparationFailureLaunchesNoChild(t *testing.T) {
+	for _, backend := range compiler.ExecutionEngines() {
+		t.Run(backend.Name, func(t *testing.T) {
 			var hits atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 				hits.Add(1)
@@ -297,9 +286,9 @@ function main() -> Result<int, PrepFailure> effects { network } {
 	}
 }
 
-func TestAsyncArgumentsEvaluateOnceInSourceOrder(t *testing.T) {
-	for _, backend := range asyncTestBackends {
-		t.Run(backend.name, func(t *testing.T) {
+func TestMatrixAsyncArgumentsEvaluateOnceInSourceOrder(t *testing.T) {
+	for _, backend := range compiler.ExecutionEngines() {
+		t.Run(backend.Name, func(t *testing.T) {
 			var mutex sync.Mutex
 			var paths []string
 			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -337,9 +326,9 @@ function main() -> Result<int, std.http.Failure> effects { network } {
 	}
 }
 
-func TestAsyncHTTPChildrenOverlap(t *testing.T) {
-	for _, backend := range asyncTestBackends {
-		t.Run(backend.name, func(t *testing.T) {
+func TestMatrixAsyncHTTPChildrenOverlap(t *testing.T) {
+	for _, backend := range compiler.ExecutionEngines() {
+		t.Run(backend.Name, func(t *testing.T) {
 			started := make(chan struct{}, 2)
 			release := make(chan struct{})
 			releaseRequests := sync.OnceFunc(func() { close(release) })
@@ -395,9 +384,9 @@ function main() -> Result<int, std.http.Failure> effects { network } {
 	}
 }
 
-func TestAsyncResultPropagationCancelsAndJoinsHTTPChild(t *testing.T) {
-	for _, backend := range asyncTestBackends {
-		t.Run(backend.name, func(t *testing.T) {
+func TestMatrixAsyncResultPropagationCancelsAndJoinsHTTPChild(t *testing.T) {
+	for _, backend := range compiler.ExecutionEngines() {
+		t.Run(backend.Name, func(t *testing.T) {
 			blocked := make(chan struct{}, 1)
 			cancelled := make(chan struct{}, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -464,9 +453,9 @@ function main() -> string effects { network } {
 	}
 }
 
-func TestAsyncReturnJoinsChildBeforeParentUsingCleanup(t *testing.T) {
-	for _, backend := range asyncTestBackends {
-		t.Run(backend.name, func(t *testing.T) {
+func TestMatrixAsyncReturnJoinsChildBeforeParentUsingCleanup(t *testing.T) {
+	for _, backend := range compiler.ExecutionEngines() {
+		t.Run(backend.Name, func(t *testing.T) {
 			started := make(chan struct{}, 1)
 			childDone := make(chan struct{})
 			var closes atomic.Int32

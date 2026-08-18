@@ -2,8 +2,6 @@ package compiler_test
 
 import (
 	"errors"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -32,47 +30,10 @@ func runGenerics(t *testing.T, sources ...compiler.Source) string {
 	return output
 }
 
-func buildAndRunGenericsBackend(t *testing.T, backend compiler.Backend, sources ...compiler.Source) string {
-	t.Helper()
-	root := t.TempDir()
-	for _, source := range sources {
-		path := filepath.Join(root, filepath.FromSlash(source.Name))
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatalf("create source directory: %v", err)
-		}
-		if err := os.WriteFile(path, []byte(source.Text), 0o644); err != nil {
-			t.Fatalf("write Slick source: %v", err)
-		}
-	}
-	binary := filepath.Join(t.TempDir(), "app")
-	diagnostics, err := compiler.BuildPathBackend(root, binary, backend)
-	if err != nil {
-		t.Fatalf("build %s binary: %v", backend, err)
-	}
-	assertNoDiagnostics(t, diagnostics)
-	output, err := exec.Command(binary).CombinedOutput()
-	if err != nil {
-		t.Fatalf("run %s binary: %v: %s", backend, err, output)
-	}
-	return strings.TrimSuffix(string(output), "\n")
-}
-
-// runGenericsSourcesEverywhere holds the interpreter, generated-Go, and LLVM
-// backends to one observable result.
+// runGenericsSourcesEverywhere holds every execution engine to one observable result.
 func runGenericsSourcesEverywhere(t *testing.T, sources ...compiler.Source) string {
 	t.Helper()
-	var interpreted string
-	t.Run("interpreter", func(t *testing.T) {
-		interpreted = runGenerics(t, sources...)
-	})
-	for _, backend := range []compiler.Backend{compiler.BackendGo, compiler.BackendLLVM} {
-		t.Run(string(backend), func(t *testing.T) {
-			if output := buildAndRunGenericsBackend(t, backend, sources...); output != interpreted {
-				t.Fatalf("interpreter produced %q, %s produced %q", interpreted, backend, output)
-			}
-		})
-	}
-	return interpreted
+	return runOnEveryEngine(t, writeSlickSources(t, sources...))
 }
 
 func runGenericsEverywhere(t *testing.T, source string) string {
@@ -85,7 +46,7 @@ func checkGenerics(t *testing.T, source string) []compiler.Diagnostic {
 	return compiler.Check([]compiler.Source{{Name: "main.slk", Namespace: "root", Text: source}})
 }
 
-func TestGenericDeclarationsRunOnEveryBackend(t *testing.T) {
+func TestMatrixGenericDeclarations(t *testing.T) {
 	tests := map[string]struct {
 		source   string
 		expected string
@@ -387,10 +348,10 @@ function main() -> string {
 	}
 }
 
-// TestGenericDeclarationsCrossNamespaces pins visibility and exact aliases for
+// TestMatrixGenericDeclarationsCrossNamespaces pins visibility and exact aliases for
 // generic declarations: an alias names one declaration, and its instantiations
 // obey the same access rules the declaration does.
-func TestGenericDeclarationsCrossNamespaces(t *testing.T) {
+func TestMatrixGenericDeclarationsCrossNamespaces(t *testing.T) {
 	library := compiler.Source{Name: "deep/lib.slk", Namespace: "root.deep", Text: `
 class Parsed<T> {
     Value: T
@@ -464,7 +425,7 @@ function main() -> int {
 // built: a class that reaches itself by value through an optional is a Go
 // recursive value type, which the native backend already rejects for the
 // non-generic class Node { Next: Node? }. Recursion through an array is
-// covered by TestGenericDeclarationsRunOnEveryBackend on every backend.
+// covered by TestMatrixGenericDeclarations on every backend.
 func TestRecursiveGenericConverges(t *testing.T) {
 	t.Run("same type arguments", func(t *testing.T) {
 		source := `
@@ -562,7 +523,7 @@ function main() -> null {
 	})
 }
 
-func TestCallableTypeArgumentsAtGenericExpressionBoundaries(t *testing.T) {
+func TestMatrixCallableTypeArgumentsAtGenericExpressionBoundaries(t *testing.T) {
 	tests := map[string]struct {
 		source string
 		want   string
@@ -835,9 +796,9 @@ function main() -> Result<string, std.json.Failure> {
 	})
 }
 
-// TestCompilerOwnedGenericsAreUnchanged pins that declaring user generics does
+// TestMatrixCompilerOwnedGenericsAreUnchanged pins that declaring user generics does
 // not disturb Map, Result, Buffer, or the native JSON generics.
-func TestCompilerOwnedGenericsAreUnchanged(t *testing.T) {
+func TestMatrixCompilerOwnedGenericsAreUnchanged(t *testing.T) {
 	source := genericBox + `
 function collect() -> Result<int, std.json.Failure> effects { state } {
     let Numbers = std.buffer.New<int>()
@@ -863,12 +824,12 @@ function main() -> string effects { state } {
 	}
 }
 
-// TestUnionVariantCarriesGenericInstantiation pins that a union variant payload
+// TestMatrixUnionVariantCarriesGenericInstantiation pins that a union variant payload
 // typed as a concrete instantiation of a user generic seeds monomorphization, so
 // the native backend can emit the payload field. Box<int> appears only in the
 // variant declaration; the Full arm is never constructed, so nothing else
 // registers the instance. Without seeding from p.unions the native build fails.
-func TestUnionVariantCarriesGenericInstantiation(t *testing.T) {
+func TestMatrixUnionVariantCarriesGenericInstantiation(t *testing.T) {
 	source := genericBox + `
 union Holder {
     Full(Content: Box<int>)

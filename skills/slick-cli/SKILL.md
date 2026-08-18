@@ -20,13 +20,13 @@ Use the CLI as the source of truth for the installed compiler. Prefer exact comm
 | Report formatting, validity, lint, and complexity together | `slick quality [path]` |
 | Enforce that report as a gate | `slick quality --check [path]` |
 | Run `root.main` with the interpreter | `slick run [path] [arguments...]` |
-| Build a standalone native executable | `slick build [path] -o <output> [--backend=bun\|go\|llvm\|rust] [--target=<target>] [--allow-alpha]` |
+| Build a standalone native executable | `slick build [path] -o <output> [--backend=bun\|go\|llvm\|rust] [--target=bun-linux-x64-baseline\|bun-linux-x64-modern\|linux-x64\|x86_64-unknown-linux-gnu] [--allow-alpha]` |
 | Format one file or project in place | `slick fmt [path]` |
 | Verify formatting without writing | `slick fmt --check [path]` |
 | Describe a language, standard-library, or project symbol | `slick describe [--json] [--budget <lines>] <symbol> [path]` |
 | Explain a compiler diagnostic | `slick describe [--json] SLKxxx` |
 
-The default path is `.` for every command. `build` always requires `-o` or `--output`. The default backend is Go; pass `--backend=bun`, `--backend=llvm`, `--backend=rust`, or `--backend=go` to select a native backend explicitly. Omit `--target` to use that driver's default advertised target; an explicit target must be registered for the selected backend. Alpha declarations, backends, and targets require `--allow-alpha`; technical eligibility never promotes them to stable. `--check` may appear before or after the path for both `fmt` and `quality`. Everything after the project path in `slick run` belongs to the program, not the toolchain.
+The default path is `.` for every command. `build` always requires `-o` or `--output`. The default backend is Go; pass `--backend=bun`, `--backend=llvm`, `--backend=rust`, or `--backend=go` to select a native backend explicitly. Omit `--target` to use that driver's default advertised target; an explicit target must be one of `bun-linux-x64-baseline`, `bun-linux-x64-modern`, `linux-x64`, or `x86_64-unknown-linux-gnu` and must be registered for the selected backend. Alpha declarations, backends, and targets require `--allow-alpha`; technical eligibility never promotes them to stable. `--check` may appear before or after the path for both `fmt` and `quality`. Everything after the project path in `slick run` belongs to the program, not the toolchain.
 
 LLVM's `linux-x64` target uses the `x86_64-pc-linux-gnu` triple and requires a Linux/amd64 host, LLVM 18 (`llvm-as-18` and `llc-18`), and a C compiler. HTTP, JSON, and SQLite programs additionally require the libcurl, Jansson, and SQLite development libraries, respectively; native families are linked only when the checked program uses them. Set `SLICK_LLVM_BIN` when the LLVM tools are outside `PATH`.
 

@@ -76,35 +76,42 @@ function main() -> (int,bool,int,string,float,float,float,float,int,bool,int,int
     (Choose(Score(5)), false && Explode(), Maximum + 1, "ok😀", -0.0, 1e20, 1e-7, 1e6, Pick(true), WideEqual(), Rebind(1), BranchShadow(3))
 }`
 
-func TestPrimitiveBackendsMatchInterpreter(t *testing.T) {
-	source := Source{Name: "main.slk", Namespace: "root", Text: rustPrimitiveProgram}
-	interpreted, diagnostics, err := Run([]Source{source})
-	if err != nil {
-		t.Fatalf("run interpreter: %v", err)
+func TestMatrixPrimitiveBackendsMatchInterpreter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "main.slk")
+	if err := os.WriteFile(path, []byte(rustPrimitiveProgram), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	requireNoRustDiagnostics(t, diagnostics)
+	var interpreted string
+	for _, engine := range ExecutionEngines() {
+		if !engine.Interpreted {
+			continue
+		}
+		stdout, exitCode, err := engine.Run(path, "")
+		if err != nil {
+			t.Fatalf("run interpreter: %v", err)
+		}
+		if exitCode != 0 {
+			t.Fatalf("interpreter exit %d: %s", exitCode, stdout)
+		}
+		interpreted = strings.TrimSuffix(stdout, "\n")
+	}
 	if want := "(230, false, -9223372036854775808, ok😀, -0, 1e+20, 1e-07, 1e+06, 7, true, 5, 10)"; interpreted != want {
 		t.Fatalf("interpreter output = %q, want %q", interpreted, want)
 	}
-
-	for _, backend := range []Backend{BackendGo, BackendLLVM, BackendRust, BackendBun} {
-		t.Run(string(backend), func(t *testing.T) {
-			binary := filepath.Join(t.TempDir(), "app")
-			options := BuildOptions{Backend: backend, AllowAlpha: backend == BackendRust || backend == BackendBun}
-			diagnostics, err := BuildSourcesWithOptions([]Source{source}, binary, options)
+	for _, engine := range ExecutionEngines() {
+		if engine.Interpreted {
+			continue
+		}
+		t.Run(engine.Name, func(t *testing.T) {
+			stdout, exitCode, err := engine.Run(path, "")
 			if err != nil {
-				if backend == BackendLLVM && strings.Contains(err.Error(), "LLVM") && strings.Contains(err.Error(), "not found") {
-					t.Skip(err.Error())
-				}
-				t.Fatalf("build %s: %v", backend, err)
+				t.Fatalf("run %s: %v", engine.Name, err)
 			}
-			requireNoRustDiagnostics(t, diagnostics)
-			output, err := exec.Command(binary).CombinedOutput()
-			if err != nil {
-				t.Fatalf("run %s binary: %v: %s", backend, err, output)
+			if exitCode != 0 {
+				t.Fatalf("%s exit %d: %s", engine.Name, exitCode, stdout)
 			}
-			if want := interpreted + "\n"; string(output) != want {
-				t.Fatalf("%s output = %q, want %q", backend, output, want)
+			if want := interpreted + "\n"; stdout != want {
+				t.Fatalf("%s output = %q, want %q", engine.Name, stdout, want)
 			}
 		})
 	}

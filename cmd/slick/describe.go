@@ -195,7 +195,7 @@ func parseDescribeArgs(args []string) (symbol, path string, jsonOutput bool, bud
 func reportUsageTo(stderr io.Writer) int {
 	fmt.Fprintln(stderr, "usage: slick check [path] [--allow-alpha]")
 	fmt.Fprintln(stderr, "       slick run [path] [arguments...]")
-	fmt.Fprintf(stderr, "       slick build [path] -o <output> [--backend=%s] [--target=<target>] [--allow-alpha]\n", strings.Join(compiler.BackendNames(), "|"))
+	fmt.Fprintf(stderr, "       slick build [path] -o <output> [--backend=%s] [--target=%s] [--allow-alpha]\n", strings.Join(compiler.BackendNames(), "|"), strings.Join(registeredTargetNames(), "|"))
 	fmt.Fprintln(stderr, "       slick describe [--json] [--budget <lines>] <symbol|diagnostic-code> [path]")
 	fmt.Fprintln(stderr, "       slick fmt [--check] [path]")
 	fmt.Fprintln(stderr, "       slick lint [path]")

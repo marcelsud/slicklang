@@ -2,7 +2,6 @@ package compiler_test
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -102,147 +101,55 @@ func examplePath(project string) string {
 	return filepath.Join("..", "..", "examples", project)
 }
 
-func TestEveryExampleHasLLVMExecutionContract(t *testing.T) {
-	entries, err := os.ReadDir(examplePath(""))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		if _, ok := exampleOutputs[entry.Name()]; ok {
-			continue
-		}
-		switch entry.Name() {
-		case "std-process":
-			// TestStdProcessExampleRunsEverywhere pins its nonzero Status.
-		case "todo-api":
-			// TestTodoAPIExampleServesAndCleansUpUnderLLVM exercises its server lifecycle.
-		default:
-			t.Errorf("example %s has no LLVM execution contract", entry.Name())
-		}
-	}
-}
-
-func TestBuildPathProducesStandaloneExampleBinaries(t *testing.T) {
-	for project, expected := range exampleOutputs {
-		t.Run(project, func(t *testing.T) {
-			isolateExampleEnvironment(t)
-			binary := filepath.Join(t.TempDir(), "app")
-			diagnostics, err := compiler.BuildPath(examplePath(project), binary)
-			if err != nil {
-				t.Fatalf("build native binary: %v", err)
-			}
-			assertNoDiagnostics(t, diagnostics)
-			output, err := exec.Command(binary).CombinedOutput()
-			if err != nil {
-				t.Fatalf("run native binary: %v: %s", err, output)
-			}
-			if string(output) != expected+"\n" {
-				t.Fatalf("expected %q, found %q", expected+"\n", output)
-			}
-		})
-	}
-}
-
-// TestInterpreterMatchesExampleOutput pins `slick run` to the same output
-// shared by the generated-Go and LLVM example matrices.
-func TestInterpreterMatchesExampleOutput(t *testing.T) {
-	for project, expected := range exampleOutputs {
-		t.Run(project, func(t *testing.T) {
-			isolateExampleEnvironment(t)
-			output, diagnostics, err := compiler.RunPath(examplePath(project))
-			if err != nil {
-				t.Fatalf("run example: %v", err)
-			}
-			assertNoDiagnostics(t, diagnostics)
-			if output != expected {
-				t.Fatalf("expected %q, found %q", expected, output)
-			}
-		})
-	}
-}
-
-func TestLLVMMatchesExampleOutput(t *testing.T) {
-	for project, expected := range exampleOutputs {
-		t.Run(project, func(t *testing.T) {
-			isolateExampleEnvironment(t)
-			binary := filepath.Join(t.TempDir(), "app")
-			diagnostics, err := compiler.BuildPathBackend(examplePath(project), binary, compiler.BackendLLVM)
-			if err != nil {
-				if strings.Contains(err.Error(), "LLVM") && strings.Contains(err.Error(), "not found") {
-					t.Skip(err.Error())
-				}
-				t.Fatalf("build llvm binary: %v", err)
-			}
-			assertNoDiagnostics(t, diagnostics)
-			output, err := exec.Command(binary).CombinedOutput()
-			if err != nil {
-				t.Fatalf("run llvm binary: %v: %s", err, output)
-			}
-			if string(output) != expected+"\n" {
-				t.Fatalf("expected %q, found %q", expected+"\n", output)
-			}
-		})
-	}
-}
-
-func TestBuildPathStopsBeforeBackendOnSlickDiagnostics(t *testing.T) {
+func TestMatrixBuildPathStopsBeforeBackendOnSlickDiagnostics(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "main.slk")
 	if err := os.WriteFile(source, []byte(`function main() -> string { 42 }`), 0o644); err != nil {
 		t.Fatalf("write invalid Slick source: %v", err)
 	}
-	for _, backend := range []compiler.Backend{compiler.BackendGo, compiler.BackendLLVM} {
-		t.Run(string(backend), func(t *testing.T) {
-			binary := filepath.Join(root, "app-"+string(backend))
-			diagnostics, err := compiler.BuildPathBackend(source, binary, backend)
+	for _, engine := range compiler.ExecutionEngines() {
+		if engine.Interpreted {
+			continue
+		}
+		t.Run(engine.Name, func(t *testing.T) {
+			binary := filepath.Join(root, "app-"+engine.Name)
+			diagnostics, err := compiler.BuildPathWithOptions(source, binary, engineBuildOptions(engine, ""))
 			if err != nil {
-				t.Fatalf("check invalid Slick %s build: %v", backend, err)
+				t.Fatalf("check invalid Slick %s build: %v", engine.Name, err)
 			}
 			assertDiagnostic(t, diagnostics, "SLK340", "body produces int")
 			if _, err := os.Stat(binary); !os.IsNotExist(err) {
-				t.Fatalf("invalid Slick %s build created a binary", backend)
+				t.Fatalf("invalid Slick %s build created a binary", engine.Name)
 			}
 		})
 	}
 }
 
-func TestBuiltBinaryReportsUncaughtSlickError(t *testing.T) {
-	root := t.TempDir()
-	source := filepath.Join(root, "main.slk")
+func TestMatrixBuiltBinaryReportsUncaughtSlickError(t *testing.T) {
 	program := `
 class Failure implements Error {}
 function main() -> string throws Failure {
     throw Failure("boom")
 }
 `
-	if err := os.WriteFile(source, []byte(program), 0o644); err != nil {
-		t.Fatalf("write throwing Slick source: %v", err)
-	}
-	for _, backend := range []compiler.Backend{compiler.BackendGo, compiler.BackendLLVM} {
-		t.Run(string(backend), func(t *testing.T) {
-			binary := filepath.Join(root, "app-"+string(backend))
-			diagnostics, err := compiler.BuildPathBackend(source, binary, backend)
+	source := writeSlickMain(t, program)
+	for _, engine := range compiler.ExecutionEngines() {
+		t.Run(engine.Name, func(t *testing.T) {
+			stdout, exitCode, err := engine.Run(source, "")
 			if err != nil {
-				t.Fatalf("build throwing Slick binary: %v", err)
+				t.Fatalf("run throwing Slick: %v", err)
 			}
-			assertNoDiagnostics(t, diagnostics)
-			output, err := exec.Command(binary).CombinedOutput()
-			if err == nil {
+			if exitCode == 0 {
 				t.Fatalf("uncaught Slick error exited successfully")
 			}
-			if got, want := string(output), "root.Failure: boom\n"; got != want {
+			if got, want := stdout, "root.Failure: boom\n"; got != want {
 				t.Fatalf("uncaught Slick error = %q, want %q", got, want)
 			}
 		})
 	}
 }
 
-func TestBuiltBinaryExecutesZipCatchAndEarlyReturn(t *testing.T) {
-	root := t.TempDir()
-	source := filepath.Join(root, "main.slk")
+func TestMatrixBuiltBinaryExecutesZipCatchAndEarlyReturn(t *testing.T) {
 	program := `
 class Failure implements Error {}
 
@@ -267,23 +174,18 @@ function main() -> string {
     Output + Recovered + stop_early()
 }
 `
-	if err := os.WriteFile(source, []byte(program), 0o644); err != nil {
-		t.Fatalf("write Slick control-flow source: %v", err)
-	}
-	for _, backend := range []compiler.Backend{compiler.BackendGo, compiler.BackendLLVM} {
-		t.Run(string(backend), func(t *testing.T) {
-			binary := filepath.Join(root, "app-"+string(backend))
-			diagnostics, err := compiler.BuildPathBackend(source, binary, backend)
+	source := writeSlickMain(t, program)
+	for _, engine := range compiler.ExecutionEngines() {
+		t.Run(engine.Name, func(t *testing.T) {
+			stdout, exitCode, err := engine.Run(source, "")
 			if err != nil {
-				t.Fatalf("build Slick control-flow binary: %v", err)
+				t.Fatalf("run Slick control-flow: %v", err)
 			}
-			assertNoDiagnostics(t, diagnostics)
-			output, err := exec.Command(binary).CombinedOutput()
-			if err != nil {
-				t.Fatalf("run Slick control-flow binary: %v: %s", err, output)
+			if exitCode != 0 {
+				t.Fatalf("control-flow exit %d: %s", exitCode, stdout)
 			}
-			if string(output) != "B2caughtearly\n" {
-				t.Fatalf("unexpected control-flow output %q", output)
+			if stdout != "B2caughtearly\n" {
+				t.Fatalf("unexpected control-flow output %q", stdout)
 			}
 		})
 	}

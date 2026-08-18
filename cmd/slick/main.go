@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"slick/internal/compiler"
@@ -132,7 +133,11 @@ func parseBuildOptions(args []string) (string, string, compiler.BuildOptions, er
 			if index >= len(args) {
 				return "", "", compiler.BuildOptions{}, errors.New("build target is missing")
 			}
-			options.Target = args[index]
+			parsed, err := parseRegisteredTarget(args[index])
+			if err != nil {
+				return "", "", compiler.BuildOptions{}, err
+			}
+			options.Target = parsed
 		case "--allow-alpha":
 			if alphaSet {
 				return "", "", compiler.BuildOptions{}, errors.New("build --allow-alpha may only be specified once")
@@ -149,7 +154,11 @@ func parseBuildOptions(args []string) (string, string, compiler.BuildOptions, er
 				continue
 			}
 			if strings.HasPrefix(args[index], "--target=") {
-				options.Target = strings.TrimPrefix(args[index], "--target=")
+				parsed, err := parseRegisteredTarget(strings.TrimPrefix(args[index], "--target="))
+				if err != nil {
+					return "", "", compiler.BuildOptions{}, err
+				}
+				options.Target = parsed
 				continue
 			}
 			if strings.HasPrefix(args[index], "-") {
@@ -242,4 +251,33 @@ func reportErrorTo(stderr io.Writer, command string, err error) int {
 		fmt.Fprintf(stderr, "%s: %v\n", command, err)
 	}
 	return 2
+}
+
+func registeredTargetNames() []string {
+	seen := make(map[string]struct{})
+	var names []string
+	for _, backend := range compiler.Backends() {
+		for _, target := range backend.Targets {
+			if _, exists := seen[target.Name]; exists {
+				continue
+			}
+			seen[target.Name] = struct{}{}
+			names = append(names, target.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func parseRegisteredTarget(name string) (string, error) {
+	if name == "" {
+		return "", nil
+	}
+	targets := registeredTargetNames()
+	for _, target := range targets {
+		if target == name {
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("unknown target %q (want %s)", name, strings.Join(targets, " or "))
 }
