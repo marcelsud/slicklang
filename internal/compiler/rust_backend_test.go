@@ -76,7 +76,7 @@ function main() -> (int,bool,int,string,float,float,float,float,int,bool,int,int
     (Choose(Score(5)), false && Explode(), Maximum + 1, "ok😀", -0.0, 1e20, 1e-7, 1e6, Pick(true), WideEqual(), Rebind(1), BranchShadow(3))
 }`
 
-func TestPrimitiveBackendsMatchInterpreter(t *testing.T) {
+func TestMatrixPrimitiveBackendsMatchInterpreter(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "main.slk")
 	if err := os.WriteFile(path, []byte(rustPrimitiveProgram), 0o644); err != nil {
 		t.Fatal(err)

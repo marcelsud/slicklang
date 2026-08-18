@@ -250,7 +250,7 @@ function main() -> int {
 	assertDiagnostic(t, checkResult(t, resultSource), "SLK403", "async call result has task-unsafe type")
 }
 
-func TestAsyncPreparationFailureLaunchesNoChild(t *testing.T) {
+func TestMatrixAsyncPreparationFailureLaunchesNoChild(t *testing.T) {
 	for _, backend := range compiler.ExecutionEngines() {
 		t.Run(backend.Name, func(t *testing.T) {
 			var hits atomic.Int32
@@ -286,7 +286,7 @@ function main() -> Result<int, PrepFailure> effects { network } {
 	}
 }
 
-func TestAsyncArgumentsEvaluateOnceInSourceOrder(t *testing.T) {
+func TestMatrixAsyncArgumentsEvaluateOnceInSourceOrder(t *testing.T) {
 	for _, backend := range compiler.ExecutionEngines() {
 		t.Run(backend.Name, func(t *testing.T) {
 			var mutex sync.Mutex
@@ -326,7 +326,7 @@ function main() -> Result<int, std.http.Failure> effects { network } {
 	}
 }
 
-func TestAsyncHTTPChildrenOverlap(t *testing.T) {
+func TestMatrixAsyncHTTPChildrenOverlap(t *testing.T) {
 	for _, backend := range compiler.ExecutionEngines() {
 		t.Run(backend.Name, func(t *testing.T) {
 			started := make(chan struct{}, 2)
@@ -384,7 +384,7 @@ function main() -> Result<int, std.http.Failure> effects { network } {
 	}
 }
 
-func TestAsyncResultPropagationCancelsAndJoinsHTTPChild(t *testing.T) {
+func TestMatrixAsyncResultPropagationCancelsAndJoinsHTTPChild(t *testing.T) {
 	for _, backend := range compiler.ExecutionEngines() {
 		t.Run(backend.Name, func(t *testing.T) {
 			blocked := make(chan struct{}, 1)
@@ -453,7 +453,7 @@ function main() -> string effects { network } {
 	}
 }
 
-func TestAsyncReturnJoinsChildBeforeParentUsingCleanup(t *testing.T) {
+func TestMatrixAsyncReturnJoinsChildBeforeParentUsingCleanup(t *testing.T) {
 	for _, backend := range compiler.ExecutionEngines() {
 		t.Run(backend.Name, func(t *testing.T) {
 			started := make(chan struct{}, 1)

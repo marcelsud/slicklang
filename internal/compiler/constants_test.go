@@ -18,9 +18,9 @@ function main() -> string {
 `
 }
 
-// TestConstantsProduceOneValueInEveryBackend covers the constant expression
+// TestMatrixConstantsProduceOneValue covers the constant expression
 // grammar end to end: all backends must agree on the value a program prints.
-func TestConstantsProduceOneValueInEveryBackend(t *testing.T) {
+func TestMatrixConstantsProduceOneValue(t *testing.T) {
 	for _, test := range []struct {
 		name         string
 		declarations string

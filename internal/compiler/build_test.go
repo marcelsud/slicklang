@@ -101,7 +101,7 @@ func examplePath(project string) string {
 	return filepath.Join("..", "..", "examples", project)
 }
 
-func TestBuildPathStopsBeforeBackendOnSlickDiagnostics(t *testing.T) {
+func TestMatrixBuildPathStopsBeforeBackendOnSlickDiagnostics(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "main.slk")
 	if err := os.WriteFile(source, []byte(`function main() -> string { 42 }`), 0o644); err != nil {
@@ -125,7 +125,7 @@ func TestBuildPathStopsBeforeBackendOnSlickDiagnostics(t *testing.T) {
 	}
 }
 
-func TestBuiltBinaryReportsUncaughtSlickError(t *testing.T) {
+func TestMatrixBuiltBinaryReportsUncaughtSlickError(t *testing.T) {
 	program := `
 class Failure implements Error {}
 function main() -> string throws Failure {
@@ -149,7 +149,7 @@ function main() -> string throws Failure {
 	}
 }
 
-func TestBuiltBinaryExecutesZipCatchAndEarlyReturn(t *testing.T) {
+func TestMatrixBuiltBinaryExecutesZipCatchAndEarlyReturn(t *testing.T) {
 	program := `
 class Failure implements Error {}
 

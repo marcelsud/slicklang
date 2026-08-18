@@ -9,7 +9,7 @@ import (
 	"slick/internal/compiler"
 )
 
-func TestLLVMBackendMatchesGoOnOperators(t *testing.T) {
+func TestMatrixOperatorsMatchGo(t *testing.T) {
 	program := `
 function main() -> string {
     let Value = 10
@@ -27,7 +27,7 @@ function main() -> string {
 	}
 }
 
-func TestLLVMBackendRunsAsyncMethodAndCaughtFailure(t *testing.T) {
+func TestMatrixAsyncMethodAndCaughtFailure(t *testing.T) {
 	program := `
 class Box {
     Value: int
@@ -66,7 +66,7 @@ func TestLLVMSelectionDoesNotChangeGoDefault(t *testing.T) {
 	}
 }
 
-func TestLLVMOptionalStorageAndEmptyInterfaceParity(t *testing.T) {
+func TestMatrixOptionalStorageAndEmptyInterfaceParity(t *testing.T) {
 	source := `
 interface Marker {}
 
@@ -95,7 +95,7 @@ function main() -> string {
 	}
 }
 
-func TestLLVMWrappingIntegersAndShortestFloatsMatch(t *testing.T) {
+func TestMatrixWrappingIntegersAndShortestFloatsMatch(t *testing.T) {
 	source := `
 function main() -> string {
     let Maximum = 9223372036854775807
@@ -112,7 +112,7 @@ function main() -> string {
 	}
 }
 
-func TestLLVMTextOperationsPreserveEmbeddedNULBytes(t *testing.T) {
+func TestMatrixTextOperationsPreserveEmbeddedNULBytes(t *testing.T) {
 	source := `
 function main() -> string {
     let Value = "a\u0000b\u0000c"
@@ -139,7 +139,7 @@ function main() -> string {
 	}
 }
 
-func TestLLVMAsyncArgumentsBeyondEightValuesMatch(t *testing.T) {
+func TestMatrixAsyncArgumentsBeyondEightValuesMatch(t *testing.T) {
 	source := `
 function AddTen(A: int, B: int, C: int, D: int, E: int, F: int, G: int, H: int, I: int, J: int) -> int {
     A + B + C + D + E + F + G + H + I + J

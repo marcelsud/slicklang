@@ -25,7 +25,7 @@ jobs:
       - name: Shared tests
         run: |
           go test -count=1 -timeout 300s ./cmd/...
-          go test -count=1 -timeout 180s ./internal/compiler -run 'TestAtomicOutput|TestMatrixExecutionEnginesMatchRegistry|TestEngineOperationCoverage|TestMatrixCoverage|TestPackageAdapterAvailability|TestRedisPackageMatrix/Hash|TestRedisPackageMatrix/Nonconforming|TestRedisPackageMatrix/TransitiveClosure|TestRedisPackageMatrix/Backend|TestRedisPackageMatrix/Atomic'
+          go test -count=1 -timeout 180s ./internal/compiler -run 'TestAtomicOutput|TestMatrixExecutionEnginesMatchRegistry|TestMatrixEveryExampleHasContract|TestEngineOperationCoverage|TestMatrixCoverage|TestPackageAdapterAvailability|TestRedisPackageMatrix/Hash|TestRedisPackageMatrix/Nonconforming|TestRedisPackageMatrix/TransitiveClosure|TestRedisPackageMatrix/Backend|TestRedisPackageMatrix/Atomic'
 
   test:
     runs-on: ubuntu-24.04
@@ -34,48 +34,52 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # interpreter — denies bun, cargo, rustc, rustup, clang, clang-18,
-          # llc, llc-18, llvm-as, llvm-as-18, and `go build` (go test stays).
+          # interpreter — selects TestMatrix*/interpreter, TestInterpreter, compile-only TestAsync*.
+          # Denies bun, cargo, rustc, rustup, clang, clang-18, llc, llc-18,
+          # llvm-as, llvm-as-18, and `go build` (go test stays).
           - engine: interpreter
             install: none
             deny: bun cargo rustc rustup clang clang-18 llc llc-18 llvm-as llvm-as-18
             deny_go_build: true
-            test: TestMatrixExamples/interpreter|TestMatrixLanguageContracts/interpreter|TestInterpreter
+            test: 'TestMatrix(Examples|LanguageContracts|OperatorsMatchGo|AsyncMethodAndCaughtFailure|OptionalStorageAndEmptyInterfaceParity|WrappingIntegersAndShortestFloatsMatch|TextOperationsPreserveEmbeddedNULBytes|AsyncArgumentsBeyondEightValuesMatch|GenericDeclarationsCrossNamespaces|CompilerOwnedGenericsAreUnchanged|UnionVariantCarriesGenericInstantiation|PrimitiveBackendsMatchInterpreter|BuildPathStopsBeforeBackendOnSlickDiagnostics|BuiltBinaryReportsUncaughtSlickError|BuiltBinaryExecutesZipCatchAndEarlyReturn|AsyncPreparationFailureLaunchesNoChild|AsyncArgumentsEvaluateOnceInSourceOrder|AsyncHTTPChildrenOverlap|AsyncResultPropagationCancelsAndJoinsHTTPChild|AsyncReturnJoinsChildBeforeParentUsingCleanup)$/interpreter|TestMatrix(ConstantsProduceOneValue|GenericDeclarations|CallableTypeArgumentsAtGenericExpressionBoundaries)$//interpreter|TestAsyncLetFunctionMethodGenericAndCheckedEffects/interpreter|TestGenericJSONAcceptsConcreteInstantiationsOnly/concrete.instantiation/interpreter|TestAsyncPendingDiagnostics|TestAsyncFormattingHighlightingAndDiagnostics|TestAsyncRejectsTaskUnsafeValues|TestInterpreter'
             artifact: ""
 
-          # go — denies bun, cargo, rustc, rustup, clang, clang-18,
-          # llc, llc-18, llvm-as, llvm-as-18. `go build` is the backend.
+          # go — selects TestMatrix*/go and TestRedisPackageMatrix/Go.
+          # Denies bun, cargo, rustc, rustup, clang, clang-18, llc, llc-18,
+          # llvm-as, llvm-as-18. `go build` is the backend.
           - engine: go
             install: none
             deny: bun cargo rustc rustup clang clang-18 llc llc-18 llvm-as llvm-as-18
             deny_go_build: false
-            test: TestMatrixExamples/go|TestMatrixLanguageContracts/go|TestBuildPath|TestRedisPackageMatrix/Go
+            test: 'TestMatrix(Examples|LanguageContracts|OperatorsMatchGo|AsyncMethodAndCaughtFailure|OptionalStorageAndEmptyInterfaceParity|WrappingIntegersAndShortestFloatsMatch|TextOperationsPreserveEmbeddedNULBytes|AsyncArgumentsBeyondEightValuesMatch|GenericDeclarationsCrossNamespaces|CompilerOwnedGenericsAreUnchanged|UnionVariantCarriesGenericInstantiation|PrimitiveBackendsMatchInterpreter|BuildPathStopsBeforeBackendOnSlickDiagnostics|BuiltBinaryReportsUncaughtSlickError|BuiltBinaryExecutesZipCatchAndEarlyReturn|AsyncPreparationFailureLaunchesNoChild|AsyncArgumentsEvaluateOnceInSourceOrder|AsyncHTTPChildrenOverlap|AsyncResultPropagationCancelsAndJoinsHTTPChild|AsyncReturnJoinsChildBeforeParentUsingCleanup)$/go|TestMatrix(ConstantsProduceOneValue|GenericDeclarations|CallableTypeArgumentsAtGenericExpressionBoundaries)$//go|TestGenericJSONAcceptsConcreteInstantiationsOnly/concrete.instantiation/go|TestRedisPackageMatrix/Go'
             artifact: go
 
-          # llvm — denies bun, cargo, rustc, rustup, and `go build`.
+          # llvm — selects TestMatrix*/(llvm|go|interpreter), TestLLVM, TestRedisPackageMatrix/LLVM.
+          # Denies bun, cargo, rustc, rustup, and `go build`.
           - engine: llvm
             install: llvm
             deny: bun cargo rustc rustup
             deny_go_build: true
-            test: TestMatrixExamples/llvm|TestMatrixLanguageContracts/llvm|TestLLVM|TestRedisPackageMatrix/LLVM
+            test: 'TestMatrix(Examples|LanguageContracts|OperatorsMatchGo|AsyncMethodAndCaughtFailure|OptionalStorageAndEmptyInterfaceParity|WrappingIntegersAndShortestFloatsMatch|TextOperationsPreserveEmbeddedNULBytes|AsyncArgumentsBeyondEightValuesMatch|GenericDeclarationsCrossNamespaces|CompilerOwnedGenericsAreUnchanged|UnionVariantCarriesGenericInstantiation|PrimitiveBackendsMatchInterpreter|BuildPathStopsBeforeBackendOnSlickDiagnostics|BuiltBinaryReportsUncaughtSlickError|BuiltBinaryExecutesZipCatchAndEarlyReturn|AsyncPreparationFailureLaunchesNoChild|AsyncArgumentsEvaluateOnceInSourceOrder|AsyncHTTPChildrenOverlap|AsyncResultPropagationCancelsAndJoinsHTTPChild|AsyncReturnJoinsChildBeforeParentUsingCleanup)$/(llvm|go|interpreter)|TestMatrix(ConstantsProduceOneValue|GenericDeclarations|CallableTypeArgumentsAtGenericExpressionBoundaries)$//(llvm|go|interpreter)|TestAsyncLetFunctionMethodGenericAndCheckedEffects/(llvm|go|interpreter)|TestGenericJSONAcceptsConcreteInstantiationsOnly/concrete.instantiation/(llvm|go|interpreter)|TestLLVM|TestRedisPackageMatrix/LLVM'
             artifact: llvm
 
-          # rust — denies bun, clang, clang-18, llc, llc-18, llvm-as,
-          # llvm-as-18, and `go build`.
+          # rust — selects TestMatrix*/(rust|go|interpreter), TestRust*, TestRedisPackageMatrix/Rust.
+          # Denies bun, clang, clang-18, llc, llc-18, llvm-as, llvm-as-18, and `go build`.
           - engine: rust
             install: rust
             deny: bun clang clang-18 llc llc-18 llvm-as llvm-as-18
             deny_go_build: true
-            test: TestMatrixExamples/rust|TestMatrixLanguageContracts/rust|^TestRust|TestRedisPackageMatrix/Rust
+            test: 'TestMatrix(Examples|LanguageContracts|OperatorsMatchGo|AsyncMethodAndCaughtFailure|OptionalStorageAndEmptyInterfaceParity|WrappingIntegersAndShortestFloatsMatch|TextOperationsPreserveEmbeddedNULBytes|AsyncArgumentsBeyondEightValuesMatch|GenericDeclarationsCrossNamespaces|CompilerOwnedGenericsAreUnchanged|UnionVariantCarriesGenericInstantiation|PrimitiveBackendsMatchInterpreter|BuildPathStopsBeforeBackendOnSlickDiagnostics|BuiltBinaryReportsUncaughtSlickError|BuiltBinaryExecutesZipCatchAndEarlyReturn|AsyncPreparationFailureLaunchesNoChild|AsyncArgumentsEvaluateOnceInSourceOrder|AsyncHTTPChildrenOverlap|AsyncResultPropagationCancelsAndJoinsHTTPChild|AsyncReturnJoinsChildBeforeParentUsingCleanup)$/(rust|go|interpreter)|TestMatrix(ConstantsProduceOneValue|GenericDeclarations|CallableTypeArgumentsAtGenericExpressionBoundaries)$//(rust|go|interpreter)|TestGenericJSONAcceptsConcreteInstantiationsOnly/concrete.instantiation/(rust|go|interpreter)|^TestRust|TestRedisPackageMatrix/Rust'
             artifact: rust
 
-          # bun — denies cargo, rustc, rustup, clang, clang-18, llc, llc-18,
-          # llvm-as, llvm-as-18, and `go build`.
+          # bun — selects TestMatrix*/(bun|go|interpreter), TestBun*, TestRedisPackageMatrix/Bun.
+          # Denies cargo, rustc, rustup, clang, clang-18, llc, llc-18, llvm-as,
+          # llvm-as-18, and `go build`.
           - engine: bun
             install: bun
             deny: cargo rustc rustup clang clang-18 llc llc-18 llvm-as llvm-as-18
             deny_go_build: true
-            test: TestMatrixExamples/bun|TestMatrixLanguageContracts/bun|^TestBun|TestRedisPackageMatrix/Bun
+            test: 'TestMatrix(Examples|LanguageContracts|OperatorsMatchGo|AsyncMethodAndCaughtFailure|OptionalStorageAndEmptyInterfaceParity|WrappingIntegersAndShortestFloatsMatch|TextOperationsPreserveEmbeddedNULBytes|AsyncArgumentsBeyondEightValuesMatch|GenericDeclarationsCrossNamespaces|CompilerOwnedGenericsAreUnchanged|UnionVariantCarriesGenericInstantiation|PrimitiveBackendsMatchInterpreter|BuildPathStopsBeforeBackendOnSlickDiagnostics|BuiltBinaryReportsUncaughtSlickError|BuiltBinaryExecutesZipCatchAndEarlyReturn|AsyncPreparationFailureLaunchesNoChild|AsyncArgumentsEvaluateOnceInSourceOrder|AsyncHTTPChildrenOverlap|AsyncResultPropagationCancelsAndJoinsHTTPChild|AsyncReturnJoinsChildBeforeParentUsingCleanup)$/(bun|go|interpreter)|TestMatrix(ConstantsProduceOneValue|GenericDeclarations|CallableTypeArgumentsAtGenericExpressionBoundaries)$//(bun|go|interpreter)|TestGenericJSONAcceptsConcreteInstantiationsOnly/concrete.instantiation/(bun|go|interpreter)|^TestBun|TestRedisPackageMatrix/Bun'
             artifact: bun
 
     steps:
