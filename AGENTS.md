@@ -5,7 +5,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 ## Build and test
 
 - `go build ./...` fails with `error obtaining VCS status` in a git worktree; use `go vet ./...` and `go test ./...` instead, or pass `-buildvcs=false`.
-- `go test ./...` builds real native binaries through `BuildPath`, so it needs Go plus the pinned LLVM 18, Rust 1.93.1, and Bun 1.3.14 toolchains; targeted unit tests avoid that native matrix.
+- `go test ./...` builds real native binaries through the engine matrix, so it needs Go plus the pinned LLVM 18, Rust 1.93.1, and Bun 1.3.14 toolchains and takes over an hour end to end. Scope a run by engine (`-run 'TestMatrixExamples/rust'`) or by feature; the registry-level gates (`TestGovernance`, `TestEngineOperationCoverage`, `TestMatrixExecutionEnginesMatchRegistry`) compile nothing and run in seconds.
 
 ## Core IR
 
@@ -18,6 +18,12 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 ## Canonical packages
 
 `internal/compiler/packages.go` owns strict `slick.project.json`, `slick.package.json`, and generated `slick.lock` handling. Application, interface, and adapter sources may import only their direct declared dependencies; `root.*`/`std.*` package names and prefix-overlapping package namespaces are invalid. `BuildPathWithOptions` resolves the full exact-version local closure, snapshots and hashes every interface/conformance/adapter/asset, checks every portable adapter's exact public surface, and runs its pure `root.main() -> bool` conformance program before backend emission. It selects exactly one adapter per backend/target, with explicit alpha policy. The current compiler links only portable `kind: "slick"` adapters; reserved host/sidecar kinds fail before workspace creation. A cross-process guard serializes lock extension before output installation, and `slick.lock` is atomically written only after success; conflicts are errors, never automatic updates.
+
+## Stability governance and the engine matrix
+
+Declared stability and computed eligibility are separate, and no tool may close the gap. `stability.go` holds the two values; `backend.go` and `stdlib.go` carry the declared ones, and eligibility is derived from runtime-ABI agreement plus complete stable-operation coverage. `matrix.go` exposes `ExecutionEngines()` — the interpreter plus every registered backend, with its targets — and every parity gate iterates it instead of a local backend slice, so a new backend cannot be added without appearing in the language, example, and standard-library contracts. `matrix_coverage.go` reports per-engine coverage: a missing stable operation fails a stable engine, while an alpha engine's gaps are an allowed availability gap it must still implement completely for whatever it claims. `packages_matrix.go` reports canonical interface and adapter eligibility keyed by interface hash, backend, target, and adapter stability. Promotion to `stable` is a maintainer commit to the authoritative registry; a test, generator, or release command that rewrites declared stability is a defect. Rust and Bun are therefore eligible and still alpha, which is why building with them needs `--allow-alpha`.
+
+CI runs one job per engine with the pinned toolchains and deletes the other engines' executables inside each job, so a backend that silently falls back to another engine or to the interpreter fails there rather than passing quietly. `governance_test.go` holds the invariants no single feature owns: the only build knobs are backend, target, and the alpha opt-in; nothing beside the installed artifact survives a build; and no host manifest is committed with an example.
 
 ## Adding a standard-library declaration
 
