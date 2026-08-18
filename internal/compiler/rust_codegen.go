@@ -4,17 +4,111 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 )
 
 func validateRustCore(core coreProgram, runtime backendRuntimeInputs) error {
-	return validatePrimitiveCore(core, runtime, "Rust")
+	if err := validateNativeCore(core, runtime); err != nil {
+		return fmt.Errorf("Rust lowering: %w", err)
+	}
+	if operation, location, ok := firstRustRuntimeOperation(core); ok {
+		return rustLoweringError(location, "standard-library operation %s is not supported", operation)
+	}
+	if len(runtime.families) > 0 {
+		families := make([]string, 0, len(runtime.families))
+		for family := range runtime.families {
+			families = append(families, string(family))
+		}
+		sort.Strings(families)
+		return rustLoweringError(coreLocation{}, "runtime families %s are not supported", strings.Join(families, ", "))
+	}
+	for _, function := range core.Functions {
+		if function.ID == "root.main" && len(function.Parameters) != 0 {
+			return rustLoweringError(function.Location, "root.main parameters are not supported")
+		}
+	}
+	return nil
 }
 
 func rustLoweringError(location coreLocation, format string, arguments ...any) error {
 	return primitiveLoweringError("Rust", location, format, arguments...)
+}
+
+func firstRustRuntimeOperation(core coreProgram) (runtimeOperationID, coreLocation, bool) {
+	var block func(coreBlock) (runtimeOperationID, coreLocation, bool)
+	var expression func(coreExpression) (runtimeOperationID, coreLocation, bool)
+	expression = func(value coreExpression) (runtimeOperationID, coreLocation, bool) {
+		if value.Operation != "" && !strings.HasPrefix(string(value.Operation), "core.") {
+			return value.Operation, value.Location, true
+		}
+		if value.Cleanup != nil && value.Cleanup.Operation != "" &&
+			!strings.HasPrefix(string(value.Cleanup.Operation), "core.") {
+			return value.Cleanup.Operation, value.Location, true
+		}
+		for _, child := range []*coreExpression{value.Value, value.Left, value.Right, value.Receiver} {
+			if child != nil {
+				if operation, location, ok := expression(*child); ok {
+					return operation, location, true
+				}
+			}
+		}
+		for _, children := range [][]coreExpression{value.Elements, value.Arguments} {
+			for _, child := range children {
+				if operation, location, ok := expression(child); ok {
+					return operation, location, true
+				}
+			}
+		}
+		for _, entry := range value.Entries {
+			for _, child := range []coreExpression{entry.Key, entry.Value} {
+				if operation, location, ok := expression(child); ok {
+					return operation, location, true
+				}
+			}
+		}
+		for _, field := range value.Fields {
+			if operation, location, ok := expression(field.Value); ok {
+				return operation, location, true
+			}
+		}
+		for _, arm := range value.Arms {
+			if operation, location, ok := expression(arm.Value); ok {
+				return operation, location, true
+			}
+		}
+		for _, child := range []*coreBlock{value.Body, value.Alternate} {
+			if child != nil {
+				if operation, location, ok := block(*child); ok {
+					return operation, location, true
+				}
+			}
+		}
+		return "", coreLocation{}, false
+	}
+	block = func(value coreBlock) (runtimeOperationID, coreLocation, bool) {
+		for _, statement := range value.Statements {
+			if statement.Value != nil {
+				if operation, location, ok := expression(*statement.Value); ok {
+					return operation, location, true
+				}
+			}
+			if statement.Body != nil {
+				if operation, location, ok := block(*statement.Body); ok {
+					return operation, location, true
+				}
+			}
+		}
+		return "", coreLocation{}, false
+	}
+	for _, function := range core.Functions {
+		if operation, location, ok := block(function.Body); ok {
+			return operation, location, true
+		}
+	}
+	return "", coreLocation{}, false
 }
 
 func generateRust(core coreProgram) (string, error) {
@@ -25,10 +119,42 @@ func generateRust(core coreProgram) (string, error) {
 	if err := validateRustCore(core, runtime); err != nil {
 		return "", err
 	}
-	generator := rustGenerator{
-		core:      core,
-		functions: make(map[string]coreFunction, len(core.Functions)),
+	generator := newRustGenerator(core)
+	return generator.generate()
+}
+
+type rustLambda struct {
+	id         string
+	expression coreExpression
+}
+
+type rustGenerator struct {
+	core      coreProgram
+	functions map[string]coreFunction
+	constants map[string]coreConstant
+	variants  map[string]struct {
+		union string
+		name  string
+		tag   int
+	}
+	classes      map[string]coreClass
+	errorClasses map[string]bool
+	lambdas      []rustLambda
+	temporary    int
+	scope        int
+}
+
+func newRustGenerator(core coreProgram) *rustGenerator {
+	generator := &rustGenerator{
+		core: core, functions: make(map[string]coreFunction, len(core.Functions)),
 		constants: make(map[string]coreConstant, len(core.Constants)),
+		variants: make(map[string]struct {
+			union string
+			name  string
+			tag   int
+		}),
+		classes:      make(map[string]coreClass, len(core.Classes)),
+		errorClasses: make(map[string]bool),
 	}
 	for _, function := range core.Functions {
 		generator.functions[function.ID] = function
@@ -36,72 +162,39 @@ func generateRust(core coreProgram) (string, error) {
 	for _, constant := range core.Constants {
 		generator.constants[constant.ID] = constant
 	}
-	return generator.generate()
-}
-
-type rustGenerator struct {
-	core      coreProgram
-	functions map[string]coreFunction
-	constants map[string]coreConstant
-	temporary int
+	for _, union := range core.Unions {
+		for _, variant := range union.Variants {
+			name, _ := coreDeclarationName(variant.ID)
+			generator.variants[variant.ID] = struct {
+				union string
+				name  string
+				tag   int
+			}{union: union.ID, name: name, tag: variant.Tag}
+		}
+	}
+	for _, class := range core.Classes {
+		generator.classes[class.ID] = class
+		if class.Error {
+			generator.errorClasses[class.ID] = true
+		}
+	}
+	return generator
 }
 
 func (g *rustGenerator) generate() (string, error) {
 	var output strings.Builder
 	output.WriteString("// Generated by Slick. Compiler-owned Rust runtime ABI 1.\n")
-	output.WriteString(`struct SlickFloatText {
-    bytes: [u8; 32],
-    length: usize,
-}
-
-impl std::fmt::Write for SlickFloatText {
-    fn write_str(&mut self, value: &str) -> std::fmt::Result {
-        let end = self.length + value.len();
-        if end > self.bytes.len() { return Err(std::fmt::Error); }
-        self.bytes[self.length..end].copy_from_slice(value.as_bytes());
-        self.length = end;
-        Ok(())
-    }
-}
-
-fn slick_print_float(value: f64) {
-    if value.is_nan() {
-        print!("NaN");
-        return;
-    }
-    if value == f64::INFINITY {
-        print!("+Inf");
-        return;
-    }
-    if value == f64::NEG_INFINITY {
-        print!("-Inf");
-        return;
-    }
-    let magnitude = value.abs();
-    if value == 0.0 || (magnitude >= 1e-4 && magnitude < 1e6) {
-        print!("{}", value);
-        return;
-    }
-    let mut buffer = SlickFloatText { bytes: [0; 32], length: 0 };
-    std::fmt::write(&mut buffer, format_args!("{:e}", value)).expect("f64 text fits fixed buffer");
-    let text = std::str::from_utf8(&buffer.bytes[..buffer.length]).expect("Rust formats f64 as ASCII");
-    let (mantissa, exponent) = text.split_once('e').expect("lower-exp format contains exponent");
-    let exponent: i32 = exponent.parse().expect("lower-exp format contains numeric exponent");
-    if exponent < 0 {
-        print!("{}e-{:02}", mantissa, -exponent);
-    } else {
-        print!("{}e+{:02}", mantissa, exponent);
-    }
-}
-
-`)
+	output.WriteString(rustRuntimeModule)
+	g.emitTypeDescriptors(&output)
 	for _, constant := range g.core.Constants {
-		typ, _ := rustType(constant.Type)
-		literal, _ := rustLiteral(constant.Value)
-		fmt.Fprintf(&output, "const %s: %s = %s;\n", rustConstantName(constant.ID), typ, literal)
+		literal, err := g.literal(constant.Value)
+		if err != nil {
+			return "", rustLoweringError(constant.Location, "constant %s: %v", constant.ID, err)
+		}
+		fmt.Fprintf(&output, "fn %s() -> SlickValue { %s }\n", rustConstantName(constant.ID), literal)
 	}
 	if len(g.core.Constants) > 0 {
-		output.WriteString("\n")
+		output.WriteByte('\n')
 	}
 	for _, function := range g.core.Functions {
 		generated, err := g.function(function)
@@ -109,142 +202,223 @@ fn slick_print_float(value: f64) {
 			return "", err
 		}
 		output.WriteString(generated)
-		output.WriteString("\n")
+		output.WriteByte('\n')
 	}
-	main := g.functions["root.main"]
-	output.WriteString("fn main() {\n")
-	if main.Result == "null" {
-		fmt.Fprintf(&output, "    %s();\n", rustFunctionName(main.ID))
-	} else {
-		fmt.Fprintf(&output, "    let slick_main_value = %s();\n", rustFunctionName(main.ID))
-		if main.Result == "string" {
-			output.WriteString("    if slick_main_value.is_empty() { return; }\n")
-		}
-		if err := rustPrintValue(&output, "slick_main_value", main.Result, 1); err != nil {
-			return "", err
-		}
-		output.WriteString("    println!();\n")
+	callable, err := g.callableDispatcher()
+	if err != nil {
+		return "", err
 	}
-	output.WriteString("}\n")
+	output.WriteString(callable)
+	output.WriteByte('\n')
+	output.WriteString(g.methodDispatcher())
+	output.WriteByte('\n')
+	output.WriteString(g.mainFunction())
 	return output.String(), nil
+}
+
+func (g *rustGenerator) emitTypeDescriptors(output *strings.Builder) {
+	output.WriteString("static SLICK_TYPES: &[SlickTypeDescriptor] = &[\n")
+	for _, class := range g.core.Classes {
+		fields := make([]string, 0, len(class.Fields))
+		for _, field := range class.Fields {
+			fields = append(fields, rustStringLiteral(field.Name))
+		}
+		methods := make([]string, 0, len(class.Methods))
+		for _, method := range class.Methods {
+			name, _ := coreDeclarationName(method.ID)
+			methods = append(methods, rustStringLiteral(name))
+		}
+		interfaces := make([]string, 0, len(class.Interfaces))
+		for _, iface := range class.Interfaces {
+			interfaces = append(interfaces, rustStringLiteral(iface))
+		}
+		fmt.Fprintf(output, "    SlickTypeDescriptor { name: %s, fields: &[%s], methods: &[%s], interfaces: &[%s], variants: &[] },\n",
+			rustStringLiteral(class.ID), strings.Join(fields, ", "), strings.Join(methods, ", "), strings.Join(interfaces, ", "))
+	}
+	for _, iface := range g.core.Interfaces {
+		methods := make([]string, 0, len(iface.Methods))
+		for _, method := range iface.Methods {
+			name, _ := coreDeclarationName(method.ID)
+			methods = append(methods, rustStringLiteral(name))
+		}
+		fmt.Fprintf(output, "    SlickTypeDescriptor { name: %s, fields: &[], methods: &[%s], interfaces: &[], variants: &[] },\n",
+			rustStringLiteral(iface.ID), strings.Join(methods, ", "))
+	}
+	for _, union := range g.core.Unions {
+		variants := make([]string, 0, len(union.Variants))
+		for _, variant := range union.Variants {
+			name, _ := coreDeclarationName(variant.ID)
+			variants = append(variants, fmt.Sprintf("(%s, %d)", rustStringLiteral(name), variant.Tag))
+		}
+		fmt.Fprintf(output, "    SlickTypeDescriptor { name: %s, fields: &[], methods: &[], interfaces: &[], variants: &[%s] },\n",
+			rustStringLiteral(union.ID), strings.Join(variants, ", "))
+	}
+	output.WriteString("];\n\n")
 }
 
 func (g *rustGenerator) function(function coreFunction) (string, error) {
 	var output strings.Builder
-	fmt.Fprintf(&output, "fn %s(", rustFunctionName(function.ID))
+	fmt.Fprintf(&output, "fn %s(slick_context: &SlickContext, slick_self: Option<SlickValue>, slick_arguments: Vec<SlickValue>) -> SlickOutcome {\n", rustFunctionName(function.ID))
+	output.WriteString("    if let Some(outcome) = slick_cancelled(slick_context) { return outcome; }\n")
+	if function.Receiver != "" {
+		output.WriteString("    let Some(mut slick_local_73656c66) = slick_self else { return SlickOutcome::Throw(SlickFailure::host(\"method receiver is absent\")); };\n")
+	} else {
+		output.WriteString("    let _ = slick_self;\n")
+	}
 	for index, parameter := range function.Parameters {
-		if index > 0 {
-			output.WriteString(", ")
-		}
-		typ, _ := rustType(parameter.Type)
-		fmt.Fprintf(&output, "mut %s: %s", rustLocalName(parameter.Name), typ)
+		fmt.Fprintf(&output, "    let Some(mut %s) = slick_arguments.get(%d).cloned() else { return SlickOutcome::Throw(SlickFailure::host(\"missing function argument\")); };\n",
+			rustLocalName(parameter.Name), index)
 	}
-	result, _ := rustType(function.Result)
-	fmt.Fprintf(&output, ") -> %s ", result)
-	body, err := g.block(function.Body, 0)
+	body, err := g.block(function.Body, 1, "")
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("generate Rust function %s: %w", function.ID, err)
 	}
-	output.WriteString(body)
-	output.WriteString("\n")
+	fmt.Fprintf(&output, "    slick_finish_function(%s)\n", body)
+	output.WriteString("}\n")
 	return output.String(), nil
 }
 
-func (g *rustGenerator) block(block coreBlock, level int) (string, error) {
-	var output strings.Builder
-	output.WriteString("{\n")
+func (g *rustGenerator) block(block coreBlock, level int, inheritedScope string) (string, error) {
+	scope := inheritedScope
+	structured := block.StructuredTasks
+	if structured {
+		scope = fmt.Sprintf("slick_scope_%d", g.scope)
+		g.scope++
+	}
+	var body strings.Builder
+	body.WriteString("(|| -> SlickOutcome {\n")
 	for index, statement := range block.Statements {
 		last := index == len(block.Statements)-1
-		generated, err := g.statement(statement, level+1, last)
+		generated, err := g.statement(statement, level+2, last, scope)
 		if err != nil {
 			return "", err
 		}
-		output.WriteString(generated)
+		body.WriteString(generated)
 	}
 	if len(block.Statements) == 0 || block.Statements[len(block.Statements)-1].Kind != "expression" {
-		if block.Result == typeNever {
-			fmt.Fprintf(&output, "%sunreachable!()\n", rustIndent(level+1))
-		} else {
-			fmt.Fprintf(&output, "%s()\n", rustIndent(level+1))
-		}
+		fmt.Fprintf(&body, "%sSlickOutcome::Value(SlickValue::Null)\n", rustIndent(level+2))
 	}
+	fmt.Fprintf(&body, "%s})()", rustIndent(level+1))
+	if !structured {
+		return body.String(), nil
+	}
+	var output strings.Builder
+	output.WriteString("{\n")
+	fmt.Fprintf(&output, "%slet mut %s = SlickTaskScope::new(slick_context);\n", rustIndent(level+1), scope)
+	fmt.Fprintf(&output, "%slet slick_scope_outcome = %s;\n", rustIndent(level+1), body.String())
+	fmt.Fprintf(&output, "%s%s.finish(slick_scope_outcome)\n", rustIndent(level+1), scope)
 	fmt.Fprintf(&output, "%s}", rustIndent(level))
 	return output.String(), nil
 }
 
-func (g *rustGenerator) statement(statement coreStatement, level int, last bool) (string, error) {
+func (g *rustGenerator) statement(statement coreStatement, level int, last bool, scope string) (string, error) {
 	indent := rustIndent(level)
 	var output strings.Builder
+	expression := func() (string, error) {
+		if statement.Value == nil {
+			return "", rustLoweringError(statement.Location, "%s statement has no value", statement.Kind)
+		}
+		return g.expression(*statement.Value, level, scope)
+	}
 	switch statement.Kind {
 	case "bind":
-		value, err := g.expression(*statement.Value, level)
+		value, err := expression()
 		if err != nil {
 			return "", err
 		}
 		if len(statement.Bindings) == 1 {
-			name := rustLocalName(statement.Bindings[0].Name)
-			if statement.Bindings[0].Name == "_" {
-				fmt.Fprintf(&output, "%slet _ = %s;\n", indent, value)
+			binding := statement.Bindings[0]
+			if binding.Name == "_" {
+				fmt.Fprintf(&output, "%slet _ = slick_value!(%s);\n", indent, value)
 			} else {
-				fmt.Fprintf(&output, "%slet mut %s = %s;\n", indent, name, value)
+				fmt.Fprintf(&output, "%slet mut %s = slick_value!(%s);\n", indent, rustLocalName(binding.Name), value)
+			}
+			break
+		}
+		tuple := g.nextTemporary()
+		fmt.Fprintf(&output, "%slet %s = slick_value!(%s);\n", indent, tuple, value)
+		for index, binding := range statement.Bindings {
+			if binding.Name == "_" {
+				continue
+			}
+			fmt.Fprintf(&output, "%slet mut %s = slick_tuple_item(&%s, %d);\n", indent, rustLocalName(binding.Name), tuple, index)
+		}
+	case "task_launch":
+		if scope == "" || len(statement.Bindings) != 1 || statement.Value == nil {
+			return "", rustLoweringError(statement.Location, "task launch has no structured scope")
+		}
+		launch, err := g.taskLaunch(*statement.Value, level, scope)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&output, "%slet mut %s = %s;\n", indent, rustLocalName(statement.Bindings[0].Name), launch)
+	case "assign":
+		value, err := expression()
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&output, "%s%s = slick_value!(%s);\n", indent, rustLocalName(statement.Target), value)
+	case "loop":
+		value, err := expression()
+		if err != nil {
+			return "", err
+		}
+		iterable := g.nextTemporary()
+		fmt.Fprintf(&output, "%slet %s = slick_value!(%s);\n", indent, iterable, value)
+		fmt.Fprintf(&output, "%slet Ok(slick_items) = slick_iter(%s) else { return SlickOutcome::Throw(SlickFailure::host(\"value is not iterable\")); };\n", indent, iterable)
+		output.WriteString(indent + "for slick_item in slick_items {\n")
+		fmt.Fprintf(&output, "%sif let Some(outcome) = slick_cancelled(slick_context) { return outcome; }\n", rustIndent(level+1))
+		if len(statement.Bindings) == 1 {
+			if statement.Bindings[0].Name != "_" {
+				fmt.Fprintf(&output, "%slet mut %s = slick_item;\n", rustIndent(level+1), rustLocalName(statement.Bindings[0].Name))
 			}
 		} else {
-			bindings := make([]string, len(statement.Bindings))
 			for index, binding := range statement.Bindings {
-				if binding.Name == "_" {
-					bindings[index] = "_"
-				} else {
-					bindings[index] = "mut " + rustLocalName(binding.Name)
+				if binding.Name != "_" {
+					fmt.Fprintf(&output, "%slet mut %s = slick_tuple_item(&slick_item, %d);\n", rustIndent(level+1), rustLocalName(binding.Name), index)
 				}
 			}
-			fmt.Fprintf(&output, "%slet (%s) = %s;\n", indent, strings.Join(bindings, ", "), value)
 		}
-	case "assign":
-		value, err := g.expression(*statement.Value, level)
+		if statement.Body == nil {
+			return "", rustLoweringError(statement.Location, "loop has no body")
+		}
+		body, err := g.block(*statement.Body, level+1, scope)
 		if err != nil {
 			return "", err
 		}
-		fmt.Fprintf(&output, "%s%s = %s;\n", indent, rustLocalName(statement.Target), value)
-	case "loop":
-		start, err := g.expression(*statement.Value.Left, level)
-		if err != nil {
-			return "", err
-		}
-		end, err := g.expression(*statement.Value.Right, level)
-		if err != nil {
-			return "", err
-		}
-		startName, endName := g.nextTemporary(), g.nextTemporary()
-		fmt.Fprintf(&output, "%slet %s = %s;\n", indent, startName, start)
-		fmt.Fprintf(&output, "%slet %s = %s;\n", indent, endName, end)
-		binding := statement.Bindings[0].Name
-		if binding == "_" {
-			binding = g.nextTemporary()
-		} else {
-			binding = rustLocalName(binding)
-		}
-		body, err := g.block(*statement.Body, level)
-		if err != nil {
-			return "", err
-		}
-		fmt.Fprintf(&output, "%sfor mut %s in %s..%s %s\n", indent, binding, startName, endName, body)
+		fmt.Fprintf(&output, "%smatch %s {\n", rustIndent(level+1), body)
+		fmt.Fprintf(&output, "%sSlickOutcome::Value(_) => {},\n", rustIndent(level+2))
+		fmt.Fprintf(&output, "%sSlickOutcome::Break => break,\n", rustIndent(level+2))
+		fmt.Fprintf(&output, "%sSlickOutcome::Continue => continue,\n", rustIndent(level+2))
+		fmt.Fprintf(&output, "%soutcome => return outcome,\n", rustIndent(level+2))
+		fmt.Fprintf(&output, "%s}\n%s}\n", rustIndent(level+1), indent)
 	case "break", "continue":
-		fmt.Fprintf(&output, "%s%s;\n", indent, statement.Kind)
-	case "return":
-		value, err := g.expression(*statement.Value, level)
+		name := "Break"
+		if statement.Kind == "continue" {
+			name = "Continue"
+		}
+		fmt.Fprintf(&output, "%sreturn SlickOutcome::%s;\n", indent, name)
+	case "throw":
+		value, err := expression()
 		if err != nil {
 			return "", err
 		}
-		fmt.Fprintf(&output, "%sreturn %s;\n", indent, value)
+		fmt.Fprintf(&output, "%sreturn SlickOutcome::Throw(SlickFailure::slick(slick_value!(%s)));\n", indent, value)
+	case "return":
+		value, err := expression()
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&output, "%sreturn SlickOutcome::Return(slick_value!(%s));\n", indent, value)
 	case "expression":
-		value, err := g.expression(*statement.Value, level)
+		value, err := expression()
 		if err != nil {
 			return "", err
 		}
 		if last {
-			fmt.Fprintf(&output, "%s%s\n", indent, value)
+			fmt.Fprintf(&output, "%sreturn %s;\n", indent, value)
 		} else {
-			fmt.Fprintf(&output, "%slet _ = %s;\n", indent, value)
+			fmt.Fprintf(&output, "%slet _ = slick_value!(%s);\n", indent, value)
 		}
 	default:
 		return "", rustLoweringError(statement.Location, "statement %s is not supported", statement.Kind)
@@ -252,144 +426,611 @@ func (g *rustGenerator) statement(statement coreStatement, level int, last bool)
 	return output.String(), nil
 }
 
-func (g *rustGenerator) expression(expression coreExpression, level int) (string, error) {
+func (g *rustGenerator) expression(expression coreExpression, level int, scope string) (string, error) {
+	raw, err := g.rawExpression(expression, level, scope)
+	if err != nil {
+		return "", err
+	}
+	for _, conversion := range []string{expression.Conversion, expression.ReadConversion} {
+		if conversion != "" {
+			raw = fmt.Sprintf("slick_convert(%s, %s)", raw, rustStringLiteral(conversion))
+		}
+	}
+	return raw, nil
+}
+
+func (g *rustGenerator) rawExpression(expression coreExpression, level int, scope string) (string, error) {
+	child := func(value *coreExpression) (string, error) {
+		if value == nil {
+			return "", rustLoweringError(expression.Location, "%s expression has no child", expression.Kind)
+		}
+		return g.expression(*value, level+1, scope)
+	}
 	switch expression.Kind {
 	case "literal":
-		return rustLiteral(*expression.Literal)
+		if expression.Literal == nil {
+			return "", rustLoweringError(expression.Location, "literal has no value")
+		}
+		value, err := g.literal(*expression.Literal)
+		if err != nil {
+			return "", rustLoweringError(expression.Location, "%v", err)
+		}
+		return "SlickOutcome::Value(" + value + ")", nil
 	case "name":
-		if expression.Declaration != "" {
-			return rustConstantName(expression.Declaration), nil
+		return g.nameExpression(expression), nil
+	case "tuple", "array":
+		values, lines, err := g.evaluatedExpressions(expression.Elements, level, scope)
+		if err != nil {
+			return "", err
 		}
-		return rustLocalName(expression.Name), nil
-	case "tuple":
-		values := make([]string, 0, len(expression.Elements))
-		lines := make([]string, 0, len(expression.Elements)+1)
-		for _, element := range expression.Elements {
-			value, err := g.expression(element, level+1)
+		kind := "Tuple"
+		if expression.Kind == "array" {
+			kind = "Array"
+		}
+		lines = append(lines, fmt.Sprintf("SlickOutcome::Value(SlickValue::%s(vec![%s]))", kind, strings.Join(values, ", ")))
+		return rustInlineBlock(lines, level), nil
+	case "map":
+		lines := make([]string, 0, len(expression.Entries)*2+1)
+		entries := make([]string, 0, len(expression.Entries))
+		for _, entry := range expression.Entries {
+			key, err := g.expression(entry.Key, level+1, scope)
+			if err != nil {
+				return "", err
+			}
+			keyName := g.nextTemporary()
+			lines = append(lines, fmt.Sprintf("let %s = slick_value!(%s);", keyName, key))
+			value, err := g.expression(entry.Value, level+1, scope)
+			if err != nil {
+				return "", err
+			}
+			valueName := g.nextTemporary()
+			lines = append(lines, fmt.Sprintf("let %s = slick_value!(%s);", valueName, value))
+			entries = append(entries, fmt.Sprintf("(%s, %s)", keyName, valueName))
+		}
+		lines = append(lines, fmt.Sprintf("SlickOutcome::Value(slick_map(vec![%s]))", strings.Join(entries, ", ")))
+		return rustInlineBlock(lines, level), nil
+	case "range":
+		left, err := child(expression.Left)
+		if err != nil {
+			return "", err
+		}
+		right, err := child(expression.Right)
+		if err != nil {
+			return "", err
+		}
+		leftName, rightName := g.nextTemporary(), g.nextTemporary()
+		return rustInlineBlock([]string{
+			fmt.Sprintf("let %s = slick_value!(%s);", leftName, left),
+			fmt.Sprintf("let %s = slick_value!(%s);", rightName, right),
+			fmt.Sprintf("match (%s, %s) { (SlickValue::Int(start), SlickValue::Int(end)) => SlickOutcome::Value(SlickValue::Range(start, end)), _ => SlickOutcome::Throw(SlickFailure::host(\"range bounds are not int\")) }", leftName, rightName),
+		}, level), nil
+	case "template":
+		lines := []string{"let mut slick_text = String::new();"}
+		for _, part := range expression.Template {
+			if part.Name == "" {
+				lines = append(lines, fmt.Sprintf("slick_text.push_str(%s);", rustStringLiteral(part.Text)))
+				continue
+			}
+			value := g.nameExpression(coreExpression{Name: part.Name, Declaration: part.Declaration})
+			if part.ReadConversion != "" {
+				value = fmt.Sprintf("slick_convert(%s, %s)", value, rustStringLiteral(part.ReadConversion))
+			}
+			name := g.nextTemporary()
+			lines = append(lines, fmt.Sprintf("let %s = slick_value!(%s);", name, value), fmt.Sprintf("slick_text.push_str(&slick_format(&%s));", name))
+		}
+		lines = append(lines, "SlickOutcome::Value(SlickValue::String(slick_text))")
+		return rustInlineBlock(lines, level), nil
+	case "object":
+		lines := make([]string, 0, len(expression.Fields)+1)
+		values := make(map[string]string, len(expression.Fields))
+		order := make([]string, 0, len(expression.Fields))
+		for _, field := range expression.Fields {
+			value, err := g.expression(field.Value, level+1, scope)
 			if err != nil {
 				return "", err
 			}
 			name := g.nextTemporary()
-			lines = append(lines, fmt.Sprintf("let %s = %s;", name, value))
-			values = append(values, name)
+			lines = append(lines, fmt.Sprintf("let %s = slick_value!(%s);", name, value))
+			values[field.Name] = name
+			order = append(order, field.Name)
 		}
-		lines = append(lines, "("+strings.Join(values, ", ")+")")
+		// An object literal may omit an optional field; the value still carries
+		// every declared field, initialized to tagged absence.
+		fields := make([]string, 0, len(expression.Fields))
+		for _, field := range g.classes[expression.Declaration].Fields {
+			value, ok := values[field.Name]
+			if !ok {
+				value = "SlickValue::Optional(None)"
+				if !strings.HasSuffix(field.Type, "?") {
+					value = "SlickValue::Null"
+				}
+			}
+			delete(values, field.Name)
+			fields = append(fields, fmt.Sprintf("(%s, %s)", rustStringLiteral(field.Name), value))
+		}
+		for _, name := range order {
+			if value, ok := values[name]; ok {
+				fields = append(fields, fmt.Sprintf("(%s, %s)", rustStringLiteral(name), value))
+			}
+		}
+		lines = append(lines, fmt.Sprintf("SlickOutcome::Value(SlickValue::Object { type_name: %s, fields: vec![%s], resource: None, message: String::new() })",
+			rustStringLiteral(expression.Declaration), strings.Join(fields, ", ")))
 		return rustInlineBlock(lines, level), nil
+	case "lambda":
+		id := fmt.Sprintf("lambda.%d", len(g.lambdas))
+		g.lambdas = append(g.lambdas, rustLambda{id: id, expression: expression})
+		captures := make([]string, 0, len(expression.Captures))
+		for _, capture := range expression.Captures {
+			captures = append(captures, rustLocalName(capture.Name)+".clone()")
+		}
+		return fmt.Sprintf("SlickOutcome::Value(SlickValue::Callable(SlickCallable { target: %s, captures: vec![%s] }))", rustStringLiteral(id), strings.Join(captures, ", ")), nil
 	case "call":
-		arguments := make([]string, 0, len(expression.Arguments))
-		lines := make([]string, 0, len(expression.Arguments)+1)
-		for _, argument := range expression.Arguments {
-			value, err := g.expression(argument, level+1)
+		return g.call(expression, level, scope)
+	case "task_await":
+		if scope == "" {
+			return "", rustLoweringError(expression.Location, "await has no structured task scope")
+		}
+		return fmt.Sprintf("%s.await_task(%s)", scope, rustLocalName(expression.Name)), nil
+	case "unary":
+		value, err := child(expression.Value)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("slick_unary(%s, slick_value!(%s))", rustStringLiteral(expression.Operator), value), nil
+	case "binary":
+		left, err := child(expression.Left)
+		if err != nil {
+			return "", err
+		}
+		if expression.ShortCircuit || expression.Operator == "&&" || expression.Operator == "||" {
+			right, err := child(expression.Right)
 			if err != nil {
 				return "", err
 			}
-			name := g.nextTemporary()
-			lines = append(lines, fmt.Sprintf("let %s = %s;", name, value))
-			arguments = append(arguments, name)
+			leftName := g.nextTemporary()
+			short, evaluate := "false", "!value"
+			if expression.Operator == "||" {
+				short, evaluate = "true", "value"
+			}
+			return rustInlineBlock([]string{
+				fmt.Sprintf("let %s = slick_value!(%s);", leftName, left),
+				fmt.Sprintf("match slick_truth(&%s) { Ok(value) if %s => SlickOutcome::Value(SlickValue::Bool(%s)), Ok(_) => %s, Err(failure) => SlickOutcome::Throw(failure) }", leftName, evaluate, short, right),
+			}, level), nil
 		}
-		lines = append(lines, fmt.Sprintf("%s(%s)", rustFunctionName(expression.Declaration), strings.Join(arguments, ", ")))
-		return rustInlineBlock(lines, level), nil
-	case "unary":
-		value, err := g.expression(*expression.Value, level+1)
+		right, err := child(expression.Right)
+		if err != nil {
+			return "", err
+		}
+		leftName, rightName := g.nextTemporary(), g.nextTemporary()
+		return rustInlineBlock([]string{
+			fmt.Sprintf("let %s = slick_value!(%s);", leftName, left),
+			fmt.Sprintf("let %s = slick_value!(%s);", rightName, right),
+			fmt.Sprintf("slick_binary(%s, %s, %s)", rustStringLiteral(expression.Operator), leftName, rightName),
+		}, level), nil
+	case "branch":
+		condition, err := child(expression.Value)
+		if err != nil {
+			return "", err
+		}
+		if expression.Body == nil || expression.Alternate == nil {
+			return "", rustLoweringError(expression.Location, "branch has a missing arm")
+		}
+		body, err := g.block(*expression.Body, level+1, scope)
+		if err != nil {
+			return "", err
+		}
+		alternate, err := g.block(*expression.Alternate, level+1, scope)
 		if err != nil {
 			return "", err
 		}
 		name := g.nextTemporary()
-		result := "!" + name
-		if expression.Operator == "-" {
-			if expression.Type == "int" {
-				result = name + ".wrapping_neg()"
-			} else {
-				result = "-" + name
-			}
-		}
-		return rustInlineBlock([]string{"let " + name + " = " + value + ";", result}, level), nil
-	case "binary":
-		left, err := g.expression(*expression.Left, level+1)
-		if err != nil {
-			return "", err
-		}
-		leftName := g.nextTemporary()
-		if expression.Operator == "&&" || expression.Operator == "||" {
-			right, err := g.expression(*expression.Right, level+2)
-			if err != nil {
-				return "", err
-			}
-			condition := "!" + leftName
-			shortValue := "false"
-			if expression.Operator == "||" {
-				condition, shortValue = leftName, "true"
-			}
-			lines := []string{
-				"let " + leftName + " = " + left + ";",
-				fmt.Sprintf("if %s { %s } else { %s }", condition, shortValue, right),
-			}
-			return rustInlineBlock(lines, level), nil
-		}
-		right, err := g.expression(*expression.Right, level+1)
-		if err != nil {
-			return "", err
-		}
-		rightName := g.nextTemporary()
-		operation := leftName + " " + expression.Operator + " " + rightName
-		if expression.Operator == "==" || expression.Operator == "!=" {
-			operation = rustEquality(leftName, rightName, expression.Left.Type)
-			if expression.Operator == "!=" {
-				operation = "!" + operation
-			}
-		}
-		if expression.Type == "int" {
-			switch expression.Operator {
-			case "+":
-				operation = leftName + ".wrapping_add(" + rightName + ")"
-			case "-":
-				operation = leftName + ".wrapping_sub(" + rightName + ")"
-			case "*":
-				operation = leftName + ".wrapping_mul(" + rightName + ")"
-			}
-		}
 		return rustInlineBlock([]string{
-			"let " + leftName + " = " + left + ";",
-			"let " + rightName + " = " + right + ";",
-			operation,
+			fmt.Sprintf("let %s = slick_value!(%s);", name, condition),
+			fmt.Sprintf("match slick_truth(&%s) { Ok(true) => %s, Ok(false) => %s, Err(failure) => SlickOutcome::Throw(failure) }", name, body, alternate),
 		}, level), nil
-	case "branch":
-		condition, err := g.expression(*expression.Value, level+1)
+	case "catch":
+		return g.catchExpression(expression, level, scope)
+	case "result":
+		value, err := child(expression.Value)
 		if err != nil {
 			return "", err
 		}
-		conditionName := g.nextTemporary()
-		body, err := g.block(*expression.Body, level+1)
+		return fmt.Sprintf("SlickOutcome::Value(SlickValue::Result(%t, Box::new(slick_value!(%s))))", expression.ResultVariant == "ok", value), nil
+	case "propagate":
+		value, err := child(expression.Value)
 		if err != nil {
 			return "", err
 		}
-		alternate, err := g.block(*expression.Alternate, level+1)
-		if err != nil {
-			return "", err
-		}
+		name := g.nextTemporary()
 		return rustInlineBlock([]string{
-			"let " + conditionName + " = " + condition + ";",
-			fmt.Sprintf("if %s %s else %s", conditionName, body, alternate),
+			fmt.Sprintf("let %s = slick_value!(%s);", name, value),
+			fmt.Sprintf("match %s { SlickValue::Result(true, value) => SlickOutcome::Value(*value), SlickValue::Result(false, value) => SlickOutcome::Return(SlickValue::Result(false, value)), _ => SlickOutcome::Throw(SlickFailure::host(\"propagation value is not Result\")) }", name),
 		}, level), nil
+	case "using":
+		return g.usingExpression(expression, level, scope)
+	case "match":
+		return g.matchExpression(expression, level, scope)
 	default:
 		return "", rustLoweringError(expression.Location, "expression %s is not supported", expression.Kind)
 	}
 }
 
-func rustEquality(left, right, typ string) string {
-	parsed := parseTypeName(typ)
-	if parsed.kind != typeKindTuple {
-		return "(" + left + " == " + right + ")"
+func (g *rustGenerator) nameExpression(expression coreExpression) string {
+	if _, ok := g.constants[expression.Declaration]; ok {
+		return fmt.Sprintf("SlickOutcome::Value(%s())", rustConstantName(expression.Declaration))
 	}
-	parts := make([]string, len(parsed.args))
-	for index, elementType := range parsed.args {
-		parts[index] = rustEquality(
-			fmt.Sprintf("%s.%d", left, index),
-			fmt.Sprintf("%s.%d", right, index),
-			elementType,
-		)
+	if variant, ok := g.variants[expression.Declaration]; ok {
+		return fmt.Sprintf("SlickOutcome::Value(SlickValue::Union { type_name: %s, variant: %s, tag: %d, fields: vec![] })",
+			rustStringLiteral(variant.union), rustStringLiteral(variant.name), variant.tag)
 	}
-	return "(" + strings.Join(parts, " && ") + ")"
+	if _, ok := g.functions[expression.Declaration]; ok {
+		return fmt.Sprintf("SlickOutcome::Value(SlickValue::Callable(SlickCallable { target: %s, captures: vec![] }))", rustStringLiteral(expression.Declaration))
+	}
+	return g.nameFromParts(expression.Name, expression.Declaration)
+}
+
+func (g *rustGenerator) nameFromParts(name, declaration string) string {
+	parts := strings.Split(name, ".")
+	if len(parts) == 0 || parts[0] == "" {
+		return "SlickOutcome::Throw(SlickFailure::host(\"empty value name\"))"
+	}
+	base := rustLocalName(parts[0]) + ".clone()"
+	if len(parts) == 1 {
+		return "SlickOutcome::Value(" + base + ")"
+	}
+	path := make([]string, 0, len(parts)-1)
+	for _, part := range parts[1:] {
+		path = append(path, rustStringLiteral(part))
+	}
+	return fmt.Sprintf("slick_path(%s, &[%s])", base, strings.Join(path, ", "))
+}
+
+func (g *rustGenerator) call(expression coreExpression, level int, scope string) (string, error) {
+	if strings.HasPrefix(expression.Declaration, "core.") {
+		return g.coreCall(expression, level, scope)
+	}
+	if expression.Operation != "" {
+		return "", rustLoweringError(expression.Location, "standard-library operation %s is not supported", expression.Operation)
+	}
+	if variant, ok := g.variants[expression.Declaration]; ok {
+		values, lines, err := g.evaluatedExpressions(expression.Arguments, level, scope)
+		if err != nil {
+			return "", err
+		}
+		lines = append(lines, fmt.Sprintf("SlickOutcome::Value(SlickValue::Union { type_name: %s, variant: %s, tag: %d, fields: vec![%s] })",
+			rustStringLiteral(variant.union), rustStringLiteral(variant.name), variant.tag, strings.Join(values, ", ")))
+		return rustInlineBlock(lines, level), nil
+	}
+	// An error class doubles as a shorthand constructor whose single argument is
+	// only the failure message: no declared field is set, so the text travels in
+	// the value's failure metadata instead.
+	if g.errorClasses[expression.Declaration] {
+		values, lines, err := g.evaluatedExpressions(expression.Arguments, level, scope)
+		if err != nil {
+			return "", err
+		}
+		message := "String::new()"
+		if len(values) > 0 {
+			message = fmt.Sprintf("slick_format(&%s)", values[0])
+		}
+		lines = append(lines, fmt.Sprintf("SlickOutcome::Value(SlickValue::Object { type_name: %s, fields: vec![], resource: None, message: %s })",
+			rustStringLiteral(expression.Declaration), message))
+		return rustInlineBlock(lines, level), nil
+	}
+	lines := make([]string, 0, len(expression.Arguments)+3)
+	callee := ""
+	receiver := ""
+	if expression.Value != nil {
+		value, err := g.expression(*expression.Value, level+1, scope)
+		if err != nil {
+			return "", err
+		}
+		callee = g.nextTemporary()
+		lines = append(lines, fmt.Sprintf("let %s = slick_value!(%s);", callee, value))
+	} else if expression.Receiver != nil {
+		value, err := g.expression(*expression.Receiver, level+1, scope)
+		if err != nil {
+			return "", err
+		}
+		receiver = g.nextTemporary()
+		lines = append(lines, fmt.Sprintf("let %s = slick_value!(%s);", receiver, value))
+	}
+	arguments, argumentLines, err := g.evaluatedExpressions(expression.Arguments, level, scope)
+	if err != nil {
+		return "", err
+	}
+	lines = append(lines, argumentLines...)
+	switch {
+	case callee != "":
+		lines = append(lines, fmt.Sprintf("slick_call_callable(slick_context, %s, vec![%s])", callee, strings.Join(arguments, ", ")))
+	case receiver != "":
+		lines = append(lines, fmt.Sprintf("slick_call_method(slick_context, %s, %s, vec![%s])", receiver, rustStringLiteral(expression.Declaration), strings.Join(arguments, ", ")))
+	case expression.Declaration != "":
+		if _, ok := g.functions[expression.Declaration]; !ok {
+			return "", rustLoweringError(expression.Location, "unknown function %s", expression.Declaration)
+		}
+		lines = append(lines, fmt.Sprintf("%s(slick_context, None, vec![%s])", rustFunctionName(expression.Declaration), strings.Join(arguments, ", ")))
+	default:
+		return "", rustLoweringError(expression.Location, "call has no target")
+	}
+	return rustInlineBlock(lines, level), nil
+}
+
+func (g *rustGenerator) coreCall(expression coreExpression, level int, scope string) (string, error) {
+	values, lines, err := g.evaluatedExpressions(expression.Arguments, level, scope)
+	if err != nil {
+		return "", err
+	}
+	switch expression.Declaration {
+	case "core.enumerate":
+		if len(values) != 1 {
+			return "", rustLoweringError(expression.Location, "enumerate expects one argument")
+		}
+		lines = append(lines, fmt.Sprintf("SlickOutcome::Value(SlickValue::Enumerate(Box::new(%s)))", values[0]))
+	case "core.zip":
+		lines = append(lines, fmt.Sprintf("SlickOutcome::Value(SlickValue::Zip(vec![%s]))", strings.Join(values, ", ")))
+	case "core.unwrap":
+		if len(values) != 1 {
+			return "", rustLoweringError(expression.Location, "unwrap expects one argument")
+		}
+		lines = append(lines, fmt.Sprintf("match %s { SlickValue::Result(true, value) => SlickOutcome::Value(*value), SlickValue::Result(false, value) => SlickOutcome::Throw(SlickFailure::slick(*value)), _ => SlickOutcome::Throw(SlickFailure::host(\"unwrap value is not Result\")) }", values[0]))
+	default:
+		return "", rustLoweringError(expression.Location, "compiler operation %s is not supported", expression.Declaration)
+	}
+	return rustInlineBlock(lines, level), nil
+}
+
+func (g *rustGenerator) evaluatedExpressions(expressions []coreExpression, level int, scope string) ([]string, []string, error) {
+	values := make([]string, 0, len(expressions))
+	lines := make([]string, 0, len(expressions))
+	for _, expression := range expressions {
+		value, err := g.expression(expression, level+1, scope)
+		if err != nil {
+			return nil, nil, err
+		}
+		name := g.nextTemporary()
+		lines = append(lines, fmt.Sprintf("let %s = slick_value!(%s);", name, value))
+		values = append(values, name)
+	}
+	return values, lines, nil
+}
+
+func (g *rustGenerator) catchExpression(expression coreExpression, level int, scope string) (string, error) {
+	value, err := g.expression(*expression.Value, level+1, scope)
+	if err != nil {
+		return "", err
+	}
+	failure := g.nextTemporary()
+	var output strings.Builder
+	output.WriteString("{\n")
+	fmt.Fprintf(&output, "%smatch %s {\n", rustIndent(level+1), value)
+	fmt.Fprintf(&output, "%sSlickOutcome::Throw(%s) => {\n", rustIndent(level+2), failure)
+	for _, arm := range expression.Arms {
+		fmt.Fprintf(&output, "%sif slick_match_failure(&%s, %s) {\n", rustIndent(level+3), failure, rustStringLiteral(arm.Pattern))
+		for _, binding := range arm.Bindings {
+			if binding.Name != "_" {
+				fmt.Fprintf(&output, "%slet mut %s = slick_failure_value(&%s);\n", rustIndent(level+4), rustLocalName(binding.Name), failure)
+			}
+		}
+		armValue, err := g.expression(arm.Value, level+4, scope)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&output, "%s%s\n%s} else ", rustIndent(level+4), armValue, rustIndent(level+3))
+	}
+	fmt.Fprintf(&output, "{ SlickOutcome::Throw(%s) }\n", failure)
+	fmt.Fprintf(&output, "%s}\n%soutcome => outcome,\n%s}\n%s}", rustIndent(level+2), rustIndent(level+2), rustIndent(level+1), rustIndent(level))
+	return output.String(), nil
+}
+
+func (g *rustGenerator) usingExpression(expression coreExpression, level int, scope string) (string, error) {
+	if expression.Value == nil || expression.Body == nil || len(expression.Bindings) != 1 {
+		return "", rustLoweringError(expression.Location, "invalid using expression")
+	}
+	initializer, err := g.expression(*expression.Value, level+1, scope)
+	if err != nil {
+		return "", err
+	}
+	resource := g.nextTemporary()
+	body, err := g.block(*expression.Body, level+1, scope)
+	if err != nil {
+		return "", err
+	}
+	binding := rustLocalName(expression.Bindings[0].Name)
+	return rustInlineBlock([]string{
+		fmt.Sprintf("let %s = slick_value!(%s);", resource, initializer),
+		fmt.Sprintf("let slick_primary = { let mut %s = %s.clone(); %s };", binding, resource, body),
+		// Cleanup runs with cancellation detached, so a cancelled scope still
+		// closes its resource.
+		fmt.Sprintf("let slick_cleanup = slick_call_method(&slick_context.without_cancel(), %s, \"Close\", vec![]);", resource),
+		"slick_combine_outcomes(slick_primary, slick_cleanup)",
+	}, level), nil
+}
+
+func (g *rustGenerator) matchExpression(expression coreExpression, level int, scope string) (string, error) {
+	if expression.Value == nil {
+		return "", rustLoweringError(expression.Location, "match has no value")
+	}
+	value, err := g.expression(*expression.Value, level+1, scope)
+	if err != nil {
+		return "", err
+	}
+	scrutinee := g.nextTemporary()
+	var output strings.Builder
+	output.WriteString("{\n")
+	fmt.Fprintf(&output, "%slet %s = slick_value!(%s);\n", rustIndent(level+1), scrutinee, value)
+	for index, arm := range expression.Arms {
+		prefix := "if"
+		if index > 0 {
+			prefix = "else if"
+		}
+		condition := "true"
+		payload := ""
+		switch arm.Pattern {
+		case "variant":
+			variant, _ := coreDeclarationName(arm.Variant)
+			payload = g.nextTemporary()
+			condition = fmt.Sprintf("let Some(%s) = slick_union_payload(%s.clone(), %s)", payload, scrutinee, rustStringLiteral(variant))
+		case "Ok":
+			payload = g.nextTemporary()
+			condition = fmt.Sprintf("let Some(%s) = slick_result_payload(%s.clone(), true)", payload, scrutinee)
+		case "Err":
+			payload = g.nextTemporary()
+			condition = fmt.Sprintf("let Some(%s) = slick_result_payload(%s.clone(), false)", payload, scrutinee)
+		}
+		fmt.Fprintf(&output, "%s%s %s {\n", rustIndent(level+1), prefix, condition)
+		for bindingIndex, binding := range arm.Bindings {
+			if binding.Name == "_" {
+				continue
+			}
+			if arm.Pattern == "variant" {
+				fmt.Fprintf(&output, "%slet mut %s = %s.get(%d).cloned().unwrap_or(SlickValue::Null);\n", rustIndent(level+2), rustLocalName(binding.Name), payload, bindingIndex)
+			} else if payload != "" {
+				fmt.Fprintf(&output, "%slet mut %s = %s.clone();\n", rustIndent(level+2), rustLocalName(binding.Name), payload)
+			} else {
+				fmt.Fprintf(&output, "%slet mut %s = %s.clone();\n", rustIndent(level+2), rustLocalName(binding.Name), scrutinee)
+			}
+		}
+		armValue, err := g.expression(arm.Value, level+2, scope)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&output, "%s%s\n%s}", rustIndent(level+2), armValue, rustIndent(level+1))
+		if index == len(expression.Arms)-1 {
+			output.WriteByte('\n')
+		}
+	}
+	fmt.Fprintf(&output, "%selse { SlickOutcome::Throw(SlickFailure::host(\"non-exhaustive match\")) }\n%s}", rustIndent(level+1), rustIndent(level))
+	return output.String(), nil
+}
+
+func (g *rustGenerator) taskLaunch(call coreExpression, level int, scope string) (string, error) {
+	if call.Kind != "call" || call.Operation != "" {
+		return "", rustLoweringError(call.Location, "task launch target is not a user call")
+	}
+	lines := make([]string, 0, len(call.Arguments)+3)
+	callee := ""
+	receiver := ""
+	if call.Value != nil {
+		value, err := g.expression(*call.Value, level+1, scope)
+		if err != nil {
+			return "", err
+		}
+		callee = g.nextTemporary()
+		lines = append(lines, fmt.Sprintf("let %s = slick_value!(%s);", callee, value))
+	} else if call.Receiver != nil {
+		value, err := g.expression(*call.Receiver, level+1, scope)
+		if err != nil {
+			return "", err
+		}
+		receiver = g.nextTemporary()
+		lines = append(lines, fmt.Sprintf("let %s = slick_value!(%s);", receiver, value))
+	}
+	arguments, argumentLines, err := g.evaluatedExpressions(call.Arguments, level, scope)
+	if err != nil {
+		return "", err
+	}
+	lines = append(lines, argumentLines...)
+	work := ""
+	switch {
+	case callee != "":
+		work = fmt.Sprintf("move |child_context| slick_call_callable(&child_context, %s, vec![%s])", callee, strings.Join(arguments, ", "))
+	case receiver != "":
+		work = fmt.Sprintf("move |child_context| slick_call_method(&child_context, %s, %s, vec![%s])", receiver, rustStringLiteral(call.Declaration), strings.Join(arguments, ", "))
+	default:
+		work = fmt.Sprintf("move |child_context| %s(&child_context, None, vec![%s])", rustFunctionName(call.Declaration), strings.Join(arguments, ", "))
+	}
+	lines = append(lines, fmt.Sprintf("match %s.launch(%s) { Ok(task) => task, Err(failure) => return SlickOutcome::Throw(failure) }", scope, work))
+	return rustPlainBlock(lines, level), nil
+}
+
+func (g *rustGenerator) callableDispatcher() (string, error) {
+	var output strings.Builder
+	output.WriteString("fn slick_call_callable(slick_context: &SlickContext, slick_value: SlickValue, slick_arguments: Vec<SlickValue>) -> SlickOutcome {\n")
+	output.WriteString("    let SlickValue::Callable(slick_callable) = slick_value else { return SlickOutcome::Throw(SlickFailure::host(\"value is not callable\")); };\n")
+	output.WriteString("    match slick_callable.target {\n")
+	for _, function := range g.core.Functions {
+		if function.Receiver == "" {
+			fmt.Fprintf(&output, "        %s => %s(slick_context, None, slick_arguments),\n", rustStringLiteral(function.ID), rustFunctionName(function.ID))
+		}
+	}
+	for index := 0; index < len(g.lambdas); index++ {
+		lambda := g.lambdas[index]
+		fmt.Fprintf(&output, "        %s => {\n", rustStringLiteral(lambda.id))
+		for captureIndex, capture := range lambda.expression.Captures {
+			fmt.Fprintf(&output, "            let Some(mut %s) = slick_callable.captures.get(%d).cloned() else { return SlickOutcome::Throw(SlickFailure::host(\"missing lambda capture\")); };\n", rustLocalName(capture.Name), captureIndex)
+		}
+		for parameterIndex, parameter := range lambda.expression.Parameters {
+			fmt.Fprintf(&output, "            let Some(mut %s) = slick_arguments.get(%d).cloned() else { return SlickOutcome::Throw(SlickFailure::host(\"missing lambda argument\")); };\n", rustLocalName(parameter.Name), parameterIndex)
+		}
+		if lambda.expression.Body == nil {
+			return "", rustLoweringError(lambda.expression.Location, "lambda has no body")
+		}
+		body, err := g.block(*lambda.expression.Body, 3, "")
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&output, "            slick_finish_function(%s)\n", body)
+		output.WriteString("        },\n")
+	}
+	output.WriteString("        _ => SlickOutcome::Throw(SlickFailure::host(\"unknown callable target\")),\n")
+	output.WriteString("    }\n}\n")
+	return output.String(), nil
+}
+
+func (g *rustGenerator) methodDispatcher() string {
+	var output strings.Builder
+	output.WriteString("fn slick_call_method(slick_context: &SlickContext, slick_receiver: SlickValue, slick_method: &str, slick_arguments: Vec<SlickValue>) -> SlickOutcome {\n")
+	output.WriteString("    if let Some(outcome) = slick_builtin_method(&slick_receiver, slick_method, &slick_arguments) { return outcome; }\n")
+	output.WriteString("    let slick_receiver_type = slick_type_name(&slick_receiver);\n")
+	output.WriteString("    let slick_method_name = slick_method.rsplit('.').next().unwrap_or(slick_method);\n")
+	output.WriteString("    match (slick_receiver_type, slick_method_name) {\n")
+	for _, function := range g.core.Functions {
+		if function.Receiver == "" {
+			continue
+		}
+		name, _ := coreDeclarationName(function.ID)
+		fmt.Fprintf(&output, "        (%s, %s) => %s(slick_context, Some(slick_receiver), slick_arguments),\n", rustStringLiteral(function.Receiver), rustStringLiteral(name), rustFunctionName(function.ID))
+	}
+	output.WriteString("        _ => SlickOutcome::Throw(SlickFailure::host(format!(\"method {slick_method} is unavailable on {slick_receiver_type}\"))),\n")
+	output.WriteString("    }\n}\n")
+	return output.String()
+}
+
+func (g *rustGenerator) mainFunction() string {
+	var output strings.Builder
+	output.WriteString("fn main() {\n")
+	fmt.Fprintf(&output, "    let outcome = %s(&SlickContext::root(), None, vec![]);\n", rustFunctionName("root.main"))
+	output.WriteString("    match outcome {\n")
+	output.WriteString("        SlickOutcome::Value(value) => { let text = slick_format(&value); if !text.is_empty() { println!(\"{}\", text); } },\n")
+	output.WriteString("        SlickOutcome::Throw(failure) => { eprintln!(\"{}\", slick_failure_text(&failure)); std::process::exit(1); },\n")
+	output.WriteString("        SlickOutcome::Return(value) => { let text = slick_format(&value); if !text.is_empty() { println!(\"{}\", text); } },\n")
+	output.WriteString("        SlickOutcome::Break | SlickOutcome::Continue => { eprintln!(\"invalid control flow\"); std::process::exit(1); },\n")
+	output.WriteString("    }\n}\n")
+	return output.String()
+}
+
+func (g *rustGenerator) literal(literal coreLiteral) (string, error) {
+	switch literal.Kind {
+	case "null":
+		return "SlickValue::Null", nil
+	case "bool":
+		return "SlickValue::Bool(" + strconv.FormatBool(literal.Boolean) + ")", nil
+	case "int":
+		return "SlickValue::Int(" + strconv.FormatInt(literal.Integer, 10) + "i64)", nil
+	case "float":
+		return fmt.Sprintf("SlickValue::Float(f64::from_bits(0x%016x))", math.Float64bits(literal.Float)), nil
+	case "string":
+		return "SlickValue::String(" + rustStringLiteral(literal.Text) + ".to_string())", nil
+	case "union":
+		variant, ok := g.variants[literal.Variant]
+		if !ok {
+			return "", fmt.Errorf("unknown union literal %s", literal.Variant)
+		}
+		return fmt.Sprintf("SlickValue::Union { type_name: %s, variant: %s, tag: %d, fields: vec![] }", rustStringLiteral(variant.union), rustStringLiteral(variant.name), variant.tag), nil
+	default:
+		return "", fmt.Errorf("literal kind %s is not supported", literal.Kind)
+	}
 }
 
 func (g *rustGenerator) nextTemporary() string {
@@ -400,57 +1041,22 @@ func (g *rustGenerator) nextTemporary() string {
 
 func rustInlineBlock(lines []string, level int) string {
 	var output strings.Builder
+	output.WriteString("(|| -> SlickOutcome {\n")
+	for _, line := range lines {
+		fmt.Fprintf(&output, "%s%s\n", rustIndent(level+1), line)
+	}
+	fmt.Fprintf(&output, "%s})()", rustIndent(level))
+	return output.String()
+}
+
+func rustPlainBlock(lines []string, level int) string {
+	var output strings.Builder
 	output.WriteString("{\n")
 	for _, line := range lines {
 		fmt.Fprintf(&output, "%s%s\n", rustIndent(level+1), line)
 	}
 	fmt.Fprintf(&output, "%s}", rustIndent(level))
 	return output.String()
-}
-
-func rustType(name string) (string, error) {
-	switch name {
-	case "null":
-		return "()", nil
-	case "bool":
-		return "bool", nil
-	case "int":
-		return "i64", nil
-	case "float":
-		return "f64", nil
-	case "string":
-		return "&'static str", nil
-	}
-	parsed := parseTypeName(name)
-	if parsed.kind != typeKindTuple || len(parsed.args) < 2 {
-		return "", fmt.Errorf("type %s is not supported", name)
-	}
-	parts := make([]string, len(parsed.args))
-	for index, argument := range parsed.args {
-		typ, err := rustType(argument)
-		if err != nil {
-			return "", err
-		}
-		parts[index] = typ
-	}
-	return "(" + strings.Join(parts, ", ") + ")", nil
-}
-
-func rustLiteral(literal coreLiteral) (string, error) {
-	switch literal.Kind {
-	case "null":
-		return "()", nil
-	case "bool":
-		return strconv.FormatBool(literal.Boolean), nil
-	case "int":
-		return strconv.FormatInt(literal.Integer, 10) + "i64", nil
-	case "float":
-		return fmt.Sprintf("f64::from_bits(0x%016x)", math.Float64bits(literal.Float)), nil
-	case "string":
-		return rustStringLiteral(literal.Text), nil
-	default:
-		return "", fmt.Errorf("literal kind %s is not supported", literal.Kind)
-	}
 }
 
 func rustStringLiteral(value string) string {
@@ -487,36 +1093,7 @@ func rustStringLiteral(value string) string {
 
 func rustFunctionName(name string) string { return "slick_fn_" + hex.EncodeToString([]byte(name)) }
 func rustConstantName(name string) string {
-	return "SLICK_CONST_" + strings.ToUpper(hex.EncodeToString([]byte(name)))
+	return "slick_const_" + hex.EncodeToString([]byte(name))
 }
 func rustLocalName(name string) string { return "slick_local_" + hex.EncodeToString([]byte(name)) }
 func rustIndent(level int) string      { return strings.Repeat("    ", level) }
-
-func rustPrintValue(output *strings.Builder, expression, typ string, level int) error {
-	indent := rustIndent(level)
-	switch typ {
-	case "null":
-		return nil
-	case "float":
-		fmt.Fprintf(output, "%sslick_print_float(%s);\n", indent, expression)
-		return nil
-	case "string", "int", "bool":
-		fmt.Fprintf(output, "%sprint!(\"{}\", %s);\n", indent, expression)
-		return nil
-	}
-	parsed := parseTypeName(typ)
-	if parsed.kind != typeKindTuple {
-		return fmt.Errorf("Rust main result type %s is not printable", typ)
-	}
-	fmt.Fprintf(output, "%sprint!(\"(\");\n", indent)
-	for index, elementType := range parsed.args {
-		if index > 0 {
-			fmt.Fprintf(output, "%sprint!(\", \");\n", indent)
-		}
-		if err := rustPrintValue(output, fmt.Sprintf("%s.%d", expression, index), elementType, level); err != nil {
-			return err
-		}
-	}
-	fmt.Fprintf(output, "%sprint!(\")\");\n", indent)
-	return nil
-}
