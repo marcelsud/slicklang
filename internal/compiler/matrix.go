@@ -14,7 +14,7 @@ import (
 // interpreter or a registered backend. There is no two-state host/compiled
 // boolean; the interpreter is a first-class engine with an empty Backend.
 type ExecutionEngine struct {
-	Name        string  // "interpreter", "go", "llvm", "rust", "bun"
+	Name        string  // "interpreter", "go", "llvm", "bun"
 	Backend     Backend // zero value "" for the interpreter
 	Interpreted bool    // true only for the interpreter
 	Stability   Stability

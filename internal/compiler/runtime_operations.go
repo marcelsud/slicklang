@@ -52,7 +52,6 @@ const (
 	runtimeImplementationInterpreter runtimeImplementationKind = "interpreter"
 	runtimeImplementationGo          runtimeImplementationKind = "go"
 	runtimeImplementationLLVM        runtimeImplementationKind = "llvm"
-	runtimeImplementationRust        runtimeImplementationKind = "rust"
 	runtimeImplementationBun         runtimeImplementationKind = "bun"
 )
 
@@ -76,7 +75,6 @@ func declareRuntimeOperation(family runtimeFamily, llvmEntry string, dependencie
 			runtimeImplementationInterpreter: {entry: "dispatch:" + string(family)},
 			runtimeImplementationGo:          {entry: "emit:" + string(family)},
 			runtimeImplementationLLVM:        {entry: llvmEntry},
-			runtimeImplementationRust:        {entry: "rust:" + string(family)},
 			runtimeImplementationBun:         {entry: "bun:" + string(family)},
 		},
 	}
@@ -190,7 +188,7 @@ func validateRuntimeOperationRegistry() error {
 		for implementation, entry := range declaration.implementations {
 			switch implementation {
 			case runtimeImplementationInterpreter, runtimeImplementationGo, runtimeImplementationLLVM,
-				runtimeImplementationRust, runtimeImplementationBun:
+				runtimeImplementationBun:
 			default:
 				return fmt.Errorf("runtime operation %s has unknown implementation %q", operation, implementation)
 			}
@@ -234,22 +232,9 @@ var (
 	interpreterRuntimeOperations = runtimeOperationsFor(runtimeImplementationInterpreter)
 	goRuntimeOperations          = runtimeOperationsFor(runtimeImplementationGo)
 	llvmRuntimeOperations        = runtimeOperationsFor(runtimeImplementationLLVM)
-	// The Rust backend advertises only the operations its generator emits, so an
-	// unimplemented family fails before any toolchain work.
-	rustRuntimeOperations = rustImplementedRuntimeOperations()
 	// The Bun backend advertises only the operations its generator emits.
 	bunRuntimeOperations = bunImplementedRuntimeOperations()
 )
-
-func rustImplementedRuntimeOperations() runtimeOperationTable {
-	table := make(runtimeOperationTable)
-	for operation, implementation := range runtimeOperationsFor(runtimeImplementationRust) {
-		if _, ok := rustStdFunction(operation); ok {
-			table[operation] = implementation
-		}
-	}
-	return table
-}
 
 func runtimeInputsForCore(core coreProgram) (backendRuntimeInputs, error) {
 	inputs := backendRuntimeInputs{abiVersion: runtimeABIVersion, families: make(map[runtimeFamily]bool)}

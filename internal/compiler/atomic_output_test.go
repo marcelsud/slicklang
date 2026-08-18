@@ -81,13 +81,6 @@ func atomicOutputBackends() []atomicOutputBackend {
 			hideDependency:   hideLLVMJansson,
 		},
 		{
-			name:             "rust",
-			options:          BuildOptions{Backend: BackendRust, AllowAlpha: true},
-			toolchainErr:     "Rust toolchain not found",
-			dependentSources: atomicSQLiteSources(),
-			hideDependency:   hideCargoFetch,
-		},
-		{
 			name:             "bun",
 			options:          BuildOptions{Backend: BackendBun, AllowAlpha: true},
 			toolchainErr:     "Bun toolchain not found",
@@ -157,11 +150,6 @@ func hideGoModules(t *testing.T) {
 func hideLLVMJansson(t *testing.T) {
 	t.Helper()
 	t.Setenv("SLICK_JANSSON_ROOT", filepath.Join(t.TempDir(), "missing"))
-}
-
-func hideCargoFetch(t *testing.T) {
-	t.Helper()
-	shadowOrHide(t, "cargo", "fetch")
 }
 
 func hideBunInstall(t *testing.T) {

@@ -12,8 +12,8 @@ func TestEngineOperationCoverage(t *testing.T) {
 	public := publicStdOperations()
 	coverages := EngineOperationCoverage()
 
-	if got := coverageEngineNames(coverages); !slices.Equal(got, []string{"bun", "go", "interpreter", "llvm", "rust"}) {
-		t.Fatalf("engines = %v, want bun, go, interpreter, llvm, rust", got)
+	if got := coverageEngineNames(coverages); !slices.Equal(got, []string{"bun", "go", "interpreter", "llvm"}) {
+		t.Fatalf("engines = %v, want bun, go, interpreter, llvm", got)
 	}
 
 	for _, coverage := range coverages {
@@ -176,10 +176,6 @@ func publicStdOperations() []string {
 func claimedEngineOperations(engine string) []runtimeOperationID {
 	var claimed []runtimeOperationID
 	switch engine {
-	case string(BackendRust):
-		for operation := range rustStdOperations {
-			claimed = append(claimed, operation)
-		}
 	case string(BackendBun):
 		for operation := range bunStdOperations {
 			claimed = append(claimed, operation)
@@ -201,8 +197,6 @@ func advertisedEngineOperations(engine string) runtimeOperationTable {
 		return goRuntimeOperations
 	case string(BackendLLVM):
 		return llvmRuntimeOperations
-	case string(BackendRust):
-		return rustRuntimeOperations
 	case string(BackendBun):
 		return bunRuntimeOperations
 	default:

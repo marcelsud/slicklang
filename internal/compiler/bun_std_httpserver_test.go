@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -15,16 +16,16 @@ import (
 )
 
 func TestBunStdHTTPServerMatchesInterpreter(t *testing.T) {
-	source := Source{Name: "main.slk", Namespace: "root", Text: rustStdHTTPServerProgram}
+	source := Source{Name: "main.slk", Namespace: "root", Text: bunStdHTTPServerProgram}
 	binary := buildBunTestProgram(t, source)
-	slick := rustStdHTTPServerBuildSlick(t)
+	slick := bunStdHTTPServerBuildSlick(t)
 	root := t.TempDir()
 	path := filepath.Join(root, "main.slk")
-	if err := os.WriteFile(path, []byte(rustStdHTTPServerProgram), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(bunStdHTTPServerProgram), 0o644); err != nil {
 		t.Fatalf("write source: %v", err)
 	}
 
-	bunObserved := rustStdHTTPServerObserve(t, func(address string) (*exec.Cmd, *strings.Builder) {
+	bunObserved := bunStdHTTPServerObserve(t, func(address string) (*exec.Cmd, *strings.Builder) {
 		command := exec.Command(binary)
 		command.Env = append(os.Environ(), "SLICK_HTTP_SERVER_ADDR="+address)
 		var output strings.Builder
@@ -36,7 +37,7 @@ func TestBunStdHTTPServerMatchesInterpreter(t *testing.T) {
 		return command, &output
 	})
 
-	interpObserved := rustStdHTTPServerObserve(t, func(address string) (*exec.Cmd, *strings.Builder) {
+	interpObserved := bunStdHTTPServerObserve(t, func(address string) (*exec.Cmd, *strings.Builder) {
 		command := exec.Command(slick, "run", path)
 		command.Env = append(os.Environ(), "SLICK_HTTP_SERVER_ADDR="+address)
 		var output strings.Builder
@@ -80,7 +81,7 @@ func TestBunStdHTTPServerMatchesInterpreterPortlessAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireNoRustDiagnostics(t, diagnostics)
+	requireNoDiagnostics(t, diagnostics)
 	if interpreted != "Bind" {
 		t.Fatalf("interpreter port-less address = %q, want Bind", interpreted)
 	}
@@ -95,9 +96,9 @@ func TestBunStdHTTPServerMatchesInterpreterPortlessAddress(t *testing.T) {
 }
 
 func TestBunStdHTTPServerMatchesInterpreterOversizedBody(t *testing.T) {
-	source := Source{Name: "main.slk", Namespace: "root", Text: rustStdHTTPServerProgram}
+	source := Source{Name: "main.slk", Namespace: "root", Text: bunStdHTTPServerProgram}
 	binary := buildBunTestProgram(t, source)
-	address := rustStdHTTPServerFreeAddress(t)
+	address := bunStdHTTPServerFreeAddress(t)
 	command := exec.Command(binary)
 	command.Env = append(os.Environ(), "SLICK_HTTP_SERVER_ADDR="+address)
 	var output strings.Builder
@@ -112,7 +113,7 @@ func TestBunStdHTTPServerMatchesInterpreterOversizedBody(t *testing.T) {
 			_, _ = command.Process.Wait()
 		}
 	})
-	rustStdHTTPServerWaitReady(t, "http://"+address)
+	bunStdHTTPServerWaitReady(t, "http://"+address)
 	bomResponse, err := http.Get("http://" + address + "/echo?q=%EF%BB%BFhello")
 	if err != nil {
 		t.Fatalf("BOM query: %v", err)
@@ -125,7 +126,7 @@ func TestBunStdHTTPServerMatchesInterpreterOversizedBody(t *testing.T) {
 
 	payload := "POST /echo HTTP/1.1\r\nHost: " + address + "\r\nTransfer-Encoding: chunked\r\n\r\n80\r\n" +
 		strings.Repeat("x", 128) + "\r\n0\r\n\r\n"
-	raw := rustStdHTTPServerRaw(t, address, payload)
+	raw := bunStdHTTPServerRaw(t, address, payload)
 	if !strings.Contains(raw, "413") {
 		t.Fatalf("chunked oversized raw = %q, want 413", raw)
 	}
@@ -204,7 +205,7 @@ function main() -> Result<null, std.http.server.Failure> effects { database, env
 func TestBunStdHTTPServerMatchesInterpreterShutdownDeadline(t *testing.T) {
 	source := Source{Name: "main.slk", Namespace: "root", Text: bunStdHTTPServerSlowProgram}
 	binary := buildBunTestProgram(t, source)
-	address := rustStdHTTPServerFreeAddress(t)
+	address := bunStdHTTPServerFreeAddress(t)
 	command := exec.Command(binary)
 	command.Env = append(os.Environ(), "SLICK_HTTP_SERVER_ADDR="+address)
 	var output strings.Builder
@@ -219,7 +220,7 @@ func TestBunStdHTTPServerMatchesInterpreterShutdownDeadline(t *testing.T) {
 			_, _ = command.Process.Wait()
 		}
 	})
-	rustStdHTTPServerWaitReady(t, "http://"+address)
+	bunStdHTTPServerWaitReady(t, "http://"+address)
 
 	slowDone := make(chan struct{})
 	go func() {
@@ -336,7 +337,7 @@ func bunStdHTTPServerExchange(t *testing.T, address, payload string) (int, http.
 func TestBunStdHTTPServerMatchesInterpreterHeaderTargetConnect(t *testing.T) {
 	source := Source{Name: "main.slk", Namespace: "root", Text: bunStdHTTPServerParityProgram}
 	binary := buildBunTestProgram(t, source)
-	address := rustStdHTTPServerFreeAddress(t)
+	address := bunStdHTTPServerFreeAddress(t)
 	command := exec.Command(binary)
 	command.Env = append(os.Environ(), "SLICK_HTTP_SERVER_ADDR="+address)
 	var output strings.Builder
@@ -351,7 +352,7 @@ func TestBunStdHTTPServerMatchesInterpreterHeaderTargetConnect(t *testing.T) {
 			_, _ = command.Process.Wait()
 		}
 	})
-	rustStdHTTPServerWaitReady(t, "http://"+address)
+	bunStdHTTPServerWaitReady(t, "http://"+address)
 
 	headerStatus, headerHeaders, headerBody := bunStdHTTPServerExchange(t, address,
 		"GET /echo HTTP/1.1\r\nHost: "+address+"\r\nX-Name: é\r\nConnection: close\r\n\r\n")
@@ -376,7 +377,7 @@ func startBunHTTPServer(t *testing.T, program string) string {
 	t.Helper()
 	source := Source{Name: "main.slk", Namespace: "root", Text: program}
 	binary := buildBunTestProgram(t, source)
-	address := rustStdHTTPServerFreeAddress(t)
+	address := bunStdHTTPServerFreeAddress(t)
 	command := exec.Command(binary)
 	command.Env = append(os.Environ(), "SLICK_HTTP_SERVER_ADDR="+address)
 	var output strings.Builder
@@ -402,7 +403,7 @@ func startBunHTTPServer(t *testing.T, program string) string {
 			_, _ = command.Process.Wait()
 		}
 	})
-	rustStdHTTPServerWaitReady(t, "http://"+address)
+	bunStdHTTPServerWaitReady(t, "http://"+address)
 	return address
 }
 
@@ -528,7 +529,7 @@ func TestBunStdHTTPServerMatchesInterpreterSlowBodyWriteTimeout(t *testing.T) {
 }
 
 func TestBunStdHTTPServerMatchesInterpreterDeclaredLength(t *testing.T) {
-	address := startBunHTTPServer(t, rustStdHTTPServerProgram)
+	address := startBunHTTPServer(t, bunStdHTTPServerProgram)
 	conn, err := net.DialTimeout("tcp", address, 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -562,7 +563,7 @@ func TestBunStdHTTPServerMatchesInterpreterDeclaredLength(t *testing.T) {
 }
 
 func TestBunStdHTTPServerMatchesInterpreterKeepAliveValidation(t *testing.T) {
-	address := startBunHTTPServer(t, rustStdHTTPServerProgram)
+	address := startBunHTTPServer(t, bunStdHTTPServerProgram)
 	conn, err := net.DialTimeout("tcp", address, 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -604,4 +605,232 @@ func TestBunStdHTTPServerMatchesInterpreterUpgrade(t *testing.T) {
 	if status != http.StatusOK || !strings.Contains(body, "GET|/echo|") {
 		t.Fatalf("upgrade status=%d body=%q, want 200 GET|/echo|", status, body)
 	}
+}
+
+const bunStdHTTPServerProgram = `class Echo implements std.http.server.Handler {
+    function Handle(Request: std.http.server.Request) -> std.http.server.Response effects { environment, filesystem, network, process } {
+        if (Request.Path == "/odd-status") {
+            std.http.server.Response {
+                Status: 299
+                Body: std.bytes.FromUtf8("odd")
+            }
+        } else {
+            let Query = Request.Query
+            let QueryValues = Query.Get("q")
+            let QueryText = ""
+            if (QueryValues != null) {
+                QueryText = std.text.Join(QueryValues, ",")
+            }
+            let Headers = Request.Headers
+            let HostText = "no-host"
+            if (Headers.Contains("Host")) {
+                HostText = "host"
+            }
+            let HeaderText = ""
+            for Name, Values in Headers {
+                let One = std.text.Join([Name, std.text.Join(Values, ",")], "=")
+                if (HeaderText == "") {
+                    HeaderText = One
+                } else {
+                    HeaderText = std.text.Join([HeaderText, One], ";")
+                }
+            }
+            let Payload = std.text.Join([
+                Request.Method,
+                Request.Path,
+                QueryText,
+                std.convert.IntToString(std.bytes.Length(Request.Body)),
+                HostText,
+                HeaderText
+            ], "|")
+            std.http.server.Response {
+                Status: 200
+                Headers: map { "X-Echo": ["yes"] }
+                Body: std.bytes.FromUtf8(Payload)
+            }
+        }
+    }
+}
+
+function main() -> Result<null, std.http.server.Failure> effects { database, environment, filesystem, io, network, process, random, state, time } {
+    let Address = std.env.Get("SLICK_HTTP_SERVER_ADDR")
+    if (Address == null) {
+        Err(std.http.server.Failure {
+            Operation: "Config"
+            Address: ""
+            Message: "missing address"
+        })
+    } else {
+        std.http.server.Serve(std.http.server.Config {
+            Address: Address
+            MaxBodyBytes: 64
+            MaxHeaderBytes: 2048
+            ReadHeaderTimeoutMilliseconds: 2000
+            ReadTimeoutMilliseconds: 2000
+            WriteTimeoutMilliseconds: 2000
+            IdleTimeoutMilliseconds: 2000
+            ShutdownTimeoutMilliseconds: 2000
+        }, Echo {})
+    }
+}
+`
+
+func bunStdHTTPServerFreeAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve loopback address: %v", err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("release loopback address: %v", err)
+	}
+	return address
+}
+
+func bunStdHTTPServerWaitReady(t *testing.T, base string) {
+	t.Helper()
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		response, err := client.Get(base + "/echo?q=ready")
+		if err == nil {
+			response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("server at %s did not become ready", base)
+}
+
+func bunStdHTTPServerBuildSlick(t *testing.T) string {
+	t.Helper()
+	binary := filepath.Join(t.TempDir(), "slick")
+	command := exec.Command("go", "build", "-buildvcs=false", "-o", binary, "./cmd/slick")
+	command.Dir = filepath.Join("..", "..")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build slick tool: %v\n%s", err, output)
+	}
+	return binary
+}
+
+func bunStdHTTPServerRaw(t *testing.T, address, payload string) string {
+	t.Helper()
+	connection, err := net.DialTimeout("tcp", address, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial %s: %v", address, err)
+	}
+	defer connection.Close()
+	if err := connection.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	if _, err := connection.Write([]byte(payload)); err != nil {
+		t.Fatalf("write raw request: %v", err)
+	}
+	body, err := io.ReadAll(connection)
+	if err != nil {
+		t.Fatalf("read raw response: %v", err)
+	}
+	return string(body)
+}
+
+func bunStdHTTPServerHTTPBody(raw string) string {
+	if index := strings.Index(raw, "\r\n\r\n"); index >= 0 {
+		return raw[index+4:]
+	}
+	return raw
+}
+
+func bunStdHTTPServerObserve(t *testing.T, start func(address string) (*exec.Cmd, *strings.Builder)) string {
+	t.Helper()
+	address := bunStdHTTPServerFreeAddress(t)
+	command, output := start(address)
+	t.Cleanup(func() {
+		if command.Process != nil {
+			_ = command.Process.Signal(syscall.SIGTERM)
+			_, _ = command.Process.Wait()
+		}
+	})
+	base := "http://" + address
+	bunStdHTTPServerWaitReady(t, base)
+
+	var parts []string
+
+	getResponse, err := http.Get(base + "/echo?q=one&q=two")
+	if err != nil {
+		t.Fatalf("handled GET: %v", err)
+	}
+	getBody, _ := io.ReadAll(getResponse.Body)
+	getResponse.Body.Close()
+	parts = append(parts, fmt.Sprintf("GET:%d:%s:%s", getResponse.StatusCode, string(getBody), getResponse.Header.Get("X-Echo")))
+
+	postResponse, err := http.Post(base+"/echo?q=x", "text/plain", strings.NewReader("hi"))
+	if err != nil {
+		t.Fatalf("handled POST: %v", err)
+	}
+	postBody, _ := io.ReadAll(postResponse.Body)
+	postResponse.Body.Close()
+	parts = append(parts, fmt.Sprintf("POST:%d:%s", postResponse.StatusCode, string(postBody)))
+
+	oversizedResponse, err := http.Post(base+"/echo", "text/plain", strings.NewReader(strings.Repeat("x", 128)))
+	if err != nil {
+		t.Fatalf("limit rejection: %v", err)
+	}
+	oversizedBody, _ := io.ReadAll(oversizedResponse.Body)
+	oversizedResponse.Body.Close()
+	parts = append(parts, fmt.Sprintf("LIMIT:%d:%d", oversizedResponse.StatusCode, len(oversizedBody)))
+
+	keepAlive := bunStdHTTPServerRaw(t, address,
+		"GET /echo HTTP/1.1\r\nHost: "+address+"\r\n\r\n"+
+			"GET /echo HTTP/1.1\r\nHost: "+address+"\r\nConnection: close\r\n\r\n")
+	parts = append(parts, fmt.Sprintf("KEEPALIVE:%d", strings.Count(keepAlive, "HTTP/1.1 200")))
+
+	oddResponse, err := http.Get(base + "/odd-status")
+	if err != nil {
+		t.Fatalf("unregistered status: %v", err)
+	}
+	oddBody, _ := io.ReadAll(oddResponse.Body)
+	oddResponse.Body.Close()
+	parts = append(parts, fmt.Sprintf("ODD:%s:%s", oddResponse.Status, string(oddBody)))
+
+	pathResponse, err := http.Get(base + "/hello%20world")
+	if err != nil {
+		t.Fatalf("percent-encoded path: %v", err)
+	}
+	pathBody, _ := io.ReadAll(pathResponse.Body)
+	pathResponse.Body.Close()
+	parts = append(parts, fmt.Sprintf("PATH:%d:%s", pathResponse.StatusCode, string(pathBody)))
+
+	headerRaw := bunStdHTTPServerRaw(t, address,
+		"GET /echo HTTP/1.1\r\n"+
+			"Host: "+address+"\r\n"+
+			"X-Zebra: z\r\n"+
+			"x-trace: one\r\n"+
+			"X-Trace: two\r\n"+
+			"Connection: close\r\n\r\n")
+	parts = append(parts, "HEADERS:"+bunStdHTTPServerHTTPBody(headerRaw))
+
+	if command.Process == nil {
+		t.Fatal("server process missing before shutdown")
+	}
+	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("send SIGTERM: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("server exit after SIGTERM: %v output=%q", err, output.String())
+		}
+	case <-time.After(10 * time.Second):
+		_ = command.Process.Kill()
+		t.Fatalf("server did not exit after SIGTERM output=%q", output.String())
+	}
+	command.Process = nil
+	parts = append(parts, "SHUTDOWN:"+strings.TrimSpace(output.String()))
+	return strings.Join(parts, "|")
 }

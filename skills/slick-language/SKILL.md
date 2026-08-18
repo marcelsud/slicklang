@@ -68,7 +68,7 @@ Package-aware projects keep application declarations under `root` and load each 
 use acme.redis.Client
 ```
 
-Slick source never names a Go, Rust, LLVM, Bun, sidecar, or other implementation provider. `slick build` selects the package adapter declared for the whole-program backend and target; changing that backend does not change application source. The supported native backends are `bun`, `go`, `llvm`, and `rust`. The advertised targets are `bun-linux-x64-baseline`, `bun-linux-x64-modern`, `linux-x64`, and `x86_64-unknown-linux-gnu`. Alpha backends and targets require `--allow-alpha`; technical eligibility never promotes them to stable.
+Slick source never names a Go, LLVM, Bun, sidecar, or other implementation provider. `slick build` selects the package adapter declared for the whole-program backend and target; changing that backend does not change application source. The supported native backends are `bun`, `go`, and `llvm`. The advertised targets are `bun-linux-x64-baseline`, `bun-linux-x64-modern`, and `linux-x64`. Alpha backends and targets require `--allow-alpha`; technical eligibility never promotes them to stable.
 
 ## Classes, interfaces, and methods
 

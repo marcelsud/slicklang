@@ -107,7 +107,7 @@ const bunStdHTTPModule = `export async function slickNatHTTPFetch(context, args)
         currentBody = new Uint8Array();
         currentPresent = false;
       }
-      const stripSensitive = !slickHTTPRedirectTrusts(currentURL, next.href);
+      const stripSensitive = !slickHTTPRedirectAllows(currentURL, next.href);
       currentHeaders = slickHTTPFilterHeaders(currentHeaders, stripSensitive, dropBody);
       currentURL = next.href;
     }
@@ -486,7 +486,7 @@ function slickHTTPBodyHeader(name) {
     name === "Content-Location" || name === "Content-Type";
 }
 
-function slickHTTPRedirectTrusts(initial, dest) {
+function slickHTTPRedirectAllows(initial, dest) {
   const from = slickHTTPParseURL(initial);
   const to = slickHTTPParseURL(dest);
   if (!from || !to) return false;

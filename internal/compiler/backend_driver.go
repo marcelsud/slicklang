@@ -89,14 +89,12 @@ type backendDriverID string
 const (
 	backendDriverGo   backendDriverID = "go"
 	backendDriverLLVM backendDriverID = "llvm"
-	backendDriverRust backendDriverID = "rust"
 	backendDriverBun  backendDriverID = "bun"
 )
 
 var backendDriverRegistry = map[backendDriverID]func() backendDriver{
 	backendDriverGo:   goBackendDriver,
 	backendDriverLLVM: llvmBackendDriver,
-	backendDriverRust: rustBackendDriver,
 	backendDriverBun:  bunBackendDriver,
 }
 

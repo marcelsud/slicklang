@@ -58,12 +58,12 @@ func TestBunStdHTTPMatchesInterpreter(t *testing.T) {
 	t.Setenv("SLICK_HTTP_TEST_URL", server.URL)
 	t.Setenv("SLICK_HTTP_REFUSED_URL", refusedURL)
 
-	source := Source{Name: "main.slk", Namespace: "root", Text: rustStdHTTPProgram}
+	source := Source{Name: "main.slk", Namespace: "root", Text: bunStdHTTPProgram}
 	interpreted, diagnostics, err := Run([]Source{source})
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireNoRustDiagnostics(t, diagnostics)
+	requireNoDiagnostics(t, diagnostics)
 	want := "200|hello|yes|a=1,b=2|201|hello|404|302|200|true|Transport:null|No Content|null"
 	if interpreted != want {
 		t.Fatalf("interpreter output = %q, want %q", interpreted, want)
@@ -86,7 +86,7 @@ func runBunHTTPProgram(t *testing.T, text string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireNoRustDiagnostics(t, diagnostics)
+	requireNoDiagnostics(t, diagnostics)
 	binary := buildBunTestProgram(t, source)
 	output, err := exec.Command(binary).CombinedOutput()
 	if err != nil {
@@ -1190,3 +1190,84 @@ func bytesRepeat(b byte, n int) []byte {
 	}
 	return out
 }
+
+const bunStdHTTPProgram = `use std.http.Fetch as Fetch
+use std.http.Request as HTTPRequest
+use std.http.HeaderValues as HeaderValues
+use std.http.StatusText as StatusText
+
+function Text(Value: bytes) -> string {
+    match std.bytes.ToUtf8(Value) {
+        Ok(Output) => Output
+        Err(_) => "invalid"
+    }
+}
+
+function OptInt(Value: int?) -> string {
+    if (Value == null) { "null" } else { std.convert.IntToString(Value) }
+}
+
+function OptText(Value: string?) -> string {
+    if (Value == null) { "null" } else { Value }
+}
+
+function Bool(Value: bool) -> string {
+    if (Value) { "true" } else { "false" }
+}
+
+function Kind(URL: string) -> string effects { network } {
+    let Request = HTTPRequest { Method: "GET" URL: URL }
+    match Fetch(Request) {
+        Ok(Response) => "Ok:" + std.convert.IntToString(Response.Status)
+        Err(Failure) => Failure.Kind + ":" + OptInt(Failure.Status)
+    }
+}
+
+function Run(Base: string, Refused: string) -> Result<string, std.http.Failure> effects { network } {
+    let Get = Fetch(HTTPRequest { Method: "GET" URL: Base + "/get" Headers: map { "X-Custom": ["abc"] } })?
+    let Echo = Fetch(HTTPRequest {
+        Method: "POST"
+        URL: Base + "/echo"
+        Headers: map {
+            "X-Trace": ["one", "two"]
+            "x-trace": ["three"]
+        }
+        Body: Get.Body
+    })?
+    let Status = Fetch(HTTPRequest { Method: "GET" URL: Base + "/status" })?
+    let Redirect = Fetch(HTTPRequest { Method: "GET" URL: Base + "/redirect" })?
+    let Followed = Fetch(HTTPRequest { Method: "GET" URL: Base + "/redirect" FollowRedirects: true })?
+    Ok(std.text.Join([
+        std.convert.IntToString(Get.Status),
+        Text(Get.Body),
+        std.text.Join(HeaderValues(Get.Headers, "X-Reply"), ","),
+        std.text.Join(HeaderValues(Get.Headers, "set-cookie"), ","),
+        std.convert.IntToString(Echo.Status),
+        Text(Echo.Body),
+        std.convert.IntToString(Status.Status),
+        std.convert.IntToString(Redirect.Status),
+        std.convert.IntToString(Followed.Status),
+        Bool(std.text.EndsWith(Followed.URL, "/final")),
+        Kind(Refused),
+        OptText(StatusText(204)),
+        OptText(StatusText(999))
+    ], "|"))
+}
+
+function main() -> string effects { environment, network } {
+    let Base = std.env.Get("SLICK_HTTP_TEST_URL")
+    let Refused = std.env.Get("SLICK_HTTP_REFUSED_URL")
+    if (Base == null) {
+        "missing URL"
+    } else {
+        if (Refused == null) {
+            "missing URL"
+        } else {
+            match Run(Base, Refused) {
+                Ok(Output) => Output
+                Err(Failure) => Failure.Kind + ":" + Failure.Message
+            }
+        }
+    }
+}
+`

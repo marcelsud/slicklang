@@ -694,7 +694,7 @@ func validatePackageManifest(manifest packageManifest) error {
 			}
 		}
 		switch adapter.Kind {
-		case "slick", "go", "rust", "c", "bun", "wasm", "sidecar":
+		case "slick", "go", "c", "bun", "wasm", "sidecar":
 		default:
 			return fmt.Errorf("adapter %s has unsupported implementation kind %q", adapter.ID, adapter.Kind)
 		}
