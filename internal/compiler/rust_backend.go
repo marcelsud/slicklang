@@ -40,6 +40,9 @@ version = "0.0.0"
 
 func rustBackendDriver(_ *program) backendDriver {
 	return backendDriver{
+		checkCore: func(input backendDriverInput) error {
+			return validateRustCore(input.core, input.runtime)
+		},
 		validate: validateRustToolchain,
 		emit: func(input backendDriverInput, workspace string) (backendEmission, error) {
 			emission, err := emitRustWorkspace(input.core, workspace)
@@ -64,9 +67,6 @@ func rustBackendBuildError(input backendDriverInput, err error) error {
 }
 
 func validateRustToolchain(input backendDriverInput) (backendToolchain, error) {
-	if err := validateRustCore(input.core, input.runtime); err != nil {
-		return backendToolchain{}, err
-	}
 	if input.target.name != rustTargetTriple {
 		return backendToolchain{}, fmt.Errorf("Rust target %s is unsupported; need %s", input.target.name, rustTargetTriple)
 	}

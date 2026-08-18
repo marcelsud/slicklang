@@ -5,7 +5,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 ## Build and test
 
 - `go build ./...` fails with `error obtaining VCS status` in a git worktree; use `go vet ./...` and `go test ./...` instead, or pass `-buildvcs=false`.
-- `go test ./...` builds real native binaries through `BuildPath`, so it needs Go plus the pinned LLVM 18 and Rust 1.93.1 toolchains; targeted unit tests avoid that native matrix.
+- `go test ./...` builds real native binaries through `BuildPath`, so it needs Go plus the pinned LLVM 18, Rust 1.93.1, and Bun 1.3.14 toolchains; targeted unit tests avoid that native matrix.
 
 ## Core IR
 
@@ -13,7 +13,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 ## Backend drivers
 
-`internal/compiler/backend.go` is the authoritative backend, target, artifact, toolchain, capability, runtime-ABI, operation-support, and driver registry. `runtime_operations.go` owns the stable standard-operation IDs, per-backend implementation tables, and Core-reachability scan that selects runtime families; support is derived from those tables, never a second declaration-side list. `backend_driver.go` owns the fixed validate → emit → build → verify → atomic-install sequence and the compiler-owned workspace. Target, toolchain, ABI, and operation gaps fail before workspace creation; drivers write only a candidate path inside that workspace. `rust_backend.go` pins Rust/Cargo 1.93.1 and `x86_64-unknown-linux-gnu`, owns the dependency-free Cargo workspace and lockfile, and accepts only the allocation-free Core subset validated by `validateRustCore`. `BuildPath` remains the stable-Go compatibility entry point, while `BuildOptions.Target` selects only targets advertised by the chosen driver.
+`internal/compiler/backend.go` is the authoritative backend, target, artifact, toolchain, capability, runtime-ABI, operation-support, and driver registry. `runtime_operations.go` owns the stable standard-operation IDs, per-backend implementation tables, and Core-reachability scan that selects runtime families; support is derived from those tables, never a second declaration-side list. `backend_driver.go` owns the fixed validate → emit → build → verify → atomic-install sequence and the compiler-owned workspace. Target, toolchain, ABI, and operation gaps fail before workspace creation; drivers write only a candidate path inside that workspace. `primitive_core.go` validates the allocation-free Core subset shared by the alpha Rust and Bun backends. `rust_backend.go` pins Rust/Cargo 1.93.1 and `x86_64-unknown-linux-gnu`; `bun_backend.go` pins Bun 1.3.14 and its Linux/x64 modern/baseline targets. Each owns deterministic dependency-free package inputs and rejects unsupported Core before tool invocation. `BuildPath` remains the stable-Go compatibility entry point, while `BuildOptions.Target` selects only targets advertised by the chosen driver.
 
 ## Adding a standard-library declaration
 

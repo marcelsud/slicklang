@@ -20,6 +20,9 @@ jobs:
         run: |
           rustup toolchain install 1.93.1 --profile minimal --target x86_64-unknown-linux-gnu
           rustup default 1.93.1
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
       - name: Test
         env:
           SLICK_LLVM_BIN: /usr/bin

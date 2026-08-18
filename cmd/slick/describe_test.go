@@ -113,7 +113,7 @@ func TestDescribeUsageErrorsStayOnStderr(t *testing.T) {
 	}
 	want := "describe requires a symbol or diagnostic code\n" +
 		"usage: slick check [path] [--allow-alpha]\n       slick run [path] [arguments...]\n" +
-		"       slick build [path] -o <output> [--backend=go|llvm|rust] [--target=<target>] [--allow-alpha]\n" +
+		"       slick build [path] -o <output> [--backend=bun|go|llvm|rust] [--target=<target>] [--allow-alpha]\n" +
 		"       slick describe [--json] [--budget <lines>] <symbol|diagnostic-code> [path]\n" +
 		"       slick fmt [--check] [path]\n" +
 		"       slick lint [path]\n" +
