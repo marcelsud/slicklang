@@ -9,7 +9,16 @@ import (
 )
 
 func validateBunCore(core coreProgram, runtime backendRuntimeInputs) error {
-	return validateLanguageCore(core, runtime, "Bun")
+	// Host standard-library operations are not implemented for Bun yet.
+	if err := validateLanguageCore(core, runtime, "Bun", func(runtimeOperationID) bool { return false }); err != nil {
+		return err
+	}
+	for _, function := range core.Functions {
+		if function.ID == "root.main" && len(function.Parameters) != 0 {
+			return bunLoweringError(function.Location, "root.main parameters are not supported")
+		}
+	}
+	return nil
 }
 
 func bunLoweringError(location coreLocation, format string, arguments ...any) error {

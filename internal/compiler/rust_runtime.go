@@ -27,12 +27,33 @@ enum SlickValue {
     Buffer(Arc<Mutex<Vec<SlickValue>>>),
     Optional(Option<Box<SlickValue>>),
     Result(bool, Box<SlickValue>),
-    // The message slot carries a shorthand error constructor's text. It is
-    // failure metadata, not a declared field: it never participates in field
-    // access or structural equality.
-    Object { type_name: &'static str, fields: Vec<(&'static str, SlickValue)>, resource: Option<u64>, message: String },
+    // A native resource is owned by the values that hold it, so its state is
+    // released when the last Slick alias goes away. The message slot carries a
+    // shorthand error constructor's text: failure metadata, not a declared
+    // field, so it never participates in field access or structural equality.
+    Object { type_name: &'static str, fields: Vec<(&'static str, SlickValue)>, resource: Option<SlickResource>, message: String },
     Union { type_name: &'static str, variant: &'static str, tag: i32, fields: Vec<SlickValue> },
     Callable(SlickCallable),
+}
+
+// SlickResource is opaque, cloneable shared ownership of one native resource.
+// Cloning a Slick value clones the handle, never the host state.
+#[derive(Clone)]
+struct SlickResource(Arc<Mutex<Box<dyn std::any::Any + Send>>>);
+
+impl SlickResource {
+    fn new(state: Box<dyn std::any::Any + Send>) -> Self {
+        Self(Arc::new(Mutex::new(state)))
+    }
+
+    fn same(&self, other: &SlickResource) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    fn with<T: std::any::Any + Send, R>(&self, work: impl FnOnce(&mut T) -> R) -> Option<R> {
+        let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        state.downcast_mut::<T>().map(work)
+    }
 }
 
 #[derive(Clone)]
@@ -298,7 +319,10 @@ fn slick_equal(left: &SlickValue, right: &SlickValue) -> bool {
             SlickValue::Object { type_name: right_type, fields: right_fields, resource: right_resource, .. },
         ) => {
             if left_resource.is_some() || right_resource.is_some() {
-                left_resource.is_some() && left_resource == right_resource
+                match (left_resource, right_resource) {
+                    (Some(left), Some(right)) => left.same(right),
+                    _ => false,
+                }
             } else {
                 left_type == right_type && left_fields.len() == right_fields.len() && left_fields.iter().all(|(name, value)| {
                     right_fields.iter().find(|(other, _)| other == name).is_some_and(|(_, other)| slick_equal(value, other))
@@ -612,12 +636,25 @@ fn slick_union_payload(value: SlickValue, variant: &str) -> Option<Vec<SlickValu
     }
 }
 
+struct SlickFieldDescriptor {
+    name: &'static str,
+    json_name: &'static str,
+    typ: &'static str,
+}
+
+struct SlickVariantDescriptor {
+    name: &'static str,
+    tag: i32,
+    fields: &'static [SlickFieldDescriptor],
+}
+
 struct SlickTypeDescriptor {
     name: &'static str,
-    fields: &'static [&'static str],
+    kind: &'static str,
+    fields: &'static [SlickFieldDescriptor],
     methods: &'static [&'static str],
     interfaces: &'static [&'static str],
-    variants: &'static [(&'static str, i32)],
+    variants: &'static [SlickVariantDescriptor],
 }
 
 `

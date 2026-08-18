@@ -52,6 +52,8 @@ const (
 	runtimeImplementationInterpreter runtimeImplementationKind = "interpreter"
 	runtimeImplementationGo          runtimeImplementationKind = "go"
 	runtimeImplementationLLVM        runtimeImplementationKind = "llvm"
+	runtimeImplementationRust        runtimeImplementationKind = "rust"
+	runtimeImplementationBun         runtimeImplementationKind = "bun"
 )
 
 type runtimeOperationImplementation struct {
@@ -74,6 +76,8 @@ func declareRuntimeOperation(family runtimeFamily, llvmEntry string, dependencie
 			runtimeImplementationInterpreter: {entry: "dispatch:" + string(family)},
 			runtimeImplementationGo:          {entry: "emit:" + string(family)},
 			runtimeImplementationLLVM:        {entry: llvmEntry},
+			runtimeImplementationRust:        {entry: "rust:" + string(family)},
+			runtimeImplementationBun:         {entry: "bun:" + string(family)},
 		},
 	}
 }
@@ -184,9 +188,10 @@ func validateRuntimeOperationRegistry() error {
 			return fmt.Errorf("runtime operation %s has invalid family %q", operation, declaration.family)
 		}
 		for implementation, entry := range declaration.implementations {
-			if implementation != runtimeImplementationInterpreter &&
-				implementation != runtimeImplementationGo &&
-				implementation != runtimeImplementationLLVM {
+			switch implementation {
+			case runtimeImplementationInterpreter, runtimeImplementationGo, runtimeImplementationLLVM,
+				runtimeImplementationRust, runtimeImplementationBun:
+			default:
 				return fmt.Errorf("runtime operation %s has unknown implementation %q", operation, implementation)
 			}
 			if entry.entry == "" {
@@ -229,9 +234,21 @@ var (
 	interpreterRuntimeOperations = runtimeOperationsFor(runtimeImplementationInterpreter)
 	goRuntimeOperations          = runtimeOperationsFor(runtimeImplementationGo)
 	llvmRuntimeOperations        = runtimeOperationsFor(runtimeImplementationLLVM)
-	rustRuntimeOperations        = runtimeOperationTable{}
-	bunRuntimeOperations         = runtimeOperationTable{}
+	// The Rust backend advertises only the operations its generator emits, so an
+	// unimplemented family fails before any toolchain work.
+	rustRuntimeOperations = rustImplementedRuntimeOperations()
+	bunRuntimeOperations  = runtimeOperationTable{}
 )
+
+func rustImplementedRuntimeOperations() runtimeOperationTable {
+	table := make(runtimeOperationTable)
+	for operation, implementation := range runtimeOperationsFor(runtimeImplementationRust) {
+		if _, ok := rustStdFunction(operation); ok {
+			table[operation] = implementation
+		}
+	}
+	return table
+}
 
 func runtimeInputsForCore(core coreProgram) (backendRuntimeInputs, error) {
 	inputs := backendRuntimeInputs{abiVersion: runtimeABIVersion, families: make(map[runtimeFamily]bool)}
