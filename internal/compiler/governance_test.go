@@ -102,11 +102,11 @@ func TestGovernanceNoEngineFallback(t *testing.T) {
 			[]packageAdapterSpec{{id: "go", backend: BackendGo, target: hostTargetName(), stability: StabilityStable}})
 		app := filepath.Join(root, "app")
 		writeProjectFixture(t, app, "use acme.onlygo.Value\nfunction main() -> int { Value() }\n", []packageDependency{dependency})
-		options := BuildOptions{Backend: BackendRust, AllowAlpha: true}
+		options := BuildOptions{Backend: BackendLLVM}
 		assertGovernanceFailure(t, app, filepath.Join(t.TempDir(), "missing"), options,
-			"backend rust", "target "+rustTargetTriple, "acme.onlygo@1.0.0")
+			"backend llvm", "target linux-x64", "acme.onlygo@1.0.0")
 		assertGovernancePreservesOutput(t, app, options,
-			"backend rust", "target "+rustTargetTriple, "acme.onlygo@1.0.0")
+			"backend llvm", "target linux-x64", "acme.onlygo@1.0.0")
 	})
 
 	t.Run("unregisteredTarget", func(t *testing.T) {
@@ -234,7 +234,7 @@ func TestGovernanceEligibilityNeverPromotes(t *testing.T) {
 	if len(eligibleAlpha) == 0 {
 		t.Fatal("no engine is eligible while still declared alpha")
 	}
-	for _, name := range []Backend{BackendRust, BackendBun} {
+	for _, name := range []Backend{BackendBun} {
 		found := false
 		for _, backend := range Backends() {
 			if backend.Name != name {

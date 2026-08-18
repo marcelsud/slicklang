@@ -16,8 +16,6 @@ const (
 	BackendGo Backend = "go"
 	// BackendLLVM emits LLVM IR and links a standalone native executable.
 	BackendLLVM Backend = "llvm"
-	// BackendRust lowers allocation-free Core IR through a pinned Cargo toolchain.
-	BackendRust Backend = "rust"
 	// BackendBun lowers allocation-free Core IR to a Bun-compiled executable.
 	BackendBun Backend = "bun"
 )
@@ -70,21 +68,6 @@ var backendRegistry = []backendRegistration{
 		runtimeABI:          runtimeABIVersion,
 		operations:          llvmRuntimeOperations,
 		driver:              backendDriverLLVM,
-	},
-	{
-		name:      BackendRust,
-		stability: StabilityAlpha,
-		targets: []backendTargetRegistration{{
-			name:         rustTargetTriple,
-			stability:    StabilityAlpha,
-			platform:     backendPlatform{operatingSystem: "linux", architecture: "x64"},
-			artifactKind: ArtifactNativeExecutable,
-			toolchain:    backendToolchainRegistration{name: "rust", version: rustToolchainVersion},
-		}},
-		runtimeCapabilities: []backendRuntimeCapability{backendCapabilityEmbeddedRuntime},
-		runtimeABI:          runtimeABIVersion,
-		operations:          rustRuntimeOperations,
-		driver:              backendDriverRust,
 	},
 	{
 		name:      BackendBun,

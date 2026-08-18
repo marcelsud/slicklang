@@ -33,7 +33,6 @@ type healthJSON struct {
 	Status string `json:"status"`
 }
 
-
 func startTodoAPINative(t *testing.T, binary, address, dbPath string) (*exec.Cmd, *strings.Builder) {
 	t.Helper()
 	command := exec.Command(binary)

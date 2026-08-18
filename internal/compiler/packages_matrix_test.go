@@ -52,7 +52,7 @@ func TestPackageAdapterAvailability(t *testing.T) {
 		t.Fatalf("availability survey wrote a lock: %v", err)
 	}
 	if got, want := backendStabilities(), map[Backend]Stability{
-		BackendBun: StabilityAlpha, BackendGo: StabilityStable, BackendLLVM: StabilityStable, BackendRust: StabilityAlpha,
+		BackendBun: StabilityAlpha, BackendGo: StabilityStable, BackendLLVM: StabilityStable,
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("backend stability = %#v, want %#v", got, want)
 	}
@@ -103,66 +103,54 @@ func TestRedisPackageMatrix(t *testing.T) {
 		assertUnchangedApplication(t, app)
 	})
 
-	t.Run("RustMissingAdapter", func(t *testing.T) {
-		app, _ := copyRedisMatrix(t)
-		message := buildMustFailBeforeEmission(t, app, filepath.Join(app, "app"),
-			BuildOptions{Backend: BackendRust, AllowAlpha: true},
-			"package acme.redis@2.1.0 has no adapter for backend rust target "+rustTargetTriple,
-			"required by: root.application -> acme.redis@2.1.0",
-			"go/linux-x64 (stable)",
-			"bun/"+bunTargetLinuxX64Modern+" (alpha)",
-		)
-		if strings.Contains(strings.ToLower(message), "fallback") {
-			t.Fatalf("missing rust adapter invoked a fallback:\n%s", message)
-		}
-		assertUnchangedApplication(t, app)
-	})
-
 	t.Run("LLVMMissingAdapter", func(t *testing.T) {
 		app, _ := copyRedisMatrix(t)
-		buildMustFailBeforeEmission(t, app, filepath.Join(app, "app"),
+		message := buildMustFailBeforeEmission(t, app, filepath.Join(app, "app"),
 			BuildOptions{Backend: BackendLLVM},
 			"package acme.redis@2.1.0 has no adapter for backend llvm target linux-x64",
 			"required by: root.application -> acme.redis@2.1.0",
 			"go/linux-x64 (stable)",
 			"bun/"+bunTargetLinuxX64Modern+" (alpha)",
 		)
+		if strings.Contains(strings.ToLower(message), "fallback") {
+			t.Fatalf("missing llvm adapter invoked a fallback:\n%s", message)
+		}
 		assertUnchangedApplication(t, app)
 	})
 
-	t.Run("RustAdapterAdded", func(t *testing.T) {
+	t.Run("LLVMAdapterAdded", func(t *testing.T) {
 		app, pkg := copyRedisMatrix(t)
 		addRedisAdapter(t, pkg, packageAdapterSpec{
-			id: "rust", backend: BackendRust, target: rustTargetTriple, stability: StabilityStable,
+			id: "llvm", backend: BackendLLVM, target: "linux-x64", stability: StabilityStable,
 		})
 		output := filepath.Join(app, "app")
-		if got := buildAndRun(t, app, output, BuildOptions{Backend: BackendRust, AllowAlpha: true}); got != "42\n" {
-			t.Fatalf("rust output = %q", got)
+		if got := buildAndRun(t, app, output, BuildOptions{Backend: BackendLLVM}); got != "42\n" {
+			t.Fatalf("llvm output = %q", got)
 		}
 		var lock packageLock
 		if err := readStrictJSON(filepath.Join(app, packageLockName), &lock); err != nil {
 			t.Fatal(err)
 		}
 		if len(lock.Packages) != 1 || lock.Packages[0].Name != "acme.redis" ||
-			len(lock.Packages[0].Selections) != 1 || lock.Packages[0].Selections[0].Adapter != "rust" {
-			t.Fatalf("rust lock = %+v", lock)
+			len(lock.Packages[0].Selections) != 1 || lock.Packages[0].Selections[0].Adapter != "llvm" {
+			t.Fatalf("llvm lock = %+v", lock)
 		}
 		assertUnchangedApplication(t, app)
 	})
 
-	t.Run("RustTransitiveMissing", func(t *testing.T) {
+	t.Run("LLVMTransitiveMissing", func(t *testing.T) {
 		app, pkg := copyRedisMatrix(t)
 		codecRoot := filepath.Join(filepath.Dir(pkg), "codec")
 		writePackageFixture(t, codecRoot, "acme.codec", "1.0.0", "function Encode() -> int { 1 }\n", nil,
 			[]packageAdapterSpec{{id: "go", backend: BackendGo, target: hostTargetName(), stability: StabilityStable}})
 		addRedisDependency(t, pkg, packageDependency{Name: "acme.codec", Version: "1.0.0", Path: "../codec"})
 		addRedisAdapter(t, pkg, packageAdapterSpec{
-			id: "rust", backend: BackendRust, target: rustTargetTriple, stability: StabilityStable,
+			id: "llvm", backend: BackendLLVM, target: "linux-x64", stability: StabilityStable,
 			dependencies: []string{"acme.codec"},
 		})
 		buildMustFailBeforeEmission(t, app, filepath.Join(app, "app"),
-			BuildOptions{Backend: BackendRust, AllowAlpha: true},
-			"package acme.codec@1.0.0 has no adapter for backend rust target "+rustTargetTriple,
+			BuildOptions{Backend: BackendLLVM},
+			"package acme.codec@1.0.0 has no adapter for backend llvm target linux-x64",
 			"required by: root.application -> acme.redis@2.1.0 -> acme.codec@1.0.0",
 		)
 		assertUnchangedApplication(t, app)
@@ -196,14 +184,14 @@ func TestRedisPackageMatrix(t *testing.T) {
 			"use acme.redis.Value\nfunction Cached() -> int { Value() }\n",
 			[]packageDependency{{Name: "acme.redis", Version: "2.1.0", Path: "../redis-package"}},
 			[]packageAdapterSpec{{
-				id: "rust", backend: BackendRust, target: rustTargetTriple, stability: StabilityStable,
+				id: "llvm", backend: BackendLLVM, target: "linux-x64", stability: StabilityStable,
 				dependencies: []string{"acme.redis"},
 			}})
 		writeProjectFixture(t, app, "use acme.cache.Cached\nfunction main() -> int { Cached() }\n",
 			[]packageDependency{{Name: "acme.cache", Version: "1.4.0", Path: cacheRoot}})
 		buildMustFailBeforeEmission(t, app, filepath.Join(app, "app"),
-			BuildOptions{Backend: BackendRust, AllowAlpha: true},
-			"package acme.redis@2.1.0 has no adapter for backend rust target "+rustTargetTriple,
+			BuildOptions{Backend: BackendLLVM},
+			"package acme.redis@2.1.0 has no adapter for backend llvm target linux-x64",
 			"required by: root.application -> acme.cache@1.4.0 -> acme.redis@2.1.0",
 		)
 	})
@@ -212,10 +200,10 @@ func TestRedisPackageMatrix(t *testing.T) {
 		app, _ := copyRedisMatrix(t)
 		before := backendStabilities()
 		buildMustFailBeforeEmission(t, app, filepath.Join(app, "app"),
-			BuildOptions{Backend: BackendRust, AllowAlpha: true},
-			"package acme.redis@2.1.0 has no adapter for backend rust target "+rustTargetTriple,
+			BuildOptions{Backend: BackendLLVM},
+			"package acme.redis@2.1.0 has no adapter for backend llvm target linux-x64",
 		)
-		if got := backendStabilities(); !reflect.DeepEqual(got, before) || got[BackendRust] != StabilityAlpha {
+		if got := backendStabilities(); !reflect.DeepEqual(got, before) || got[BackendLLVM] != StabilityStable {
 			t.Fatalf("missing redis adapter changed backend stability: %#v", got)
 		}
 	})

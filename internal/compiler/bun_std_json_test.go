@@ -180,7 +180,7 @@ func assertBunJSONMatchesInterpreter(t *testing.T, text string) {
 	if err != nil {
 		t.Fatalf("run interpreter: %v", err)
 	}
-	requireNoRustDiagnostics(t, diagnostics)
+	requireNoDiagnostics(t, diagnostics)
 	binary := buildBunTestProgram(t, source)
 	output, err := exec.Command(binary).CombinedOutput()
 	if err != nil {

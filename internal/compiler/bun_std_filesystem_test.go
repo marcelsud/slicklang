@@ -110,7 +110,7 @@ func TestBunStdFilesystemMatchesInterpreter(t *testing.T) {
 		if err != nil {
 			t.Fatalf("interpreter run failed: %v", err)
 		}
-		requireNoRustDiagnostics(t, diagnostics)
+		requireNoDiagnostics(t, diagnostics)
 		if interpreted != "started" {
 			t.Fatalf("interpreter output = %q, want started", interpreted)
 		}
@@ -144,7 +144,7 @@ func TestBunStdFilesystemMatchesInterpreter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TMPDIR overlay interpreter run failed: %v", err)
 	}
-	requireNoRustDiagnostics(t, overlayDiagnostics)
+	requireNoDiagnostics(t, overlayDiagnostics)
 	if interpretedOverlay != "true" {
 		t.Fatalf("TMPDIR overlay interpreter output=%q, want true", interpretedOverlay)
 	}
@@ -156,7 +156,7 @@ func compareBunWithInterpreter(t *testing.T, source Source) {
 	if err != nil {
 		t.Fatalf("interpreter run failed: %v", err)
 	}
-	requireNoRustDiagnostics(t, diagnostics)
+	requireNoDiagnostics(t, diagnostics)
 	binary := buildBunTestProgram(t, source)
 	output, err := exec.Command(binary).CombinedOutput()
 	if err != nil {

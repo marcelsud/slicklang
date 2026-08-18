@@ -433,7 +433,7 @@ func TestBunStdSQLiteMatchesInterpreter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireNoRustDiagnostics(t, diagnostics)
+	requireNoDiagnostics(t, diagnostics)
 	if strings.TrimSpace(interpreted) == "" {
 		t.Fatal("interpreter produced no output")
 	}
@@ -451,7 +451,7 @@ func TestBunStdSQLiteMatchesInterpreter(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		requireNoRustDiagnostics(t, diagnostics)
+		requireNoDiagnostics(t, diagnostics)
 		if interpreted != "large:Query:query exceeded maximum row limit of 2" {
 			t.Fatalf("interpreter output = %q", interpreted)
 		}

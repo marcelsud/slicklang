@@ -4,7 +4,7 @@ import "testing"
 
 func TestGoAndLLVMEmissionDependsOnlyOnCoreIR(t *testing.T) {
 	sources := map[string]Source{
-		"control-flow": {Name: "main.slk", Namespace: "root", Text: rustPrimitiveProgram},
+		"control-flow": {Name: "main.slk", Namespace: "root", Text: primitiveProgram},
 		"values":       coreIRTestSource,
 	}
 	for name, source := range sources {

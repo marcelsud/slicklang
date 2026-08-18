@@ -67,7 +67,7 @@ func TestMissingAdapterFailsWithDependencyPathBeforeEmission(t *testing.T) {
 	cacheRoot := filepath.Join(root, "packages", "cache")
 	cache := writePackageFixture(t, cacheRoot, "acme.cache", "1.4.0", `use acme.redis.Value
 function Cached() -> int { Value() }`, []packageDependency{{Name: redis.Name, Version: redis.Version, Path: "../redis"}}, []packageAdapterSpec{
-		{id: "rust", backend: BackendRust, target: rustTargetTriple, stability: StabilityStable, dependencies: []string{"acme.redis"}},
+		{id: "llvm", backend: BackendLLVM, target: "linux-x64", stability: StabilityStable, dependencies: []string{"acme.redis"}},
 	})
 	writeProjectFixture(t, root, `use acme.cache.Cached
 function main() -> int { Cached() }`, []packageDependency{cache})
@@ -75,13 +75,13 @@ function main() -> int { Cached() }`, []packageDependency{cache})
 	if err := os.WriteFile(output, []byte("sentinel"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	diagnostics, err := BuildPathWithOptions(root, output, BuildOptions{Backend: BackendRust, AllowAlpha: true})
+	diagnostics, err := BuildPathWithOptions(root, output, BuildOptions{Backend: BackendLLVM})
 	if len(diagnostics) != 0 || err == nil {
 		t.Fatalf("diagnostics=%v error=%v", diagnostics, err)
 	}
 	message := err.Error()
 	for _, want := range []string{
-		"package acme.redis@2.1.0 has no adapter for backend rust target " + rustTargetTriple,
+		"package acme.redis@2.1.0 has no adapter for backend llvm target linux-x64",
 		"required by: root.application -> acme.cache@1.4.0 -> acme.redis@2.1.0",
 		"go/" + hostTargetName() + " (stable)",
 		"bun/" + bunTargetLinuxX64Modern + " (alpha)",
@@ -96,7 +96,7 @@ function main() -> int { Cached() }`, []packageDependency{cache})
 	}
 }
 
-func TestAddingRustAdapterBuildsUnchangedPackageApplication(t *testing.T) {
+func TestAddingLLVMAdapterBuildsUnchangedPackageApplication(t *testing.T) {
 	root := t.TempDir()
 	redisRoot := filepath.Join(root, "packages", "redis")
 	goOnly := []packageAdapterSpec{{id: "go", backend: BackendGo, target: hostTargetName(), stability: StabilityStable}}
@@ -108,43 +108,43 @@ function main() -> int { Value() }`
 	if err := os.WriteFile(output, []byte("sentinel"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := BuildPathWithOptions(root, output, BuildOptions{Backend: BackendRust, AllowAlpha: true}); err == nil {
-		t.Fatal("Go-only package unexpectedly built under Rust")
+	if _, err := BuildPathWithOptions(root, output, BuildOptions{Backend: BackendLLVM}); err == nil {
+		t.Fatal("Go-only package unexpectedly built under LLVM")
 	}
 	writePackageFixture(t, redisRoot, "acme.redis", "2.1.0", `function Value() -> int { 42 }`, nil, append(goOnly,
-		packageAdapterSpec{id: "rust", backend: BackendRust, target: rustTargetTriple, stability: StabilityStable}))
-	rustEntry := filepath.Join(redisRoot, "rust")
-	if err := os.MkdirAll(rustEntry, 0o755); err != nil {
+		packageAdapterSpec{id: "llvm", backend: BackendLLVM, target: "linux-x64", stability: StabilityStable}))
+	llvmEntry := filepath.Join(redisRoot, "llvm")
+	if err := os.MkdirAll(llvmEntry, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(rustEntry, "adapter.slk"), []byte(`function helper() -> int { 42 }
+	if err := os.WriteFile(filepath.Join(llvmEntry, "adapter.slk"), []byte(`function helper() -> int { 42 }
 function Value() -> int { helper() }`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rustChecksum, err := hashPath(rustEntry, true)
+	llvmChecksum, err := hashPath(llvmEntry, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	manifest := readPackageManifestFixture(t, redisRoot)
-	manifest.Adapters[1].Entry = "rust"
-	manifest.Adapters[1].Checksum = rustChecksum
+	manifest.Adapters[1].Entry = "llvm"
+	manifest.Adapters[1].Checksum = llvmChecksum
 	writeJSONFixture(t, filepath.Join(redisRoot, packageManifestName), manifest)
 	if got := readTestFile(t, filepath.Join(root, "src", "main.slk")); got != application {
 		t.Fatalf("application source changed: %q", got)
 	}
-	diagnostics, err := BuildPathWithOptions(root, output, BuildOptions{Backend: BackendRust, AllowAlpha: true})
+	diagnostics, err := BuildPathWithOptions(root, output, BuildOptions{Backend: BackendLLVM})
 	if err != nil {
-		if strings.Contains(err.Error(), "Rust toolchain not found") {
+		if strings.Contains(err.Error(), "LLVM toolchain not found") || strings.Contains(err.Error(), "llc") {
 			t.Skip(err.Error())
 		}
-		t.Fatalf("build with added Rust adapter: %v", err)
+		t.Fatalf("build with added LLVM adapter: %v", err)
 	}
 	if len(diagnostics) != 0 {
 		t.Fatalf("diagnostics=%v", diagnostics)
 	}
 	built, err := exec.Command(output).CombinedOutput()
 	if err != nil || string(built) != "42\n" {
-		t.Fatalf("Rust package output=%q error=%v", built, err)
+		t.Fatalf("LLVM package output=%q error=%v", built, err)
 	}
 }
 
@@ -155,7 +155,6 @@ func TestPackageMatrixResolvesEveryExplicitBackendTarget(t *testing.T) {
 		{id: "bun", backend: BackendBun, target: bunTargetLinuxX64Modern, stability: StabilityAlpha},
 		{id: "go", backend: BackendGo, target: hostTargetName(), stability: StabilityStable},
 		{id: "llvm", backend: BackendLLVM, target: "linux-x64", stability: StabilityStable},
-		{id: "rust", backend: BackendRust, target: rustTargetTriple, stability: StabilityAlpha},
 	}
 	dependency := writePackageFixture(t, packageRoot, "acme.portable", "1.0.0", `function Value() -> int { 1 }`, nil, specs)
 	writeProjectFixture(t, root, `use acme.portable.Value
@@ -294,7 +293,7 @@ func TestPackageLockRejectsStaleSelectionForAnotherTarget(t *testing.T) {
 	dependency := writePackageFixture(t, packageRoot, "acme.locked", "1.0.0", `function Value() -> int { 1 }`, nil,
 		[]packageAdapterSpec{
 			{id: "go", backend: BackendGo, target: hostTargetName(), stability: StabilityStable},
-			{id: "rust", backend: BackendRust, target: rustTargetTriple, stability: StabilityStable},
+			{id: "llvm", backend: BackendLLVM, target: "linux-x64", stability: StabilityStable},
 		})
 	writeProjectFixture(t, root, `use acme.locked.Value
 function main() -> int { Value() }`, []packageDependency{dependency})
@@ -308,7 +307,7 @@ function main() -> int { Value() }`, []packageDependency{dependency})
 		t.Fatal(err)
 	}
 	lock.Packages[0].Selections = append(lock.Packages[0].Selections, packageLockSelection{
-		Backend: BackendRust, Target: rustTargetTriple, Adapter: "removed", Checksum: strings.Repeat("0", 64),
+		Backend: BackendLLVM, Target: "linux-x64", Adapter: "removed", Checksum: strings.Repeat("0", 64),
 	})
 	writeJSONFixture(t, lockPath, lock)
 	if err := os.WriteFile(output, []byte("sentinel"), 0o755); err != nil {

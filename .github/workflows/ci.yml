@@ -8,8 +8,6 @@ on:
 env:
   GO_VERSION: "1.25.0"
   LLVM_VERSION: "18"
-  RUST_VERSION: "1.93.1"
-  RUST_TARGET: "x86_64-unknown-linux-gnu"
   BUN_VERSION: "1.3.14"
 
 jobs:
@@ -35,49 +33,40 @@ jobs:
       matrix:
         include:
           # interpreter — selects TestMatrix*/interpreter, TestInterpreter, compile-only TestAsync*.
-          # Denies bun, cargo, rustc, rustup, clang, clang-18, llc, llc-18,
+          # Denies bun, clang, clang-18, llc, llc-18,
           # llvm-as, llvm-as-18, and `go build` (go test stays).
           - engine: interpreter
             install: none
-            deny: bun cargo rustc rustup clang clang-18 llc llc-18 llvm-as llvm-as-18
+            deny: bun clang clang-18 llc llc-18 llvm-as llvm-as-18
             deny_go_build: true
             test: 'TestMatrix(Examples|LanguageContracts|OperatorsMatchGo|AsyncMethodAndCaughtFailure|OptionalStorageAndEmptyInterfaceParity|WrappingIntegersAndShortestFloatsMatch|TextOperationsPreserveEmbeddedNULBytes|AsyncArgumentsBeyondEightValuesMatch|GenericDeclarationsCrossNamespaces|CompilerOwnedGenericsAreUnchanged|UnionVariantCarriesGenericInstantiation|PrimitiveBackendsMatchInterpreter|BuildPathStopsBeforeBackendOnSlickDiagnostics|BuiltBinaryReportsUncaughtSlickError|BuiltBinaryExecutesZipCatchAndEarlyReturn|AsyncPreparationFailureLaunchesNoChild|AsyncArgumentsEvaluateOnceInSourceOrder|AsyncHTTPChildrenOverlap|AsyncResultPropagationCancelsAndJoinsHTTPChild|AsyncReturnJoinsChildBeforeParentUsingCleanup)$/interpreter|TestMatrix(ConstantsProduceOneValue|GenericDeclarations|CallableTypeArgumentsAtGenericExpressionBoundaries)$//interpreter|TestAsyncLetFunctionMethodGenericAndCheckedEffects/interpreter|TestGenericJSONAcceptsConcreteInstantiationsOnly/concrete.instantiation/interpreter|TestAsyncPendingDiagnostics|TestAsyncFormattingHighlightingAndDiagnostics|TestAsyncRejectsTaskUnsafeValues|TestInterpreter'
             artifact: ""
 
           # go — selects TestMatrix*/go and TestRedisPackageMatrix/Go.
-          # Denies bun, cargo, rustc, rustup, clang, clang-18, llc, llc-18,
+          # Denies bun, clang, clang-18, llc, llc-18,
           # llvm-as, llvm-as-18. `go build` is the backend.
           - engine: go
             install: none
-            deny: bun cargo rustc rustup clang clang-18 llc llc-18 llvm-as llvm-as-18
+            deny: bun clang clang-18 llc llc-18 llvm-as llvm-as-18
             deny_go_build: false
             test: 'TestMatrix(Examples|LanguageContracts|OperatorsMatchGo|AsyncMethodAndCaughtFailure|OptionalStorageAndEmptyInterfaceParity|WrappingIntegersAndShortestFloatsMatch|TextOperationsPreserveEmbeddedNULBytes|AsyncArgumentsBeyondEightValuesMatch|GenericDeclarationsCrossNamespaces|CompilerOwnedGenericsAreUnchanged|UnionVariantCarriesGenericInstantiation|PrimitiveBackendsMatchInterpreter|BuildPathStopsBeforeBackendOnSlickDiagnostics|BuiltBinaryReportsUncaughtSlickError|BuiltBinaryExecutesZipCatchAndEarlyReturn|AsyncPreparationFailureLaunchesNoChild|AsyncArgumentsEvaluateOnceInSourceOrder|AsyncHTTPChildrenOverlap|AsyncResultPropagationCancelsAndJoinsHTTPChild|AsyncReturnJoinsChildBeforeParentUsingCleanup)$/go|TestMatrix(ConstantsProduceOneValue|GenericDeclarations|CallableTypeArgumentsAtGenericExpressionBoundaries)$//go|TestGenericJSONAcceptsConcreteInstantiationsOnly/concrete.instantiation/go|TestRedisPackageMatrix/Go'
             artifact: go
 
           # llvm — selects TestMatrix*/(llvm|go|interpreter), TestLLVM, TestRedisPackageMatrix/LLVM.
-          # Denies bun, cargo, rustc, rustup, and `go build`.
+          # Denies bun and `go build`.
           - engine: llvm
             install: llvm
-            deny: bun cargo rustc rustup
+            deny: bun
             deny_go_build: true
             test: 'TestMatrix(Examples|LanguageContracts|OperatorsMatchGo|AsyncMethodAndCaughtFailure|OptionalStorageAndEmptyInterfaceParity|WrappingIntegersAndShortestFloatsMatch|TextOperationsPreserveEmbeddedNULBytes|AsyncArgumentsBeyondEightValuesMatch|GenericDeclarationsCrossNamespaces|CompilerOwnedGenericsAreUnchanged|UnionVariantCarriesGenericInstantiation|PrimitiveBackendsMatchInterpreter|BuildPathStopsBeforeBackendOnSlickDiagnostics|BuiltBinaryReportsUncaughtSlickError|BuiltBinaryExecutesZipCatchAndEarlyReturn|AsyncPreparationFailureLaunchesNoChild|AsyncArgumentsEvaluateOnceInSourceOrder|AsyncHTTPChildrenOverlap|AsyncResultPropagationCancelsAndJoinsHTTPChild|AsyncReturnJoinsChildBeforeParentUsingCleanup)$/(llvm|go|interpreter)|TestMatrix(ConstantsProduceOneValue|GenericDeclarations|CallableTypeArgumentsAtGenericExpressionBoundaries)$//(llvm|go|interpreter)|TestAsyncLetFunctionMethodGenericAndCheckedEffects/(llvm|go|interpreter)|TestGenericJSONAcceptsConcreteInstantiationsOnly/concrete.instantiation/(llvm|go|interpreter)|TestLLVM|TestRedisPackageMatrix/LLVM'
             artifact: llvm
 
-          # rust — selects TestMatrix*/(rust|go|interpreter), TestRust*, TestRedisPackageMatrix/Rust.
-          # Denies bun, clang, clang-18, llc, llc-18, llvm-as, llvm-as-18, and `go build`.
-          - engine: rust
-            install: rust
-            deny: bun clang clang-18 llc llc-18 llvm-as llvm-as-18
-            deny_go_build: true
-            test: 'TestMatrix(Examples|LanguageContracts|OperatorsMatchGo|AsyncMethodAndCaughtFailure|OptionalStorageAndEmptyInterfaceParity|WrappingIntegersAndShortestFloatsMatch|TextOperationsPreserveEmbeddedNULBytes|AsyncArgumentsBeyondEightValuesMatch|GenericDeclarationsCrossNamespaces|CompilerOwnedGenericsAreUnchanged|UnionVariantCarriesGenericInstantiation|PrimitiveBackendsMatchInterpreter|BuildPathStopsBeforeBackendOnSlickDiagnostics|BuiltBinaryReportsUncaughtSlickError|BuiltBinaryExecutesZipCatchAndEarlyReturn|AsyncPreparationFailureLaunchesNoChild|AsyncArgumentsEvaluateOnceInSourceOrder|AsyncHTTPChildrenOverlap|AsyncResultPropagationCancelsAndJoinsHTTPChild|AsyncReturnJoinsChildBeforeParentUsingCleanup)$/(rust|go|interpreter)|TestMatrix(ConstantsProduceOneValue|GenericDeclarations|CallableTypeArgumentsAtGenericExpressionBoundaries)$//(rust|go|interpreter)|TestGenericJSONAcceptsConcreteInstantiationsOnly/concrete.instantiation/(rust|go|interpreter)|^TestRust|TestRedisPackageMatrix/Rust'
-            artifact: rust
-
           # bun — selects TestMatrix*/(bun|go|interpreter), TestBun*, TestRedisPackageMatrix/Bun.
-          # Denies cargo, rustc, rustup, clang, clang-18, llc, llc-18, llvm-as,
+          # Denies clang, clang-18, llc, llc-18, llvm-as,
           # llvm-as-18, and `go build`.
           - engine: bun
             install: bun
-            deny: cargo rustc rustup clang clang-18 llc llc-18 llvm-as llvm-as-18
+            deny: clang clang-18 llc llc-18 llvm-as llvm-as-18
             deny_go_build: true
             test: 'TestMatrix(Examples|LanguageContracts|OperatorsMatchGo|AsyncMethodAndCaughtFailure|OptionalStorageAndEmptyInterfaceParity|WrappingIntegersAndShortestFloatsMatch|TextOperationsPreserveEmbeddedNULBytes|AsyncArgumentsBeyondEightValuesMatch|GenericDeclarationsCrossNamespaces|CompilerOwnedGenericsAreUnchanged|UnionVariantCarriesGenericInstantiation|PrimitiveBackendsMatchInterpreter|BuildPathStopsBeforeBackendOnSlickDiagnostics|BuiltBinaryReportsUncaughtSlickError|BuiltBinaryExecutesZipCatchAndEarlyReturn|AsyncPreparationFailureLaunchesNoChild|AsyncArgumentsEvaluateOnceInSourceOrder|AsyncHTTPChildrenOverlap|AsyncResultPropagationCancelsAndJoinsHTTPChild|AsyncReturnJoinsChildBeforeParentUsingCleanup)$/(bun|go|interpreter)|TestMatrix(ConstantsProduceOneValue|GenericDeclarations|CallableTypeArgumentsAtGenericExpressionBoundaries)$//(bun|go|interpreter)|TestGenericJSONAcceptsConcreteInstantiationsOnly/concrete.instantiation/(bun|go|interpreter)|^TestBun|TestRedisPackageMatrix/Bun'
             artifact: bun
@@ -93,12 +82,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes clang-${{ env.LLVM_VERSION }} llvm-${{ env.LLVM_VERSION }} libcurl4-openssl-dev libjansson-dev libsqlite3-dev
-
-      - name: Install Rust ${{ env.RUST_VERSION }} (${{ env.RUST_TARGET }})
-        if: matrix.install == 'rust'
-        run: |
-          rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal --target ${{ env.RUST_TARGET }}
-          rustup default ${{ env.RUST_VERSION }}
 
       - uses: oven-sh/setup-bun@v2
         if: matrix.install == 'bun'
@@ -148,7 +131,7 @@ jobs:
           set -euo pipefail
           OUT="$RUNNER_TEMP/slick-example"
           ARGS=(build examples/operators -o "$OUT" --backend="$BACKEND")
-          if [ "$BACKEND" = rust ] || [ "$BACKEND" = bun ]; then
+          if [ "$BACKEND" = bun ]; then
             ARGS+=(--allow-alpha)
           fi
           "$RUNNER_TEMP/slick" "${ARGS[@]}"

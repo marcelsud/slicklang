@@ -11,7 +11,7 @@ func TestBunStdCollectionsMatchesInterpreter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireNoRustDiagnostics(t, diagnostics)
+	requireNoDiagnostics(t, diagnostics)
 	const want = "0,255|1:-1|1:256|Aé界|0|0|é|-1:1:6|slice bounds out of range|slice bounds out of range|65,,|Hello, 世界|13|13|invalid UTF-8|bytes[6]|A:BC:2:ok:bounds:missing:X" +
 		"@@.|.|..|/|/|a/b/c|a/b|a/b|b|/a|a|a|/b|a/b|/a/b|../..|../..|/|/|.|/c|.|.|/|.|a/b/c/..." +
 		"##.|.|..|/|/|foo|bar|foo|bar|.|.|x|x" +

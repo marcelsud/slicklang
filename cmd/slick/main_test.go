@@ -45,14 +45,6 @@ func TestParseBuildOptionsAcceptsTarget(t *testing.T) {
 	}
 }
 
-func TestRustBuildStatusReportsPinnedToolchainAndTarget(t *testing.T) {
-	message := buildSuccessMessage("bin/app", compiler.BuildOptions{Backend: compiler.BackendRust})
-	want := "built bin/app (backend rust, target x86_64-unknown-linux-gnu, rust 1.93.1)"
-	if message != want {
-		t.Fatalf("message = %q, want %q", message, want)
-	}
-}
-
 func TestBunBuildStatusReportsPinnedToolchainAndTarget(t *testing.T) {
 	for _, test := range []struct {
 		target string

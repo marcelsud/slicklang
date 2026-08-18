@@ -115,7 +115,7 @@ func assertBunStdProcessMatches(t *testing.T, text, want string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireNoRustDiagnostics(t, diagnostics)
+	requireNoDiagnostics(t, diagnostics)
 	if interpreted != want {
 		t.Fatalf("interpreter output = %q, want %q", interpreted, want)
 	}
@@ -181,7 +181,7 @@ func TestBunStdProcessMatchesInterpreter(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		requireNoRustDiagnostics(t, diagnostics)
+		requireNoDiagnostics(t, diagnostics)
 		if interpreted != want {
 			t.Fatalf("interpreter output = %q, want %q", interpreted, want)
 		}

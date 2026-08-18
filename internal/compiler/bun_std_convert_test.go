@@ -175,7 +175,7 @@ func TestBunStdConvertMathMatchesInterpreter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireNoRustDiagnostics(t, diagnostics)
+	requireNoDiagnostics(t, diagnostics)
 	want := strings.Join([]string{
 		"-9223372036854775808",
 		"9223372036854775807",
@@ -292,7 +292,7 @@ func TestBunStdConvertMathMatchesInterpreter(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		requireNoRustDiagnostics(t, diagnostics)
+		requireNoDiagnostics(t, diagnostics)
 		if interpreted != "started" {
 			t.Fatalf("interpreter output = %q, want started", interpreted)
 		}

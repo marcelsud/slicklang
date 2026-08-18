@@ -585,7 +585,7 @@ async function slickSqliteDBInvoke(handle, method, rawArgs, context) {
         db.conn.exec("ROLLBACK");
         db.txState = 0;
       } catch (error) {
-        // Cleanup failed, so the connection can never be trusted again.
+        // Cleanup failed, so the connection can never be used again.
         slickSqliteDiscard(db);
         throw SlickFailure.slick(slickSqliteFailureFromError("Close", error));
       }

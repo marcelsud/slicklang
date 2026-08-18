@@ -12,7 +12,7 @@ import (
 )
 
 func TestBunGenerationIsDeterministicAndEvaluatesArgumentsLeftToRight(t *testing.T) {
-	core := rustCoreForTest(t, `function Pair(Left: int, Right: int) -> (int,int) { (Left, Right) }
+	core := coreForTest(t, `function Pair(Left: int, Right: int) -> (int,int) { (Left, Right) }
 function First() -> int { 1 }
 function Second() -> int { 2 }
 function main() -> (int,int) { Pair(First(), Second()) }`)
@@ -41,7 +41,7 @@ function main() -> (int,int) { Pair(First(), Second()) }`)
 }
 
 func TestBunWorkspaceOwnsDeterministicRuntimeAndLockfile(t *testing.T) {
-	core := rustCoreForTest(t, `function main() -> int { 42 }`)
+	core := coreForTest(t, `function main() -> int { 42 }`)
 	workspace := t.TempDir()
 	emission, err := emitBunWorkspace(core, workspace)
 	if err != nil {
@@ -93,17 +93,17 @@ func TestBunBackendRegistrationReportsPinnedTargets(t *testing.T) {
 }
 
 func TestBunBackendRequiresAlphaOptInBeforeTouchingOutput(t *testing.T) {
-	output := rustSentinelOutput(t)
-	diagnostics, err := BuildSourcesWithOptions(rustValidSources(), output, BuildOptions{Backend: BackendBun})
+	output := sentinelOutput(t)
+	diagnostics, err := BuildSourcesWithOptions(validSources(), output, BuildOptions{Backend: BackendBun})
 	if len(diagnostics) != 0 || err == nil || !strings.Contains(err.Error(), "backend bun is alpha") {
 		t.Fatalf("diagnostics=%v error=%v", diagnostics, err)
 	}
-	requireRustSentinel(t, output)
+	requireSentinel(t, output)
 }
 
 func TestBunBackendDiagnosesSourceBeforeToolchain(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	output := rustSentinelOutput(t)
+	output := sentinelOutput(t)
 	diagnostics, err := BuildSourcesWithOptions([]Source{{
 		Name: "main.slk", Namespace: "root", Text: `function main() -> string { 42 }`,
 	}}, output, BuildOptions{Backend: BackendBun, AllowAlpha: true})
@@ -113,7 +113,7 @@ func TestBunBackendDiagnosesSourceBeforeToolchain(t *testing.T) {
 	if len(diagnostics) == 0 || diagnostics[0].Code != "SLK340" {
 		t.Fatalf("diagnostics = %v", diagnostics)
 	}
-	requireRustSentinel(t, output)
+	requireSentinel(t, output)
 }
 
 // TestBunImplementsEveryRuntimeOperation is the coverage gate for issue #108:
@@ -144,7 +144,7 @@ func TestBunImplementsEveryRuntimeOperation(t *testing.T) {
 // gate: an operation the backend does not implement is reported with its source
 // location before any toolchain work.
 func TestBunLoweringLocatesUnsupportedStandardOperations(t *testing.T) {
-	core := rustCoreForTest(t, `function main() -> bool {
+	core := coreForTest(t, `function main() -> bool {
     std.text.Contains("slick", "ick")
 }`)
 	runtime, err := runtimeInputsForCore(core)
@@ -167,37 +167,37 @@ func TestBunLoweringLocatesUnsupportedStandardOperations(t *testing.T) {
 func TestBunBackendReportsMissingIncompatibleAndUnavailableTargets(t *testing.T) {
 	t.Run("missing", func(t *testing.T) {
 		t.Setenv("PATH", t.TempDir())
-		output := rustSentinelOutput(t)
-		_, err := BuildSourcesWithOptions(rustValidSources(), output, BuildOptions{Backend: BackendBun, AllowAlpha: true})
+		output := sentinelOutput(t)
+		_, err := BuildSourcesWithOptions(validSources(), output, BuildOptions{Backend: BackendBun, AllowAlpha: true})
 		if err == nil || !strings.Contains(err.Error(), "need Bun "+bunToolchainVersion) ||
 			!strings.Contains(err.Error(), bunTargetLinuxX64Modern) {
 			t.Fatalf("error = %v", err)
 		}
-		requireRustSentinel(t, output)
+		requireSentinel(t, output)
 	})
 
 	t.Run("incompatible", func(t *testing.T) {
 		tools := t.TempDir()
-		writeRustTool(t, tools, "bun", "#!/bin/sh\necho '1.2.0'\n")
+		writeTool(t, tools, "bun", "#!/bin/sh\necho '1.2.0'\n")
 		t.Setenv("PATH", tools)
-		output := rustSentinelOutput(t)
-		_, err := BuildSourcesWithOptions(rustValidSources(), output, BuildOptions{Backend: BackendBun, AllowAlpha: true})
+		output := sentinelOutput(t)
+		_, err := BuildSourcesWithOptions(validSources(), output, BuildOptions{Backend: BackendBun, AllowAlpha: true})
 		if err == nil || !strings.Contains(err.Error(), `unsupported Bun toolchain "1.2.0"`) {
 			t.Fatalf("error = %v", err)
 		}
-		requireRustSentinel(t, output)
+		requireSentinel(t, output)
 	})
 
 	t.Run("target", func(t *testing.T) {
-		output := rustSentinelOutput(t)
-		_, err := BuildSourcesWithOptions(rustValidSources(), output, BuildOptions{
+		output := sentinelOutput(t)
+		_, err := BuildSourcesWithOptions(validSources(), output, BuildOptions{
 			Backend: BackendBun, Target: "bun-plan9-x64", AllowAlpha: true,
 		})
 		if err == nil || !strings.Contains(err.Error(), "backend bun does not support target") ||
 			!strings.Contains(err.Error(), bunTargetLinuxX64Baseline) {
 			t.Fatalf("error = %v", err)
 		}
-		requireRustSentinel(t, output)
+		requireSentinel(t, output)
 	})
 }
 
@@ -214,14 +214,14 @@ func TestBunExecutableIsStandaloneAndLeavesNoWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	binary := filepath.Join(root, "app")
-	diagnostics, err := BuildSourcesWithOptions(rustValidSources(), binary, BuildOptions{Backend: BackendBun, AllowAlpha: true})
+	diagnostics, err := BuildSourcesWithOptions(validSources(), binary, BuildOptions{Backend: BackendBun, AllowAlpha: true})
 	if err != nil {
 		if strings.Contains(err.Error(), "Bun toolchain not found") {
 			t.Skip(err.Error())
 		}
 		t.Fatal(err)
 	}
-	requireNoRustDiagnostics(t, diagnostics)
+	requireNoDiagnostics(t, diagnostics)
 	command := exec.Command(binary)
 	command.Env = []string{"PATH="}
 	output, err := command.CombinedOutput()
@@ -346,7 +346,7 @@ func TestBunLanguageRuntimeMatchesInterpreter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireNoRustDiagnostics(t, diagnostics)
+	requireNoDiagnostics(t, diagnostics)
 	if want := "(constant/Empty/<callable>/number 41, 43, 0, Ok(1), [1, 2, 3], map {a: 2, b: 3}, true, body, close, 42, 6, 9, 22, 9, true, true)"; interpreted != want {
 		t.Fatalf("interpreter output = %q, want %q", interpreted, want)
 	}
@@ -409,7 +409,7 @@ function main() -> string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireNoRustDiagnostics(t, diagnostics)
+	requireNoDiagnostics(t, diagnostics)
 	if want := "no;second 3;empty;other;7"; interpreted != want {
 		t.Fatalf("interpreter output = %q, want %q", interpreted, want)
 	}
@@ -427,7 +427,7 @@ function Fail() -> string throws Bad { throw Bad("boom") }
 function main() -> string throws Bad { Fail() }
 `}
 	_, diagnostics, interpretedErr := Run([]Source{source})
-	requireNoRustDiagnostics(t, diagnostics)
+	requireNoDiagnostics(t, diagnostics)
 	if interpretedErr == nil {
 		t.Fatal("interpreter accepted an uncaught shorthand failure")
 	}
@@ -471,7 +471,7 @@ function main() -> (bool,bool,string,string,bool,bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireNoRustDiagnostics(t, diagnostics)
+	requireNoDiagnostics(t, diagnostics)
 	if want := "(true, true, Ada, caught, true, true)"; interpreted != want {
 		t.Fatalf("interpreter output = %q, want %q", interpreted, want)
 	}
@@ -495,7 +495,7 @@ function main() -> null throws Failure {
 }
 `}
 	_, diagnostics, interpretedErr := Run([]Source{source})
-	requireNoRustDiagnostics(t, diagnostics)
+	requireNoDiagnostics(t, diagnostics)
 	if interpretedErr == nil {
 		t.Fatal("interpreter accepted uncaught cleanup failures")
 	}
@@ -540,7 +540,7 @@ function main() -> null throws Failure { Run() }
 // identity.
 func TestBunRuntimeGuardsTaskSafetyHandlesAndStructuralMaps(t *testing.T) {
 	workspace := t.TempDir()
-	core := rustCoreForTest(t, `function main() -> int { 42 }`)
+	core := coreForTest(t, `function main() -> int { 42 }`)
 	if _, err := emitBunWorkspace(core, workspace); err != nil {
 		t.Fatal(err)
 	}
@@ -614,7 +614,7 @@ func buildBunTestProgram(t *testing.T, source Source) string {
 		}
 		t.Fatal(err)
 	}
-	requireNoRustDiagnostics(t, diagnostics)
+	requireNoDiagnostics(t, diagnostics)
 	return binary
 }
 
@@ -625,4 +625,152 @@ func mustGenerateBun(t *testing.T, core coreProgram) string {
 		t.Fatal(err)
 	}
 	return source
+}
+
+func TestMatrixPrimitiveBackendsMatchInterpreter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "main.slk")
+	if err := os.WriteFile(path, []byte(primitiveProgram), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var interpreted string
+	for _, engine := range ExecutionEngines() {
+		if !engine.Interpreted {
+			continue
+		}
+		stdout, exitCode, err := engine.Run(path, "")
+		if err != nil {
+			t.Fatalf("run interpreter: %v", err)
+		}
+		if exitCode != 0 {
+			t.Fatalf("interpreter exit %d: %s", exitCode, stdout)
+		}
+		interpreted = strings.TrimSuffix(stdout, "\n")
+	}
+	if want := "(230, false, -9223372036854775808, ok😀, -0, 1e+20, 1e-07, 1e+06, 7, true, 5, 10)"; interpreted != want {
+		t.Fatalf("interpreter output = %q, want %q", interpreted, want)
+	}
+	for _, engine := range ExecutionEngines() {
+		if engine.Interpreted {
+			continue
+		}
+		t.Run(engine.Name, func(t *testing.T) {
+			stdout, exitCode, err := engine.Run(path, "")
+			if err != nil {
+				t.Fatalf("run %s: %v", engine.Name, err)
+			}
+			if exitCode != 0 {
+				t.Fatalf("%s exit %d: %s", engine.Name, exitCode, stdout)
+			}
+			if want := interpreted + "\n"; stdout != want {
+				t.Fatalf("%s output = %q, want %q", engine.Name, stdout, want)
+			}
+		})
+	}
+}
+
+const primitiveProgram = `const Maximum: int = 9223372036854775807
+
+function Explode() -> bool {
+    Explode()
+}
+
+function Score(Limit: int) -> int {
+    let Total = 0
+    for Outer in 0 .. Limit {
+        for Inner in 0 .. 4 {
+            if (Inner == 1) {
+                continue
+            } else {
+                null
+            }
+            if (Outer == 3) {
+                break
+            } else {
+                null
+            }
+            Total = Total + Outer * 10 + Inner
+        }
+    }
+    Total
+}
+
+function Choose(Value: int) -> int {
+    if (Value > 10) {
+        return Value
+    } else {
+        Value + 1
+    }
+}
+
+function Pick(Flag: bool) -> int {
+    if (Flag) {
+        return 7
+    } else {
+        return 9
+    }
+}
+
+function WideEqual() -> bool {
+    (1,2,3,4,5,6,7,8,9,10,11,12,13) == (1,2,3,4,5,6,7,8,9,10,11,12,13)
+}
+
+function Rebind(Value: int) -> int {
+    let Value = 5
+    Value
+}
+
+function BranchShadow(Value: int) -> int {
+    let Inner = if (true) {
+        let Value = 7
+        Value
+    } else {
+        0
+    }
+    Value + Inner
+}
+
+function main() -> (int,bool,int,string,float,float,float,float,int,bool,int,int) {
+    (Choose(Score(5)), false && Explode(), Maximum + 1, "ok😀", -0.0, 1e20, 1e-7, 1e6, Pick(true), WideEqual(), Rebind(1), BranchShadow(3))
+}`
+
+func coreForTest(t *testing.T, text string) coreProgram {
+	t.Helper()
+	program, diagnostics := compile([]Source{{Name: "main.slk", Namespace: "root", Text: text}})
+	requireNoDiagnostics(t, diagnostics)
+	core, err := program.lowerCore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return core
+}
+
+func validSources() []Source {
+	return []Source{{Name: "main.slk", Namespace: "root", Text: `function main() -> int { 42 }`}}
+}
+
+func sentinelOutput(t *testing.T) string {
+	t.Helper()
+	output := filepath.Join(t.TempDir(), "app")
+	if err := os.WriteFile(output, []byte("sentinel"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return output
+}
+
+func requireSentinel(t *testing.T, output string) {
+	t.Helper()
+	contents, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "sentinel" {
+		t.Fatalf("output changed to %q", contents)
+	}
+}
+
+func writeTool(t *testing.T, directory, name, contents string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(directory, name), []byte(contents), 0o755); err != nil {
+		t.Fatal(err)
+	}
 }
