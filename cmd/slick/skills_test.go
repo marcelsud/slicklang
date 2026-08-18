@@ -5,6 +5,7 @@ import (
 	"os"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -200,5 +201,68 @@ func TestLanguageSkillDocumentsEveryEffect(t *testing.T) {
 	}})
 	if len(rejected) == 0 {
 		t.Fatal("an unknown effect was accepted, so the documented set is not closed")
+	}
+}
+
+// TestSkillsDocumentEveryBackendAndTarget holds published skills to the backend
+// registry: every backend, advertised target, and alpha opt-in must be stated.
+func TestSkillsDocumentEveryBackendAndTarget(t *testing.T) {
+	cli := readSkill(t, cliSkillPath)
+	language := readSkill(t, languageSkillPath)
+	var usage strings.Builder
+	reportUsageTo(&usage)
+	unescapedCLI := strings.ReplaceAll(cli, `\|`, "|")
+
+	backends := compiler.Backends()
+	names := make([]string, 0, len(backends))
+	seenTargets := make(map[string]struct{})
+	var targets []string
+	needsAlpha := false
+	for _, backend := range backends {
+		name := string(backend.Name)
+		names = append(names, name)
+		if !strings.Contains(cli, name) {
+			t.Fatalf("CLI skill omits backend %s", name)
+		}
+		if !strings.Contains(language, name) {
+			t.Fatalf("language skill omits backend %s", name)
+		}
+		if backend.Stability == compiler.StabilityAlpha {
+			needsAlpha = true
+		}
+		for _, target := range backend.Targets {
+			if target.Stability == compiler.StabilityAlpha {
+				needsAlpha = true
+			}
+			if _, exists := seenTargets[target.Name]; exists {
+				continue
+			}
+			seenTargets[target.Name] = struct{}{}
+			targets = append(targets, target.Name)
+			if !strings.Contains(cli, target.Name) {
+				t.Fatalf("CLI skill omits target %s", target.Name)
+			}
+			if !strings.Contains(language, target.Name) {
+				t.Fatalf("language skill omits target %s", target.Name)
+			}
+		}
+	}
+	sort.Strings(names)
+	sort.Strings(targets)
+	backendFlag := "--backend=" + strings.Join(names, "|")
+	targetFlag := "--target=" + strings.Join(targets, "|")
+	if !strings.Contains(usage.String(), backendFlag) || !strings.Contains(unescapedCLI, backendFlag) {
+		t.Fatalf("CLI skill build line missing %s", backendFlag)
+	}
+	if !strings.Contains(usage.String(), targetFlag) || !strings.Contains(unescapedCLI, targetFlag) {
+		t.Fatalf("CLI skill build line missing %s", targetFlag)
+	}
+	if needsAlpha {
+		if !strings.Contains(cli, "--allow-alpha") {
+			t.Fatal("CLI skill omits --allow-alpha")
+		}
+		if !strings.Contains(language, "--allow-alpha") {
+			t.Fatal("language skill omits --allow-alpha")
+		}
 	}
 }

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "name": "acme.redis",
+  "version": "2.1.0",
+  "stability": "stable",
+  "interface": {
+    "path": "src",
+    "sha256": "17b8d9041ee3bc1a927f9d7cd2063599db87134908ecd62ae3b21def4eeb7956",
+    "effects": [],
+    "resources": [],
+    "conformance_path": "conformance",
+    "conformance_sha256": "8d252fe1e18037f5ab59d782938bf5167a87ac735adb712980af9d95728ca580"
+  },
+  "dependencies": [],
+  "adapters": [
+    {
+      "id": "go",
+      "backend": "go",
+      "targets": [
+        "linux-x64"
+      ],
+      "stability": "stable",
+      "kind": "slick",
+      "entry": "src",
+      "dependencies": [],
+      "checksum": "17b8d9041ee3bc1a927f9d7cd2063599db87134908ecd62ae3b21def4eeb7956",
+      "assets": [],
+      "interface_sha256": "17b8d9041ee3bc1a927f9d7cd2063599db87134908ecd62ae3b21def4eeb7956",
+      "conformance_sha256": "8d252fe1e18037f5ab59d782938bf5167a87ac735adb712980af9d95728ca580",
+      "abi": "slick-core-1"
+    },
+    {
+      "id": "bun",
+      "backend": "bun",
+      "targets": [
+        "bun-linux-x64-modern"
+      ],
+      "stability": "alpha",
+      "kind": "slick",
+      "entry": "src",
+      "dependencies": [],
+      "checksum": "17b8d9041ee3bc1a927f9d7cd2063599db87134908ecd62ae3b21def4eeb7956",
+      "assets": [],
+      "interface_sha256": "17b8d9041ee3bc1a927f9d7cd2063599db87134908ecd62ae3b21def4eeb7956",
+      "conformance_sha256": "8d252fe1e18037f5ab59d782938bf5167a87ac735adb712980af9d95728ca580",
+      "abi": "slick-core-1"
+    }
+  ]
+}

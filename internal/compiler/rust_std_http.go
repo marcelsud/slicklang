@@ -20,14 +20,15 @@ var rustStdHTTP = rustStdFamily{
 // timeouts through a process-shared ureq agent, and returns std.http.Response
 // with deterministic canonical headers, normalizing every transport, timeout,
 // redirect, status, limit, and cancellation condition into std.http.Failure
-// exactly as the interpreter and generated Go do. Proxy selection honours
+// exactly as the interpreter and generated Go do. In-flight connect, write, and
+// read are sliced against the task cancellation flags so a scope unwind aborts
+// the socket instead of waiting for the peer. Proxy selection honours
 // HTTP_PROXY/HTTPS_PROXY/NO_PROXY (and the lowercase forms) through
 // slick_environment_read, including bracketed IPv6 authorities, CIDR entries,
 // and omitted-port defaults matching golang.org/x/net/http/httpproxy. The Rust
 // source contains no backtick so it fits a Go raw string; the HTTP token
 // backtick (0x60) is matched by value.
 const rustStdHTTPModule = `fn slick_nat_http_fetch(context: &SlickContext, args: Vec<SlickValue>) -> SlickOutcome {
-    use ureq::ResponseExt;
     let request = slick_arg(&args, 0);
     let method = match slick_field(&request, "Method") {
         Ok(SlickValue::String(value)) => value,
@@ -77,13 +78,39 @@ const rustStdHTTPModule = `fn slick_nat_http_fetch(context: &SlickContext, args:
     if context.cancelled() {
         return slick_http_cancelled(&slick_http_sanitized(&url), None);
     }
+    let cancel_guard = slick_http_bind_cancel(context);
+    let outcome = slick_http_fetch_io(context, method, url, prepared, body, body_present, timeout_ms, max_bytes, follow_redirects);
+    drop(cancel_guard);
+    outcome
+}
 
+fn slick_http_fetch_io(
+    context: &SlickContext,
+    method: String,
+    url: String,
+    prepared: Vec<(String, Vec<String>)>,
+    body: Vec<u8>,
+    body_present: bool,
+    timeout_ms: i64,
+    max_bytes: i64,
+    follow_redirects: bool,
+) -> SlickOutcome {
+    use ureq::ResponseExt;
     let timeout = std::time::Duration::from_millis(timeout_ms as u64);
     let max_redirects: u32 = if follow_redirects { 9 } else { 0 };
     let agent = slick_http_agent();
 
     let response_result = if body_present {
         let request = match ureq::http::Request::builder().method(method.as_str()).uri(url.as_str()).body(body.clone()) {
+            Ok(request) => request,
+            Err(_) => return slick_err(slick_http_failure("InvalidRequest", &slick_http_sanitized(&url), None, "method or URL is invalid")),
+        };
+        slick_http_run(agent, request, &prepared, max_redirects, timeout)
+    } else if method.eq_ignore_ascii_case("POST") || method.eq_ignore_ascii_case("PUT") || method.eq_ignore_ascii_case("PATCH") {
+        // An empty POST must still declare Content-Length 0. ureq's () body
+        // omits the header, so Go's server treats the connection as an
+        // unfinished body and never cancels request.Context() on disconnect.
+        let request = match ureq::http::Request::builder().method(method.as_str()).uri(url.as_str()).body(Vec::<u8>::new()) {
             Ok(request) => request,
             Err(_) => return slick_err(slick_http_failure("InvalidRequest", &slick_http_sanitized(&url), None, "method or URL is invalid")),
         };
@@ -184,10 +211,13 @@ fn slick_nat_http_status_text(_context: &SlickContext, args: Vec<SlickValue>) ->
 // connection, matching the interpreter's shared transport. Persistent settings
 // (no status-as-error, Slick user agent, no auto Accept/Accept-Encoding) live
 // here; per-request redirects, timeouts, and proxy selection override the
-// cloned agent config via slick_http_run.
+// cloned agent config via slick_http_run. The connector chain is the stock
+// CONNECT-proxy + TCP + rustls path, with TCP replaced by a transport that
+// observes task cancellation while blocked.
 fn slick_http_agent() -> &'static ureq::Agent {
     static SLICK_HTTP_AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     SLICK_HTTP_AGENT.get_or_init(|| {
+        use ureq::unversioned::transport::Connector;
         let config = ureq::config::Config::builder()
             .http_status_as_error(false)
             .user_agent("Slick")
@@ -195,7 +225,11 @@ fn slick_http_agent() -> &'static ureq::Agent {
             .accept_encoding(ureq::config::AutoHeaderValue::None)
             .proxy(None)
             .build();
-        ureq::Agent::new_with_config(config)
+        let connector = ()
+            .chain(ureq::unversioned::transport::ConnectProxyConnector::default())
+            .chain(SlickHttpTcpConnector)
+            .chain(ureq::unversioned::transport::RustlsConnector::default());
+        ureq::Agent::with_parts(config, connector, ureq::unversioned::resolver::DefaultResolver::default())
     })
 }
 
@@ -225,6 +259,243 @@ fn slick_http_run<S: ureq::AsSendBody>(
         .proxy(proxy)
         .build();
     agent.run(request)
+}
+
+// Cancellation flags live in SlickContext. Bind them for the whole request,
+// including body read after slick_http_run returns. Connect, write, and read
+// use short socket timeouts so a sibling scope unwind is observed while the
+// call is blocked; the socket is then shut down so the peer sees disconnect.
+thread_local! {
+    static SLICK_HTTP_CANCEL: std::cell::RefCell<Option<SlickContext>> = std::cell::RefCell::new(None);
+}
+
+struct SlickHttpCancelGuard;
+
+impl Drop for SlickHttpCancelGuard {
+    fn drop(&mut self) {
+        SLICK_HTTP_CANCEL.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+    }
+}
+
+fn slick_http_bind_cancel(context: &SlickContext) -> SlickHttpCancelGuard {
+    SLICK_HTTP_CANCEL.with(|slot| {
+        *slot.borrow_mut() = Some(context.clone());
+    });
+    SlickHttpCancelGuard
+}
+
+fn slick_http_context_cancelled() -> bool {
+    SLICK_HTTP_CANCEL.with(|slot| slot.borrow().as_ref().map(SlickContext::cancelled).unwrap_or(false))
+}
+
+fn slick_http_cancel_io() -> ureq::Error {
+    ureq::Error::Io(std::io::Error::new(std::io::ErrorKind::Interrupted, "HTTP request cancelled"))
+}
+
+const SLICK_HTTP_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(25);
+
+fn slick_http_deadline(timeout: ureq::unversioned::transport::NextTimeout) -> Option<std::time::Instant> {
+    if timeout.after.is_not_happening() {
+        None
+    } else {
+        Some(std::time::Instant::now() + *timeout.after)
+    }
+}
+
+fn slick_http_slice(deadline: Option<std::time::Instant>, reason: ureq::Timeout) -> Result<std::time::Duration, ureq::Error> {
+    if slick_http_context_cancelled() {
+        return Err(slick_http_cancel_io());
+    }
+    let wait = match deadline {
+        Some(deadline) => {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(ureq::Error::Timeout(reason));
+            }
+            if remaining < SLICK_HTTP_CANCEL_POLL { remaining } else { SLICK_HTTP_CANCEL_POLL }
+        }
+        None => SLICK_HTTP_CANCEL_POLL,
+    };
+    if wait.as_millis() == 0 {
+        Ok(std::time::Duration::from_millis(1))
+    } else {
+        Ok(wait)
+    }
+}
+
+#[derive(Debug)]
+struct SlickHttpTcpConnector;
+
+impl<In: ureq::unversioned::transport::Transport> ureq::unversioned::transport::Connector<In> for SlickHttpTcpConnector {
+    type Out = ureq::unversioned::transport::Either<In, SlickHttpTransport>;
+
+    fn connect(
+        &self,
+        details: &ureq::unversioned::transport::ConnectionDetails,
+        chained: Option<In>,
+    ) -> Result<Option<Self::Out>, ureq::Error> {
+        if let Some(transport) = chained {
+            return Ok(Some(ureq::unversioned::transport::Either::A(transport)));
+        }
+        let stream = slick_http_tcp_connect(details)?;
+        let buffers = ureq::unversioned::transport::LazyBuffers::new(
+            details.config.input_buffer_size(),
+            details.config.output_buffer_size(),
+        );
+        Ok(Some(ureq::unversioned::transport::Either::B(SlickHttpTransport { stream: Some(stream), buffers })))
+    }
+}
+
+fn slick_http_tcp_connect(details: &ureq::unversioned::transport::ConnectionDetails) -> Result<std::net::TcpStream, ureq::Error> {
+    let deadline = slick_http_deadline(details.timeout);
+    for addr in &details.addrs {
+        loop {
+            let wait = slick_http_slice(deadline, details.timeout.reason)?;
+            match std::net::TcpStream::connect_timeout(addr, wait) {
+                Ok(stream) => {
+                    if details.config.no_delay() {
+                        if let Err(error) = stream.set_nodelay(true) {
+                            return Err(error.into());
+                        }
+                    }
+                    return Ok(stream);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::TimedOut || error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => break,
+                Err(error) => {
+                    if slick_http_context_cancelled() {
+                        return Err(slick_http_cancel_io());
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
+    }
+    if slick_http_context_cancelled() {
+        return Err(slick_http_cancel_io());
+    }
+    Err(ureq::Error::Io(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "Connection refused")))
+}
+
+struct SlickHttpTransport {
+    stream: Option<std::net::TcpStream>,
+    buffers: ureq::unversioned::transport::LazyBuffers,
+}
+
+impl SlickHttpTransport {
+    fn abort(&mut self) -> ureq::Error {
+        self.stream = None;
+        slick_http_cancel_io()
+    }
+}
+
+impl std::fmt::Debug for SlickHttpTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SlickHttpTransport").finish()
+    }
+}
+
+impl ureq::unversioned::transport::Transport for SlickHttpTransport {
+    fn buffers(&mut self) -> &mut dyn ureq::unversioned::transport::Buffers {
+        &mut self.buffers
+    }
+
+    fn transmit_output(&mut self, amount: usize, timeout: ureq::unversioned::transport::NextTimeout) -> Result<(), ureq::Error> {
+        use std::io::Write;
+        use ureq::unversioned::transport::Buffers;
+        let deadline = slick_http_deadline(timeout);
+        let mut written = 0;
+        while written < amount {
+            if slick_http_context_cancelled() {
+                return Err(self.abort());
+            }
+            let wait = match slick_http_slice(deadline, timeout.reason) {
+                Ok(wait) => wait,
+                Err(error) => {
+                    if slick_http_context_cancelled() {
+                        return Err(self.abort());
+                    }
+                    return Err(error);
+                }
+            };
+            {
+                let Some(stream) = self.stream.as_mut() else { return Err(slick_http_cancel_io()) };
+                if let Err(error) = stream.set_write_timeout(Some(wait)) {
+                    return Err(error.into());
+                }
+            }
+            let output = self.buffers.output();
+            let Some(stream) = self.stream.as_mut() else { return Err(slick_http_cancel_io()) };
+            match stream.write(&output[written..amount]) {
+                Ok(0) => return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "write zero").into()),
+                Ok(count) => written += count,
+                Err(error) if error.kind() == std::io::ErrorKind::TimedOut || error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => {
+                    if slick_http_context_cancelled() {
+                        return Err(self.abort());
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn await_input(&mut self, timeout: ureq::unversioned::transport::NextTimeout) -> Result<bool, ureq::Error> {
+        use std::io::Read;
+        use ureq::unversioned::transport::Buffers;
+        let deadline = slick_http_deadline(timeout);
+        loop {
+            if slick_http_context_cancelled() {
+                return Err(self.abort());
+            }
+            let wait = match slick_http_slice(deadline, timeout.reason) {
+                Ok(wait) => wait,
+                Err(error) => {
+                    if slick_http_context_cancelled() {
+                        return Err(self.abort());
+                    }
+                    return Err(error);
+                }
+            };
+            let Some(stream) = self.stream.as_mut() else { return Err(slick_http_cancel_io()) };
+            if let Err(error) = stream.set_read_timeout(Some(wait)) {
+                return Err(error.into());
+            }
+            let input = self.buffers.input_append_buf();
+            match stream.read(input) {
+                Ok(amount) => {
+                    self.buffers.input_appended(amount);
+                    return Ok(amount > 0);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::TimedOut || error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => {
+                    if slick_http_context_cancelled() {
+                        return Err(self.abort());
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
+    }
+
+    fn is_open(&mut self) -> bool {
+        let Some(stream) = self.stream.as_mut() else { return false };
+        if stream.set_nonblocking(true).is_err() {
+            return false;
+        }
+        let mut buf = [0u8; 1];
+        let open = match std::io::Read::read(stream, &mut buf) {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
+            _ => false,
+        };
+        if stream.set_nonblocking(false).is_err() {
+            return false;
+        }
+        open
+    }
 }
 
 // slick_http_validate mirrors the interpreter's validateHTTPRequest: method

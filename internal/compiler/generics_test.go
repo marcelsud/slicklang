@@ -2,8 +2,6 @@ package compiler_test
 
 import (
 	"errors"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -32,47 +30,10 @@ func runGenerics(t *testing.T, sources ...compiler.Source) string {
 	return output
 }
 
-func buildAndRunGenericsBackend(t *testing.T, backend compiler.Backend, sources ...compiler.Source) string {
-	t.Helper()
-	root := t.TempDir()
-	for _, source := range sources {
-		path := filepath.Join(root, filepath.FromSlash(source.Name))
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatalf("create source directory: %v", err)
-		}
-		if err := os.WriteFile(path, []byte(source.Text), 0o644); err != nil {
-			t.Fatalf("write Slick source: %v", err)
-		}
-	}
-	binary := filepath.Join(t.TempDir(), "app")
-	diagnostics, err := compiler.BuildPathBackend(root, binary, backend)
-	if err != nil {
-		t.Fatalf("build %s binary: %v", backend, err)
-	}
-	assertNoDiagnostics(t, diagnostics)
-	output, err := exec.Command(binary).CombinedOutput()
-	if err != nil {
-		t.Fatalf("run %s binary: %v: %s", backend, err, output)
-	}
-	return strings.TrimSuffix(string(output), "\n")
-}
-
-// runGenericsSourcesEverywhere holds the interpreter, generated-Go, and LLVM
-// backends to one observable result.
+// runGenericsSourcesEverywhere holds every execution engine to one observable result.
 func runGenericsSourcesEverywhere(t *testing.T, sources ...compiler.Source) string {
 	t.Helper()
-	var interpreted string
-	t.Run("interpreter", func(t *testing.T) {
-		interpreted = runGenerics(t, sources...)
-	})
-	for _, backend := range []compiler.Backend{compiler.BackendGo, compiler.BackendLLVM} {
-		t.Run(string(backend), func(t *testing.T) {
-			if output := buildAndRunGenericsBackend(t, backend, sources...); output != interpreted {
-				t.Fatalf("interpreter produced %q, %s produced %q", interpreted, backend, output)
-			}
-		})
-	}
-	return interpreted
+	return runOnEveryEngine(t, writeSlickSources(t, sources...))
 }
 
 func runGenericsEverywhere(t *testing.T, source string) string {

@@ -1,0 +1,5 @@
+use acme.redis.Value
+
+function main() -> bool {
+    Value() == 42
+}

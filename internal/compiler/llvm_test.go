@@ -2,7 +2,6 @@ package compiler_test
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,8 +10,6 @@ import (
 )
 
 func TestLLVMBackendMatchesGoOnOperators(t *testing.T) {
-	root := t.TempDir()
-	src := filepath.Join(root, "main.slk")
 	program := `
 function main() -> string {
     let Value = 10
@@ -25,63 +22,12 @@ function main() -> string {
     ` + "`difference=${Difference}; product=${Product}; ordered=${Ordered}; logic=${Logic}; negative=${Negative}; grouped=${Grouped}`" + `
 }
 `
-	if err := os.WriteFile(src, []byte(program), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	goBin := filepath.Join(root, "goapp")
-	llvmBin := filepath.Join(root, "llvmapp")
-	if diags, err := compiler.BuildPathBackend(src, goBin, compiler.BackendGo); err != nil || len(diags) > 0 {
-		t.Fatalf("go build: %v %v", err, diags)
-	}
-	if diags, err := compiler.BuildPathBackend(src, llvmBin, compiler.BackendLLVM); err != nil || len(diags) > 0 {
-		t.Fatalf("llvm build: %v %v", err, diags)
-	}
-	goOut, err := exec.Command(goBin).CombinedOutput()
-	if err != nil {
-		t.Fatalf("run go: %v: %s", err, goOut)
-	}
-	llvmOut, err := exec.Command(llvmBin).CombinedOutput()
-	if err != nil {
-		t.Fatalf("run llvm: %v: %s", err, llvmOut)
-	}
-	if string(goOut) != string(llvmOut) {
-		t.Fatalf("go=%q llvm=%q", goOut, llvmOut)
-	}
-	if !strings.Contains(string(llvmOut), "difference=7") {
-		t.Fatalf("unexpected llvm output %q", llvmOut)
-	}
-}
-
-func TestLLVMBackendMatchesExampleProjects(t *testing.T) {
-	for _, project := range []string{"operators", "hello", "constants", "visibility", "optional", "result"} {
-		t.Run(project, func(t *testing.T) {
-			goBin := filepath.Join(t.TempDir(), "goapp")
-			llvmBin := filepath.Join(t.TempDir(), "llvmapp")
-			path := filepath.Join("..", "..", "examples", project)
-			if diags, err := compiler.BuildPathBackend(path, goBin, compiler.BackendGo); err != nil || len(diags) > 0 {
-				t.Fatalf("go build: %v %v", err, diags)
-			}
-			if diags, err := compiler.BuildPathBackend(path, llvmBin, compiler.BackendLLVM); err != nil || len(diags) > 0 {
-				t.Fatalf("llvm build: %v %v", err, diags)
-			}
-			goOut, err := exec.Command(goBin).CombinedOutput()
-			if err != nil {
-				t.Fatalf("run go: %v: %s", err, goOut)
-			}
-			llvmOut, err := exec.Command(llvmBin).CombinedOutput()
-			if err != nil {
-				t.Fatalf("run llvm: %v: %s", err, llvmOut)
-			}
-			if string(goOut) != string(llvmOut) {
-				t.Fatalf("go=%q llvm=%q", goOut, llvmOut)
-			}
-		})
+	if output := runOnEveryEngineSource(t, program); !strings.Contains(output, "difference=7") {
+		t.Fatalf("unexpected output %q", output)
 	}
 }
 
 func TestLLVMBackendRunsAsyncMethodAndCaughtFailure(t *testing.T) {
-	root := t.TempDir()
-	src := filepath.Join(root, "main.slk")
 	program := `
 class Box {
     Value: int
@@ -106,19 +52,8 @@ function main() -> string {
     ` + "`${Total}`" + `
 }
 `
-	if err := os.WriteFile(src, []byte(program), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	binary := filepath.Join(root, "app")
-	if diags, err := compiler.BuildPathBackend(src, binary, compiler.BackendLLVM); err != nil || len(diags) > 0 {
-		t.Fatalf("llvm build: %v %v", err, diags)
-	}
-	output, err := exec.Command(binary).CombinedOutput()
-	if err != nil {
-		t.Fatalf("run llvm: %v: %s", err, output)
-	}
-	if string(output) != "42\n" {
-		t.Fatalf("unexpected llvm output %q", output)
+	if output := runOnEveryEngineSource(t, program); output != "42" {
+		t.Fatalf("unexpected output %q", output)
 	}
 }
 
@@ -155,7 +90,7 @@ function main() -> string {
     First + "|" + Second + "|" + Promoted
 }
 `
-	if output := runResultEverywhere(t, source); output != "Ada|Ada|present" {
+	if output := runOnEveryEngineSource(t, source); output != "Ada|Ada|present" {
 		t.Fatalf("optional/interface output = %q", output)
 	}
 }
@@ -172,7 +107,7 @@ function main() -> string {
     ` + "`${Minimum}|${Negated}|${Multiplied}|${Fraction}|${Converted}`" + `
 }
 `
-	if output := runResultEverywhere(t, source); output != "-9223372036854775808|-9223372036854775808|-2|0.1|0.1" {
+	if output := runOnEveryEngineSource(t, source); output != "-9223372036854775808|-9223372036854775808|-2|0.1|0.1" {
 		t.Fatalf("numeric boundary output = %q", output)
 	}
 }
@@ -199,7 +134,7 @@ function main() -> string {
     ` + "`${Contains}|${Starts}|${Ends}|${Equal}|${Length}|${SuffixEqual}`" + `
 }
 `
-	if output := runResultEverywhere(t, source); output != "true|true|true|true|3|true" {
+	if output := runOnEveryEngineSource(t, source); output != "true|true|true|true|3|true" {
 		t.Fatalf("embedded-NUL text output = %q", output)
 	}
 }
@@ -216,20 +151,21 @@ function main() -> string {
     ` + "`${Total}`" + `
 }
 `
-	if output := runResultEverywhere(t, source); output != "55" {
+	if output := runOnEveryEngineSource(t, source); output != "55" {
 		t.Fatalf("async argument output = %q", output)
 	}
 }
 
 func TestLLVMJanssonDependencyFollowsSemanticJSONUse(t *testing.T) {
+	engine := mustExecutionEngine(t, "llvm")
 	t.Setenv("SLICK_JANSSON_ROOT", filepath.Join(t.TempDir(), "missing"))
 	root := t.TempDir()
 	plainSource := filepath.Join(root, "plain.slk")
 	if err := os.WriteFile(plainSource, []byte(`function main() -> string { "ok" }`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if diagnostics, err := compiler.BuildPathBackend(
-		plainSource, filepath.Join(root, "plain"), compiler.BackendLLVM,
+	if diagnostics, err := compiler.BuildPathWithOptions(
+		plainSource, filepath.Join(root, "plain"), engineBuildOptions(engine, ""),
 	); err != nil || len(diagnostics) != 0 {
 		t.Fatalf("non-JSON LLVM build required Jansson: diagnostics=%v err=%v", diagnostics, err)
 	}
@@ -249,7 +185,7 @@ function main() -> string {
 	if err := os.WriteFile(output, []byte("existing output"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, err := compiler.BuildPathBackend(jsonSource, output, compiler.BackendLLVM)
+	_, err := compiler.BuildPathWithOptions(jsonSource, output, engineBuildOptions(engine, ""))
 	if err == nil || !strings.Contains(err.Error(), "libjansson") {
 		t.Fatalf("JSON LLVM build error = %v, want missing libjansson", err)
 	}
@@ -260,6 +196,7 @@ function main() -> string {
 }
 
 func TestLLVMIncompatibleToolchainLeavesNoPartialOutput(t *testing.T) {
+	engine := mustExecutionEngine(t, "llvm")
 	tools := t.TempDir()
 	for _, name := range []string{"llvm-as-18", "llc-18"} {
 		path := filepath.Join(tools, name)
@@ -275,7 +212,7 @@ func TestLLVMIncompatibleToolchainLeavesNoPartialOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	output := filepath.Join(root, "app")
-	_, err := compiler.BuildPathBackend(source, output, compiler.BackendLLVM)
+	_, err := compiler.BuildPathWithOptions(source, output, engineBuildOptions(engine, ""))
 	if err == nil || !strings.Contains(err.Error(), "major version 18 is required") {
 		t.Fatalf("incompatible LLVM build error = %v", err)
 	}

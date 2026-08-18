@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "name": "root.application",
+  "source": "src",
+  "dependencies": [
+    {
+      "name": "acme.redis",
+      "version": "2.1.0",
+      "path": "../redis-package"
+    }
+  ]
+}
