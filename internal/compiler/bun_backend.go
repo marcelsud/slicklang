@@ -67,33 +67,10 @@ const bunLockfile = `{
 }
 `
 
-const bunRuntimeModule = `export function slickWrapInt(value) {
-  return BigInt.asIntN(64, value);
-}
-
-export function slickFormatFloat(value) {
-  if (Number.isNaN(value)) return "NaN";
-  if (value === Infinity) return "+Inf";
-  if (value === -Infinity) return "-Inf";
-  if (Object.is(value, -0)) return "-0";
-  const magnitude = Math.abs(value);
-  if (value === 0 || (magnitude >= 1e-4 && magnitude < 1e6)) return String(value);
-  const [mantissa, rawExponent] = value.toExponential().split("e");
-  const exponent = Number(rawExponent);
-  const sign = exponent < 0 ? "-" : "+";
-  const digits = String(Math.abs(exponent));
-  return mantissa + "e" + sign + (digits.length < 2 ? "0" + digits : digits);
-}
-
-export function slickWrite(value) {
-  process.stdout.write(value);
-}
-`
-
 func bunBackendDriver() backendDriver {
 	return backendDriver{
 		checkCore: func(input backendDriverInput) error {
-			return validatePrimitiveCore(input.core, input.runtime, "Bun")
+			return validateBunCore(input.core, input.runtime)
 		},
 		validate: validateBunToolchain,
 		emit: func(input backendDriverInput, workspace string) (backendEmission, error) {
