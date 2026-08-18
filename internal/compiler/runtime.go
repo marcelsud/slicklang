@@ -7,7 +7,31 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
+
+type runtimeStepBudgetKey struct{}
+
+type runtimeStepBudget struct {
+	remaining atomic.Int64
+}
+
+func withRuntimeStepBudget(ctx context.Context, steps int64) context.Context {
+	budget := &runtimeStepBudget{}
+	budget.remaining.Store(steps)
+	return context.WithValue(ctx, runtimeStepBudgetKey{}, budget)
+}
+
+func consumeRuntimeStep(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	budget, _ := ctx.Value(runtimeStepBudgetKey{}).(*runtimeStepBudget)
+	if budget != nil && budget.remaining.Add(-1) < 0 {
+		return errors.New("execution step limit exceeded")
+	}
+	return nil
+}
 
 type runtimeValue struct {
 	typ       string
@@ -461,6 +485,9 @@ func (p *program) invokeFunction(ctx context.Context, function *functionDecl, ar
 	if err := checkTaskCancellation(ctx); err != nil {
 		return runtimeValue{}, err
 	}
+	if err := consumeRuntimeStep(ctx); err != nil {
+		return runtimeValue{}, err
+	}
 	if len(args) != len(function.params) {
 		return runtimeValue{}, fmt.Errorf("%s expects %d arguments, found %d", function.qualified, len(function.params), len(args))
 	}
@@ -545,6 +572,9 @@ func (p *program) evalBlock(block *blockNode, frame *runtimeFrame) (last runtime
 }
 
 func (p *program) evalStatement(statement statementNode, frame *runtimeFrame) (runtimeValue, error) {
+	if err := consumeRuntimeStep(frame.ctx); err != nil {
+		return runtimeValue{}, err
+	}
 	switch node := statement.(type) {
 	case *letStatement:
 		value, err := p.evalExpression(node.value, frame)
@@ -1192,6 +1222,9 @@ func (p *program) evalFor(node *forStatement, frame *runtimeFrame) (runtimeValue
 		return runtimeValue{}, runtimeError(node.pos, "%v", err)
 	}
 	for index := 0; index < length; index++ {
+		if err := consumeRuntimeStep(frame.ctx); err != nil {
+			return runtimeValue{}, err
+		}
 		if err := checkTaskCancellation(frame.ctx); err != nil {
 			return runtimeValue{}, err
 		}

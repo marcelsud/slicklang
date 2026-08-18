@@ -62,6 +62,14 @@ Names beginning with an uppercase letter are public across namespaces. Lowercase
 
 `async`, `await`, and `effects` are reserved and cannot name a declaration.
 
+Package-aware projects keep application declarations under `root` and load each dependency under its canonical manifest name, such as `acme.redis`. Import public package declarations with an exact canonical path:
+
+```slk
+use acme.redis.Client
+```
+
+Slick source never names a Go, Rust, LLVM, Bun, sidecar, or other implementation provider. `slick build` selects the package adapter declared for the whole-program backend and target; changing that backend does not change application source.
+
 ## Classes, interfaces, and methods
 
 Methods may be implemented inline, or declared bodyless and completed by a detached implementation:

@@ -1468,10 +1468,29 @@ func (p *program) undocumentedStandardLibrarySymbols() []string {
 	return sortedKeys(undocumented)
 }
 
-// isAbsoluteCanonicalName is the single namespace boundary shared by user
-// project declarations and compiler-owned standard-library declarations.
 func isAbsoluteCanonicalName(name string) bool {
 	return strings.HasPrefix(name, "root.") || strings.HasPrefix(name, "std.")
+}
+
+func (p *program) isAbsoluteCanonicalName(name string) bool {
+	if isAbsoluteCanonicalName(name) {
+		return true
+	}
+	for namespace := range p.packageNamespaces {
+		if name == namespace || strings.HasPrefix(name, namespace+".") {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *program) packageNamespace(name string) (string, bool) {
+	for namespace := range p.packageNamespaces {
+		if name == namespace || strings.HasPrefix(name, namespace+".") {
+			return namespace, true
+		}
+	}
+	return "", false
 }
 
 func (p *program) callNativeFunction(function *functionDecl, frame *runtimeFrame, typeArgs []string) (runtimeValue, error) {

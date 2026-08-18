@@ -229,16 +229,74 @@ func BuildPathBackend(path, output string, backend Backend) ([]Diagnostic, error
 
 // BuildPathWithOptions compiles with an explicit alpha policy.
 func BuildPathWithOptions(path, output string, options BuildOptions) ([]Diagnostic, error) {
-	sources, err := loadSources(path)
+	project, err := isPackageProject(path)
 	if err != nil {
 		return nil, err
 	}
-	return BuildSourcesWithOptions(sources, output, options)
+	if !project {
+		sources, err := loadSources(path)
+		if err != nil {
+			return nil, err
+		}
+		return BuildSourcesWithOptions(sources, output, options)
+	}
+	backend, _, target, err := resolveBackendSelection(options)
+	if err != nil {
+		return nil, err
+	}
+	loaded, err := loadPackageProject(path, &packageBuildSelection{
+		backend: backend, target: target.name, allowAlpha: options.AllowAlpha,
+	}, options.AllowAlpha)
+	if err != nil {
+		return nil, err
+	}
+	var lockGuard *packageLockGuard
+	if loaded.lockData != nil {
+		lockGuard, err = acquirePackageLock(loaded.lockPath, loaded.lockBase)
+		if err != nil {
+			return nil, fmt.Errorf("prepare package lock: %w", err)
+		}
+		defer lockGuard.release()
+	}
+	diagnostics, err := BuildSourcesWithOptions(loaded.sources, output, options)
+	if err != nil || len(diagnostics) > 0 {
+		return diagnostics, err
+	}
+	if lockGuard != nil {
+		if err := lockGuard.write(loaded.lockData); err != nil {
+			return nil, fmt.Errorf("write package lock: %w", err)
+		}
+	}
+	return nil, nil
 }
 
 // BuildSourcesBackend compiles loaded sources and rejects alpha backends.
 func BuildSourcesBackend(sources []Source, output string, backend Backend) ([]Diagnostic, error) {
 	return BuildSourcesWithOptions(sources, output, BuildOptions{Backend: backend})
+}
+
+func resolveBackendSelection(options BuildOptions) (Backend, backendRegistration, backendTargetRegistration, error) {
+	backend := options.Backend
+	if backend == "" {
+		backend = BackendGo
+	}
+	declaration, ok := backendRegistrationFor(backend)
+	if !ok {
+		return "", backendRegistration{}, backendTargetRegistration{}, fmt.Errorf("unknown backend %q", backend)
+	}
+	if declaration.stability == StabilityAlpha && !options.AllowAlpha {
+		return "", backendRegistration{}, backendTargetRegistration{},
+			fmt.Errorf("backend %s is alpha; pass --allow-alpha to use it", backend)
+	}
+	target, err := backendTargetFor(declaration, options.Target)
+	if err != nil {
+		return "", backendRegistration{}, backendTargetRegistration{}, err
+	}
+	if target.stability == StabilityAlpha && !options.AllowAlpha {
+		return "", backendRegistration{}, backendTargetRegistration{},
+			fmt.Errorf("backend %s target %s is alpha; pass --allow-alpha to use it", backend, target.name)
+	}
+	return backend, declaration, target, nil
 }
 
 // BuildSourcesWithOptions validates governance and the selected driver before
@@ -247,23 +305,18 @@ func BuildSourcesWithOptions(sources []Source, output string, options BuildOptio
 	if err := validateStabilityRegistries(); err != nil {
 		return nil, err
 	}
-	backend := options.Backend
-	if backend == "" {
-		backend = BackendGo
-	}
-	declaration, ok := backendRegistrationFor(backend)
-	if !ok {
-		return nil, fmt.Errorf("unknown backend %q", backend)
-	}
-	if declaration.stability == StabilityAlpha && !options.AllowAlpha {
-		return nil, fmt.Errorf("backend %s is alpha; pass --allow-alpha to use it", backend)
-	}
-	target, err := backendTargetFor(declaration, options.Target)
+	backend, declaration, target, err := resolveBackendSelection(options)
 	if err != nil {
 		return nil, err
 	}
-	if target.stability == StabilityAlpha && !options.AllowAlpha {
-		return nil, fmt.Errorf("backend %s target %s is alpha; pass --allow-alpha to use it", backend, target.name)
+	for _, source := range sources {
+		if source.Package == "" {
+			continue
+		}
+		if source.packageBackend != backend || source.packageTarget != target.name {
+			return nil, fmt.Errorf("package source %s is not resolved for backend %s target %s; use BuildPathWithOptions on its project",
+				source.Package, backend, target.name)
+		}
 	}
 
 	program, diagnostics := compile(sources)

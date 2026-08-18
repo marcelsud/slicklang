@@ -268,6 +268,9 @@ func (p *program) canonicalTypeName(namespace string, aliases map[string]aliasDe
 	if p.classDeclaration(qualified) != nil || p.interfaceDeclaration(qualified) != nil || p.unions[qualified] != nil {
 		return qualified
 	}
+	if strings.Contains(name, ".") {
+		return qualified
+	}
 	return name
 }
 
@@ -287,6 +290,9 @@ func (p *program) canonicalGenericBase(namespace string, aliases map[string]alia
 	}
 	qualified := qualify(namespace, base)
 	if p.classDeclaration(qualified) != nil || p.interfaceDeclaration(qualified) != nil || p.unions[qualified] != nil {
+		return qualified
+	}
+	if strings.Contains(base, ".") {
 		return qualified
 	}
 	return base
