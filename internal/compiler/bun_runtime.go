@@ -190,6 +190,13 @@ export async function slickInvoke(context, request) {
   if (request.kind === "method") {
     return await slickCallMethod(context, request.receiver, request.target, request.arguments);
   }
+  if (request.kind === "operation") {
+    const operation = slickProgram.operations[request.target];
+    if (operation === undefined) {
+      throw SlickFailure.host("unknown standard-library operation " + request.target);
+    }
+    return await operation(context, request.arguments);
+  }
   const target = slickProgram.functions[request.target];
   if (target === undefined) throw SlickFailure.host("unknown function " + request.target);
   return await target(context, null, request.arguments);
@@ -243,17 +250,116 @@ function slickSpawn(cancellations, request) {
   const encoded = slickEncodeRequest(request);
   let worker;
   try {
-    worker = new Worker(slickProgram.moduleUrl, { workerData: { request: encoded, cancellations } });
+    worker = new Worker(slickProgram.moduleUrl, {
+      workerData: { request: encoded, cancellations, environment: slickEnvironmentChanges() },
+    });
   } catch (error) {
     throw SlickFailure.host("launch child task: " + String(error));
   }
   const child = { worker, awaited: false, settled: null, terminated: false };
   child.promise = new Promise((resolve) => {
-    worker.on("message", (message) => resolve({ message }));
+    worker.on("message", (message) => {
+      // A worker reaches an owner-held resource through this channel, so a
+      // task-safe handle such as a database works from any scope.
+      if (message !== null && typeof message === "object" && message.rpc !== undefined) {
+        slickOwnerServe(worker, message.rpc);
+        return;
+      }
+      resolve({ message });
+    });
     worker.on("error", (error) => resolve({ error: SlickFailure.host("child task failed: " + String(error)) }));
     worker.on("exit", (code) => resolve({ error: SlickFailure.host("child task exited with status " + code) }));
   });
   return child;
+}
+
+// Owner-held resources live in the process that created them. Every kind
+// registers one handler, and a worker call is forwarded to that handler.
+const slickOwners = new Map();
+let slickOwnerSequence = 1;
+const slickOwnerPending = new Map();
+let slickOwnerRequestSequence = 1;
+
+export class SlickOwnedResource {
+  constructor(kind, id) { this.kind = kind; this.id = id; }
+}
+
+export function slickOwnerRegister(kind, handler) {
+  slickOwners.set(kind, handler);
+}
+
+export function slickOwnerCreate(kind, state) {
+  const owner = slickOwners.get(kind);
+  if (owner === undefined) throw SlickFailure.host("no owner registered for " + kind);
+  slickOwnerSequence += 1;
+  owner.states.set(slickOwnerSequence, state);
+  return new SlickOwnedResource(kind, slickOwnerSequence);
+}
+
+export function slickOwnerState(handle) {
+  const owner = slickOwners.get(handle.kind);
+  return owner === undefined ? undefined : owner.states.get(handle.id);
+}
+
+export function slickOwnerRelease(handle) {
+  const owner = slickOwners.get(handle.kind);
+  if (owner !== undefined) owner.states.delete(handle.id);
+}
+
+// slickOwnerCall runs a method against an owner-held resource: directly when the
+// caller owns it, and over the worker channel otherwise. The caller's
+// cancellation buffers travel with the request so the owning thread can observe
+// cancellation of work it performs on the caller's behalf.
+export async function slickOwnerCall(handle, method, args, context) {
+  const buffers = context === undefined ? [] : context.buffers;
+  const owner = slickOwners.get(handle.kind);
+  // The owning thread answers even when the state is gone, so a released handle
+  // reports the family's documented closed result instead of a host fault.
+  if (owner !== undefined && (owner.states.has(handle.id) || isMainThread)) {
+    return await owner.invoke(handle, method, args, new SlickContext(buffers));
+  }
+  if (isMainThread) throw SlickFailure.host("resource " + handle.kind + " is not available");
+  return await slickOwnerRequest({
+    kind: handle.kind, handle: handle.id, method,
+    args: args.map(slickEncode), cancellations: buffers,
+  });
+}
+
+// A resource opened inside a task worker must outlive that worker, so creation
+// runs on the owning thread and only the opaque handle travels back.
+export async function slickOwnerFactory(kind, factory, args) {
+  if (isMainThread) {
+    const owner = slickOwners.get(kind);
+    if (owner === undefined) throw SlickFailure.host("no owner registered for " + kind);
+    return await owner.create(factory, args);
+  }
+  return await slickOwnerRequest({ kind, factory, args: args.map(slickEncode) });
+}
+
+async function slickOwnerRequest(payload) {
+  const id = slickOwnerRequestSequence++;
+  const reply = new Promise((resolve) => slickOwnerPending.set(id, resolve));
+  parentPort.postMessage({ rpc: { id, ...payload } });
+  const answer = await reply;
+  if (answer.ok) return slickDecode(answer.value);
+  throw slickDecodeFailure(answer.failure);
+}
+
+async function slickOwnerServe(worker, request) {
+  let answer;
+  try {
+    const args = request.args.map(slickDecode);
+    const value = request.factory !== undefined
+      ? await slickOwnerFactory(request.kind, request.factory, args)
+      : await slickOwnerCall(
+        new SlickOwnedResource(request.kind, request.handle), request.method, args,
+        new SlickContext(request.cancellations === undefined ? [] : request.cancellations),
+      );
+    answer = { id: request.id, ok: true, value: slickEncode(value) };
+  } catch (error) {
+    answer = { id: request.id, ok: false, failure: slickEncodeFailure(slickAsFailure(error)) };
+  }
+  worker.postMessage({ rpcReply: answer });
 }
 
 // A worker is terminated exactly once: repeating the request never settles.
@@ -268,8 +374,22 @@ async function slickJoin(child) {
   await slickTerminate(child);
   if (child.settled.error !== undefined) throw child.settled.error;
   const message = child.settled.message;
+  slickEnvironmentMerge(message.environment);
   if (message.ok) return slickDecode(message.value);
   throw slickDecodeFailure(message.failure);
+}
+
+// A worker consumes owner replies on its own port; every other message is a
+// launch payload the runtime already handled.
+export function slickOwnerListen() {
+  if (isMainThread) return;
+  parentPort.on("message", (message) => {
+    if (message === null || typeof message !== "object" || message.rpcReply === undefined) return;
+    const resolve = slickOwnerPending.get(message.rpcReply.id);
+    if (resolve === undefined) return;
+    slickOwnerPending.delete(message.rpcReply.id);
+    resolve(message.rpcReply);
+  });
 }
 
 // Only task-safe values cross a worker boundary: mutable buffers and opaque
@@ -291,7 +411,20 @@ export function slickEncode(value) {
     return { k: "optional", present: value.present, v: value.present ? slickEncode(value.value) : null };
   }
   if (value instanceof SlickResult) return { k: "result", ok: value.ok, v: slickEncode(value.value) };
+  // A bare owner handle crosses a boundary on its own when a factory creates a
+  // resource for another thread; only the opaque identity travels.
+  if (value instanceof SlickOwnedResource) return { k: "owned", kind: value.kind, id: value.id };
   if (value instanceof SlickObject) {
+    // An owner-held resource is task-safe: only its opaque owner identity
+    // crosses the boundary, never a host object.
+    if (value.resource instanceof SlickOwnedResource) {
+      const fields = [];
+      for (const [name, field] of value.fields) fields.push([name, slickEncode(field)]);
+      return {
+        k: "object", type: value.typeName, fields, message: value.message,
+        owned: { kind: value.resource.kind, id: value.resource.id },
+      };
+    }
     if (value.resource !== null) {
       throw SlickFailure.host("resource " + value.typeName + " is not task-safe");
     }
@@ -317,6 +450,7 @@ export function slickEncode(value) {
 export function slickDecode(encoded) {
   switch (encoded.k) {
     case "null": return null;
+    case "owned": return new SlickOwnedResource(encoded.kind, encoded.id);
     case "bool": return encoded.v;
     case "int": return BigInt(encoded.v);
     case "float": return encoded.v;
@@ -324,10 +458,17 @@ export function slickDecode(encoded) {
     case "bytes": return new Uint8Array(encoded.v);
     case "array": return encoded.v.map(slickDecode);
     case "tuple": return new SlickTuple(encoded.v.map(slickDecode));
+    case "range": return new SlickRange(BigInt(encoded.start), BigInt(encoded.end));
+    case "map": return new SlickMap(encoded.v.map(([key, value]) => [slickDecode(key), slickDecode(value)]));
+    case "optional": return encoded.present ? new SlickOptional(true, slickDecode(encoded.v)) : slickAbsent;
+    case "result": return new SlickResult(encoded.ok, slickDecode(encoded.v));
     case "object": {
       const fields = new Map();
       for (const [name, value] of encoded.fields) fields.set(name, slickDecode(value));
-      return new SlickObject(encoded.type, fields, null, encoded.message);
+      const owned = encoded.owned === undefined
+        ? null
+        : new SlickOwnedResource(encoded.owned.kind, encoded.owned.id);
+      return new SlickObject(encoded.type, fields, owned, encoded.message);
     }
     case "union":
       return new SlickUnion(encoded.type, encoded.variant, encoded.tag, encoded.fields.map(slickDecode));
@@ -468,6 +609,12 @@ export function slickEqual(left, right) {
   if (left instanceof SlickObject) {
     if (!(right instanceof SlickObject)) return false;
     if (left.resource !== null || right.resource !== null) {
+      if (left.resource instanceof SlickOwnedResource || right.resource instanceof SlickOwnedResource) {
+        // An owner handle survives a worker boundary as a copy, so the opaque
+        // owner identity, not the JS object, decides equality.
+        return left.resource instanceof SlickOwnedResource && right.resource instanceof SlickOwnedResource
+          && left.resource.kind === right.resource.kind && left.resource.id === right.resource.id;
+      }
       return left.resource !== null && left.resource === right.resource;
     }
     if (left.typeName !== right.typeName || left.fields.size !== right.fields.size) return false;
@@ -758,29 +905,209 @@ function slickWriteError(text) {
   process.stderr.write(text);
 }
 
+// slickRunTask executes one launched request in a worker and reports the result,
+// the failure, and only the environment changes this worker made.
+async function slickRunTask() {
+  let message;
+  try {
+    slickEnvironmentAdopt(workerData.environment);
+    const request = slickDecodeRequest(workerData.request);
+    const value = await slickInvoke(new SlickContext(workerData.cancellations), request);
+    message = { ok: true, value: slickEncode(value), environment: slickEnvironmentMutations() };
+  } catch (error) {
+    message = {
+      ok: false,
+      failure: slickEncodeFailure(slickAsFailure(error)),
+      environment: slickEnvironmentMutations(),
+    };
+  }
+  parentPort.postMessage(message);
+}
+
 export async function slickRun(moduleUrl, program) {
   slickInstall(moduleUrl, program);
   if (!isMainThread) {
-    let message;
-    try {
-      const request = slickDecodeRequest(workerData.request);
-      const value = await slickInvoke(new SlickContext(workerData.cancellations), request);
-      message = { ok: true, value: slickEncode(value) };
-    } catch (error) {
-      message = { ok: false, failure: slickEncodeFailure(slickAsFailure(error)) };
-    }
-    parentPort.postMessage(message);
+    // A worker receives messages only after its module finishes evaluating, so
+    // the task body is scheduled instead of awaited here. Without this, a task
+    // that reaches an owner-held resource would wait for a reply the worker
+    // cannot yet observe.
+    slickOwnerListen();
+    setTimeout(() => { void slickRunTask(); }, 0);
     return;
   }
   try {
+    const args = [];
+    if (slickProgram.entry === "arguments") {
+      args.push(process.argv.slice(2).map((argument) => argument));
+    }
     const value = await slickInvoke(new SlickContext([]), {
-      kind: "function", target: "root.main", arguments: [],
+      kind: "function", target: "root.main", arguments: args,
     });
+    if (slickProgram.status === true) {
+      // A command-line main writes its exact bytes before the exit code is
+      // validated, so a Status always produces the output it asked for.
+      const output = slickField(value, "Output");
+      const errorOutput = slickField(value, "ErrorOutput");
+      const code = slickField(value, "ExitCode");
+      if (output instanceof Uint8Array) process.stdout.write(output);
+      if (errorOutput instanceof Uint8Array) process.stderr.write(errorOutput);
+      const exit = typeof code === "bigint" ? code : 0n;
+      if (exit < 0n || exit > 255n) {
+        slickWriteError("std.process.Status ExitCode must be 0 through 255, found " + exit + "\n");
+        process.exit(1);
+      }
+      process.exit(Number(exit));
+    }
     const text = slickFormat(value);
     if (text.length !== 0) slickWrite(text + "\n");
   } catch (error) {
     slickWriteError(slickFailureText(slickAsFailure(error)) + "\n");
     process.exit(1);
   }
+}
+
+// Every standard-library family shares these helpers: argument decoding,
+// documented failure construction, owned native resources, and the
+// compiler-owned environment overlay.
+export class SlickNativeResource {
+  constructor(state) { this.state = state; }
+}
+
+export function slickResourceNew(state) {
+  return new SlickNativeResource(state);
+}
+
+export function slickResourceObject(typeName, fields, resource) {
+  return new SlickObject(typeName, new Map(fields), resource);
+}
+
+export function slickStdObject(typeName, fields) {
+  return new SlickObject(typeName, new Map(fields), null);
+}
+
+export function slickOk(value) {
+  return new SlickResult(true, value);
+}
+
+export function slickErr(value) {
+  return new SlickResult(false, value);
+}
+
+export function slickArg(args, index) {
+  return index < args.length ? args[index] : null;
+}
+
+export function slickArgString(args, index) {
+  const value = slickArg(args, index);
+  if (typeof value !== "string") {
+    throw SlickFailure.host("standard-library argument " + index + " is " + slickTypeName(value) + " and not string");
+  }
+  return value;
+}
+
+export function slickArgInt(args, index) {
+  const value = slickArg(args, index);
+  if (typeof value !== "bigint") {
+    throw SlickFailure.host("standard-library argument " + index + " is " + slickTypeName(value) + " and not int");
+  }
+  return value;
+}
+
+export function slickArgFloat(args, index) {
+  const value = slickArg(args, index);
+  if (typeof value !== "number") {
+    throw SlickFailure.host("standard-library argument " + index + " is " + slickTypeName(value) + " and not float");
+  }
+  return value;
+}
+
+export function slickArgBool(args, index) {
+  const value = slickArg(args, index);
+  if (typeof value !== "boolean") {
+    throw SlickFailure.host("standard-library argument " + index + " is " + slickTypeName(value) + " and not bool");
+  }
+  return value;
+}
+
+export function slickArgBytes(args, index) {
+  const value = slickArg(args, index);
+  if (!(value instanceof Uint8Array)) {
+    throw SlickFailure.host("standard-library argument " + index + " is " + slickTypeName(value) + " and not bytes");
+  }
+  return value;
+}
+
+export function slickArgValues(args, index) {
+  const value = slickArg(args, index);
+  if (Array.isArray(value)) return value;
+  if (value instanceof SlickTuple) return value.values;
+  throw SlickFailure.host("standard-library argument " + index + " is " + slickTypeName(value) + " and not array");
+}
+
+export function slickArgEntries(args, index) {
+  const value = slickArg(args, index);
+  if (!(value instanceof SlickMap)) {
+    throw SlickFailure.host("standard-library argument " + index + " is " + slickTypeName(value) + " and not Map");
+  }
+  return value.entries;
+}
+
+export function slickArgOptional(args, index) {
+  const value = slickArg(args, index);
+  if (value instanceof SlickOptional) return value.present ? value.value : undefined;
+  return value === null ? undefined : value;
+}
+
+// A native resource method must survive an object literal of its class, whose
+// state is absent.
+export function slickArgResource(args, index) {
+  let value = slickArg(args, index);
+  if (value instanceof SlickOptional && value.present) value = value.value;
+  if (value instanceof SlickObject && value.resource instanceof SlickNativeResource) return value.resource;
+  return null;
+}
+
+export function slickArgField(args, index, name) {
+  return slickField(slickArg(args, index), name);
+}
+
+// std.env.Set and std.env.Unset record their effect in a compiler-owned overlay
+// instead of mutating the host environment. A worker adopts its parent's
+// recorded state at launch and reports back only what it changed itself, so a
+// no-op child never rolls back a parent assignment.
+const slickEnvironmentOverlay = new Map();
+const slickEnvironmentDirty = new Set();
+
+export function slickEnvironmentRecord(name, value) {
+  slickEnvironmentOverlay.set(name, value);
+  slickEnvironmentDirty.add(name);
+}
+
+export function slickEnvironmentRead(name) {
+  if (slickEnvironmentOverlay.has(name)) return slickEnvironmentOverlay.get(name);
+  const value = process.env[name];
+  return value === undefined ? null : value;
+}
+
+export function slickEnvironmentChanges() {
+  return Array.from(slickEnvironmentOverlay.entries());
+}
+
+export function slickEnvironmentMutations() {
+  const mutations = [];
+  for (const name of slickEnvironmentDirty) mutations.push([name, slickEnvironmentOverlay.get(name)]);
+  return mutations;
+}
+
+export function slickEnvironmentAdopt(changes) {
+  if (!Array.isArray(changes)) return;
+  for (const [name, value] of changes) slickEnvironmentOverlay.set(name, value);
+}
+
+// A joined child's mutations become this scope's own, so a mutation made deep in
+// a task subtree keeps travelling upward instead of stopping at the first join.
+export function slickEnvironmentMerge(changes) {
+  if (!Array.isArray(changes)) return;
+  for (const [name, value] of changes) slickEnvironmentRecord(name, value);
 }
 `

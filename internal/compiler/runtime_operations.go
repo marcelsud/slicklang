@@ -237,7 +237,8 @@ var (
 	// The Rust backend advertises only the operations its generator emits, so an
 	// unimplemented family fails before any toolchain work.
 	rustRuntimeOperations = rustImplementedRuntimeOperations()
-	bunRuntimeOperations  = runtimeOperationTable{}
+	// The Bun backend advertises only the operations its generator emits.
+	bunRuntimeOperations = bunImplementedRuntimeOperations()
 )
 
 func rustImplementedRuntimeOperations() runtimeOperationTable {
